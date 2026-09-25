@@ -75,8 +75,14 @@ designs, and obtain Oren's approval.
 
 Batch related safe work into meaningful units.
 
-For a meaningful state/config batch:
-- create one verified restorable checkpoint before the batch;
+For a meaningful Git-managed source/docs/tests/repository-config batch:
+- require a verified pre-change Git commit/branch as the source rollback point;
+- use Git diff/history/commits for source evidence and rollback; do not duplicate
+  Git-managed source into Benson checkpoints.
+
+For a meaningful runtime/config/state/package batch:
+- create one verified restorable Benson checkpoint before the batch for artifacts
+  that Git cannot safely restore;
 - use targeted tests while editing;
 - run broader affected validation once when the batch is ready;
 - validate OpenClaw config before runtime exposure when relevant;
@@ -104,8 +110,12 @@ E2E, or blocker. Do not stop only for routine progress narration.
 ## Backup, failure, and rollback
 
 Before destructive, state-changing, config-changing, or structurally significant
-work, create the verified checkpoint required by the bounded batch outside
-active canonical directories. Never remove the last known-good recoverable copy.
+work, establish a verified rollback point. For Git-managed source, docs, tests,
+and repository configuration, use the verified pre-change Git commit/branch.
+For active runtime configuration, runtime state, databases, packages, installed
+runtime artifacts, or anything Git cannot safely restore, create the verified
+Benson checkpoint required by the bounded batch outside active canonical
+directories. Never remove the last known-good recoverable copy.
 
 Before retrying a mutation, inspect prior side effects.
 
@@ -117,8 +127,10 @@ Never repair malformed completion by replaying a domain mutation. Never use
 text matching, timing guesses, or run-specific values instead of proper
 identity, correlation, provenance, or ownership.
 
-Rollback only affected compatible source/config/state and preserve durable
-operation/idempotency history.
+Rollback Git-managed source through Git. For already-pushed shared source
+history, prefer a new revert commit over rewriting history. Restore only affected
+compatible runtime/config/state/package artifacts from the applicable verified
+Benson checkpoint, and preserve durable operation/idempotency history.
 
 ## Validation and production acceptance
 
