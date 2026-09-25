@@ -1,0 +1,16 @@
+{
+  "version": "1",
+  "defaultDecision": "deny",
+  "rules": [
+    { "subject": "oren", "actionClass": "read", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "oren", "actionClass": "control", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "ilana", "actionClass": "read", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "ilana", "actionClass": "control", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "amit", "actionClass": "read", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "amit", "actionClass": "control", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "tal", "actionClass": "read", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "tal", "actionClass": "control", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "harel", "actionClass": "read", "deviceScope": "jessica-vacuum", "decision": "allow" },
+    { "subject": "harel", "actionClass": "control", "deviceScope": "jessica-vacuum", "decision": "allow" }
+  ]
+}

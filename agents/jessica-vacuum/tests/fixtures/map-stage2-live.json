@@ -1,0 +1,109 @@
+{
+  "observedAt": "2026-09-19T11:36:20Z",
+  "mapId": 1,
+  "mapName": "הבית",
+  "rooms": [
+    {
+      "id": 1,
+      "name": "אמבטיית ילדים"
+    },
+    {
+      "id": 2,
+      "name": "חדר הראל"
+    },
+    {
+      "id": 4,
+      "name": "חדר הורים"
+    },
+    {
+      "id": 5,
+      "name": "מקלחת הורים"
+    },
+    {
+      "id": 6,
+      "name": "חדר עמית"
+    },
+    {
+      "id": 7,
+      "name": "מסדרון"
+    },
+    {
+      "id": 8,
+      "name": "סלון"
+    },
+    {
+      "id": 10,
+      "name": "שירותי אורחים"
+    },
+    {
+      "id": 11,
+      "name": "פינת אוכל"
+    },
+    {
+      "id": 12,
+      "name": "מטבח"
+    },
+    {
+      "id": 13,
+      "name": "מרכז הבית"
+    },
+    {
+      "id": 14,
+      "name": "חדר טל"
+    },
+    {
+      "id": 16,
+      "name": "מטבח ישיבה"
+    }
+  ],
+  "shortcuts": [
+    {
+      "id": 32,
+      "mapId": 1,
+      "tasks": [
+        [
+          {
+            "order": 1,
+            "segment_id": 12,
+            "suction_level": 3,
+            "water_volume": 2,
+            "cleaning_times": 1,
+            "cleaning_mode": 0,
+            "wetness_level": 16,
+            "mopping_settings": 33,
+            "cleaning_route": 1,
+            "task_type": 1
+          }
+        ],
+        [
+          {
+            "order": 1,
+            "segment_id": 12,
+            "suction_level": 1,
+            "water_volume": 3,
+            "cleaning_times": 1,
+            "cleaning_mode": 1,
+            "wetness_level": 32,
+            "mopping_settings": 3,
+            "cleaning_route": 3,
+            "task_type": 1
+          }
+        ],
+        [
+          {
+            "order": 1,
+            "segment_id": 12,
+            "suction_level": 3,
+            "water_volume": 3,
+            "cleaning_times": 1,
+            "cleaning_mode": 2,
+            "wetness_level": 32,
+            "mopping_settings": 1,
+            "cleaning_route": 1,
+            "task_type": 1
+          }
+        ]
+      ]
+    }
+  ]
+}

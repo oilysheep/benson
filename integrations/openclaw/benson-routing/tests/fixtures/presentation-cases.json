@@ -1,0 +1,624 @@
+{
+  "kind": "benson.routing.presentation-corpus",
+  "version": "benson-presentation-corpus-v1",
+  "review": {
+    "status": "reviewed",
+    "reviewedBy": "Oren",
+    "reviewedAt": "2026-09-23T06:30:15Z"
+  },
+  "fixedClock": {
+    "now": "2026-09-23T06:00:30Z",
+    "timezone": "Asia/Jerusalem",
+    "localNow": "2026-09-23T09:00:30+03:00"
+  },
+  "ownerCatalog": {
+    "mainPresentationPolicy": {
+      "path": "main/AGENTS.md",
+      "section": "Global user-facing date and time format / User communication"
+    },
+    "jessicaResultValidator": {
+      "path": "agents/jessica-vacuum/lib/results.mjs",
+      "export": "validateResult"
+    },
+    "jessicaCompletionValidator": {
+      "path": "integrations/openclaw/plugins/benson-jessica-tool/dist/completion.js",
+      "tool": "jessica_validate_completion"
+    },
+    "reminderEnvelopeOwner": {
+      "path": "agents/reminder-service/AGENTS.md",
+      "section": "Result and completion contract"
+    },
+    "reminderFactsOwners": {
+      "paths": [
+        "agents/reminder-service/lib/reminder_discovery.py",
+        "agents/reminder-service/libexec/reminder-service-core",
+        "agents/reminder-service/tests/test-v3-contract.sh"
+      ]
+    },
+    "reminderDateFormatter": {
+      "path": "agents/reminder-service/libexec/reminder-service-core",
+      "function": "format_user_datetime"
+    }
+  },
+  "cases": [
+    {
+      "id": "jessica-status-read-en",
+      "domain": "jessica",
+      "operation": "status",
+      "language": "en",
+      "coverage": ["verified_read"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "accept"
+      },
+      "result": {
+        "schemaVersion": "1",
+        "status": "success",
+        "domain": "jessica-vacuum",
+        "operation": "status",
+        "verified": true,
+        "data": {
+          "kind": "status",
+          "observedAt": "2026-09-23T06:00:00Z",
+          "sourceUpdatedAt": "2026-09-23T05:59:58Z",
+          "freshness": "fresh",
+          "state": "docked",
+          "batteryLevel": 72,
+          "activeSegments": [],
+          "currentSegment": null
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["state=docked", "batteryLevel=72"],
+        "exactText": "Jessica is docked with 72% battery.",
+        "mustNotClaim": ["charging", "cleaning completed"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "jessica-rooms-full-list-he",
+      "domain": "jessica",
+      "operation": "rooms",
+      "language": "he",
+      "coverage": ["verified_read", "full_list"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "accept"
+      },
+      "result": {
+        "schemaVersion": "1",
+        "status": "success",
+        "domain": "jessica-vacuum",
+        "operation": "rooms",
+        "verified": true,
+        "data": {
+          "kind": "rooms",
+          "observedAt": "2026-09-23T06:00:00Z",
+          "sourceUpdatedAt": "2026-09-23T05:59:50Z",
+          "freshness": "fresh",
+          "mapFingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "rooms": [
+            {"slug": "guest_bathroom", "label": "חדר הרחצה של האורחים", "segmentId": 18, "enabled": true},
+            {"slug": "kitchen", "label": "מטבח", "segmentId": 7, "enabled": false}
+          ]
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["all 2 rooms are shown", "guest_bathroom enabled", "kitchen disabled"],
+        "exactText": "החדרים במפה: חדר הרחצה של האורחים (פעיל), מטבח (לא פעיל).",
+        "mustNotClaim": ["only enabled rooms were returned", "kitchen can be cleaned"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "jessica-clean-started-he",
+      "domain": "jessica",
+      "operation": "clean",
+      "language": "he",
+      "coverage": ["verified_mutation"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "accept",
+        "expectedPlan": {
+          "operation": "clean",
+          "rooms": [{"slug": "guest_bathroom", "segmentId": 18}],
+          "settings": null,
+          "targetKind": "rooms",
+          "roomTaskSignal": true
+        }
+      },
+      "result": {
+        "schemaVersion": "1",
+        "status": "success",
+        "domain": "jessica-vacuum",
+        "operation": "clean",
+        "verified": true,
+        "data": {
+          "operationId": "op-clean-001",
+          "rooms": ["guest_bathroom"],
+          "outcome": "started",
+          "dispatch": "accepted",
+          "observation": {
+            "observedAt": "2026-09-23T06:00:00Z",
+            "sourceUpdatedAt": "2026-09-23T05:59:59Z",
+            "state": "cleaning",
+            "activeSegments": [18],
+            "currentSegment": 18,
+            "taskStatus": {"state": "room_cleaning", "sourceUpdatedAt": "2026-09-23T05:59:59Z"}
+          },
+          "appliedSettings": {}
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["cleaning started", "one requested room"],
+        "exactText": "הניקוי בחדר שביקשת התחיל.",
+        "mustNotClaim": ["cleaning completed", "the room is clean"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "jessica-maintenance-warning-en",
+      "domain": "jessica",
+      "operation": "maintenance",
+      "language": "en",
+      "coverage": ["verified_read", "warnings"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "accept"
+      },
+      "result": {
+        "schemaVersion": "1",
+        "status": "success",
+        "domain": "jessica-vacuum",
+        "operation": "maintenance",
+        "verified": true,
+        "data": {
+          "kind": "maintenance",
+          "observedAt": "2026-09-23T06:00:00Z",
+          "sourceUpdatedAt": "2026-09-23T05:59:45Z",
+          "freshness": "fresh",
+          "items": [
+            {"name": "main_brush_remaining", "value": 81, "unit": "%"}
+          ]
+        },
+        "warnings": [
+          {"code": "PARTIAL_HEALTH_DATA", "message": "Dustbin sensor data is unavailable"}
+        ],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["main brush remaining=81%", "dustbin sensor data unavailable"],
+        "exactText": "The main brush has 81% remaining. Warning: dustbin sensor data is unavailable.",
+        "mustNotClaim": ["all maintenance data is available"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "jessica-failure-possible-side-effects-en",
+      "domain": "jessica",
+      "operation": "clean",
+      "language": "en",
+      "coverage": ["failure", "unknown_side_effects"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "accept"
+      },
+      "result": {
+        "schemaVersion": "1",
+        "status": "failure",
+        "domain": "jessica-vacuum",
+        "operation": "clean",
+        "verified": false,
+        "data": null,
+        "warnings": [],
+        "error": {
+          "code": "ACTION_OUTCOME_UNKNOWN",
+          "stage": "verification",
+          "retryable": false,
+          "retryMode": "reconcile",
+          "sideEffects": "possible",
+          "message": "The command may have been accepted, but its outcome could not be verified"
+        },
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["outcome not verified", "side effects possible", "read-only reconciliation required"],
+        "exactText": "I couldn't verify whether Jessica started cleaning. The command may have had an effect, so I won't retry it before checking the current state.",
+        "mustNotClaim": ["cleaning failed with no effect", "cleaning started", "safe to retry"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "jessica-clarification-exact-context-he",
+      "domain": "jessica",
+      "operation": null,
+      "language": "he",
+      "coverage": ["clarification", "exact_pending_context"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "accept"
+      },
+      "result": {
+        "schemaVersion": "1",
+        "status": "clarification_required",
+        "domain": "jessica-vacuum",
+        "operation": null,
+        "verified": false,
+        "data": {
+          "question": "לאיזה חדר התכוונת?",
+          "candidates": [
+            {"room": "guest_bathroom", "label": "חדר הרחצה של האורחים"},
+            {"room": "kitchen", "label": "מטבח"}
+          ]
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": {
+          "version": "1",
+          "clarificationId": "clarify-room-001",
+          "expiresAt": "2026-09-23T06:10:00Z"
+        }
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["ask only data.question"],
+        "exactText": "לאיזה חדר התכוונת?",
+        "exactPendingContext": {
+          "version": "1",
+          "clarificationId": "clarify-room-001",
+          "expiresAt": "2026-09-23T06:10:00Z"
+        },
+        "mustNotClaim": ["a room was selected", "cleaning started"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "jessica-unsupported-schema-en",
+      "domain": "jessica",
+      "operation": "status",
+      "language": "en",
+      "coverage": ["unsupported_schema"],
+      "validation": {
+        "owner": "jessicaResultValidator",
+        "expected": "reject"
+      },
+      "result": {
+        "schemaVersion": "future-2",
+        "status": "success",
+        "domain": "jessica-vacuum",
+        "operation": "status",
+        "verified": true,
+        "data": {},
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "unsupported_rendering",
+        "userVisibleFacts": ["result rejected before rendering"],
+        "exactText": "I couldn't verify Jessica's result.",
+        "mustNotClaim": ["any device fact", "success"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-list-full-en",
+      "domain": "reminder",
+      "operation": "list",
+      "language": "en",
+      "coverage": ["verified_read", "full_list", "dates_timezones"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner+reminderFactsOwners",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "success",
+        "domain": "reminder",
+        "operation": "list",
+        "verified": true,
+        "data": {
+          "matchCount": 2,
+          "matches": [
+            {
+              "status": "active",
+              "recipientIds": ["oren"],
+              "content": "Call Dad",
+              "schedule": {"type": "one-shot", "resolvedTime": "2026-09-24T05:00:00Z", "timezone": "Asia/Jerusalem"}
+            },
+            {
+              "status": "paused",
+              "recipientIds": ["oren"],
+              "content": "Water the plants",
+              "schedule": {"type": "recurring", "cron": "0 18 * * 5", "timezone": "Asia/Jerusalem"}
+            }
+          ]
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "semantic_rendering_required",
+        "userVisibleFacts": ["all 2 matches are shown", "Call Dad active tomorrow 08:00", "Water the plants paused and recurring"],
+        "exactText": "You have 2 reminders: Call Dad—active, tomorrow at 08:00; Water the plants—paused, recurring.",
+        "mustNotClaim": ["only one reminder", "the paused reminder is active", "an internal id"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-find-zero-he",
+      "domain": "reminder",
+      "operation": "find",
+      "language": "he",
+      "coverage": ["verified_read", "zero_matches"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner+reminderFactsOwners",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "success",
+        "domain": "reminder",
+        "operation": "find",
+        "verified": true,
+        "data": {"matchCount": 0, "matches": []},
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["verified zero matches"],
+        "exactText": "לא נמצאו תזכורות תואמות.",
+        "mustNotClaim": ["the lookup failed", "details are missing"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-create-verified-he",
+      "domain": "reminder",
+      "operation": "create",
+      "language": "he",
+      "coverage": ["verified_mutation", "dates_timezones"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner+reminderFactsOwners",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "success",
+        "domain": "reminder",
+        "operation": "create",
+        "verified": true,
+        "data": {
+          "transaction": {"status": "success", "verified": true},
+          "record": {
+            "status": "active",
+            "recipientIds": ["oren"],
+            "content": "להתקשר לאבא",
+            "schedule": {"type": "one-shot", "resolvedTime": "2026-09-24T05:00:00Z", "timezone": "Asia/Jerusalem"},
+            "calendar": {"requested": false}
+          },
+          "transport": {"deliveries": []}
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "semantic_rendering_required",
+        "userVisibleFacts": ["reminder created and verified", "content=להתקשר לאבא", "local time=מחר ב־08:00"],
+        "exactText": "התזכורת „להתקשר לאבא” נקבעה למחר ב־08:00.",
+        "mustNotClaim": ["calendar event created", "ISO timestamp", "timezone name"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-delete-verified-en",
+      "domain": "reminder",
+      "operation": "delete",
+      "language": "en",
+      "coverage": ["verified_mutation"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner+reminderFactsOwners",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "success",
+        "domain": "reminder",
+        "operation": "delete",
+        "verified": true,
+        "data": {
+          "transaction": {"status": "success", "verified": true},
+          "record": {"status": "deleted", "recipientIds": ["oren"], "content": "Call Dad"},
+          "transport": {"deliveries": []}
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "render_candidate",
+        "userVisibleFacts": ["deletion verified", "content=Call Dad"],
+        "exactText": "The “Call Dad” reminder was deleted.",
+        "mustNotClaim": ["a reminder was created", "an internal id"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-create-notification-intent-en",
+      "domain": "reminder",
+      "operation": "create",
+      "language": "en",
+      "coverage": ["verified_mutation", "notification_intent", "dates_timezones"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner+reminderFactsOwners",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "success",
+        "domain": "reminder",
+        "operation": "create",
+        "verified": true,
+        "data": {
+          "transaction": {"status": "success", "verified": true},
+          "record": {
+            "status": "active",
+            "recipientIds": ["oren", "maya"],
+            "content": "Bring passports",
+            "schedule": {"type": "one-shot", "resolvedTime": "2026-09-24T05:00:00Z", "timezone": "Asia/Jerusalem"}
+          },
+          "transport": {
+            "deliveries": [
+              {
+                "kind": "reminder_lifecycle",
+                "operation": "create",
+                "idempotencyKey": "delivery-key-001",
+                "status": "pending",
+                "target": {"channel": "whatsapp", "accountId": "benson", "to": "synthetic-maya", "recipientId": "maya"},
+                "text": "A reminder was created for tomorrow at 08:00: Bring passports",
+                "onFailure": {
+                  "status": "warning",
+                  "code": "REMINDER_RECIPIENT_NOTIFICATION_FAILED",
+                  "stateChangePreserved": true,
+                  "message": "Reminder state was verified, but recipient notification delivery failed"
+                }
+              }
+            ],
+            "deliveryFailurePolicy": {
+              "status": "warning",
+              "code": "REMINDER_RECIPIENT_NOTIFICATION_FAILED",
+              "stateChangePreserved": true,
+              "retryWithSameIdempotencyKey": true
+            }
+          }
+        },
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "native_delivery_required",
+        "userVisibleFacts": ["reminder creation verified", "secondary notification is pending, not delivered"],
+        "exactText": null,
+        "deliveryOutcomes": {
+          "success": "The “Bring passports” reminder was created for tomorrow at 08:00, and Maya was notified.",
+          "failure": "The “Bring passports” reminder was created for tomorrow at 08:00, but Maya could not be notified.",
+          "pending": "No terminal delivery claim is allowed while the notification outcome is pending."
+        },
+        "mustNotClaim": ["Maya was notified before native delivery succeeds", "the reminder failed when only notification delivery failed"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-clarification-exact-context-en",
+      "domain": "reminder",
+      "operation": "delete",
+      "language": "en",
+      "coverage": ["clarification", "exact_pending_context"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "clarification_required",
+        "domain": "reminder",
+        "operation": "delete",
+        "verified": false,
+        "data": {"question": "Which ‘Call Dad’ reminder should I delete?"},
+        "warnings": [],
+        "error": null,
+        "pendingContext": {
+          "operation": "delete",
+          "candidateReminderIds": ["synthetic-reminder-a", "synthetic-reminder-b"],
+          "originalReference": "Call Dad"
+        }
+      },
+      "expected": {
+        "disposition": "semantic_rendering_required",
+        "userVisibleFacts": ["ask only data.question"],
+        "exactText": "Which ‘Call Dad’ reminder should I delete?",
+        "exactPendingContext": {
+          "operation": "delete",
+          "candidateReminderIds": ["synthetic-reminder-a", "synthetic-reminder-b"],
+          "originalReference": "Call Dad"
+        },
+        "mustNotClaim": ["a reminder was selected", "a reminder was deleted"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-update-partial-failure-he",
+      "domain": "reminder",
+      "operation": "update",
+      "language": "he",
+      "coverage": ["failure", "unknown_side_effects"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner+reminderFactsOwners",
+        "expected": "accept"
+      },
+      "result": {
+        "status": "failure",
+        "domain": "reminder",
+        "operation": "update",
+        "verified": false,
+        "data": null,
+        "warnings": [],
+        "error": {
+          "code": "REMINDER_UPDATE_PARTIAL_FAILURE",
+          "message": "The update did not reach a verified terminal state",
+          "retryable": false
+        },
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "semantic_rendering_required",
+        "userVisibleFacts": ["terminal state not verified", "existing effects must be inspected before retry"],
+        "exactText": "לא הצלחתי לאמת אם עדכון התזכורת הושלם. לא אנסה שוב לפני בדיקת המצב הקיים.",
+        "mustNotClaim": ["no change occurred", "the update succeeded", "safe to retry"]
+      },
+      "reviewStatus": "reviewed"
+    },
+    {
+      "id": "reminder-unverified-success-en",
+      "domain": "reminder",
+      "operation": "create",
+      "language": "en",
+      "coverage": ["unsupported_semantics"],
+      "validation": {
+        "owner": "reminderEnvelopeOwner",
+        "expected": "reject"
+      },
+      "result": {
+        "status": "success",
+        "domain": "reminder",
+        "operation": "create",
+        "verified": false,
+        "data": {"record": {"content": "Call Dad"}},
+        "warnings": [],
+        "error": null,
+        "pendingContext": null
+      },
+      "expected": {
+        "disposition": "unsupported_rendering",
+        "userVisibleFacts": ["unverified mutation success must be rejected"],
+        "exactText": "I couldn't verify that the reminder was created.",
+        "mustNotClaim": ["the reminder was created", "success"]
+      },
+      "reviewStatus": "reviewed"
+    }
+  ]
+}

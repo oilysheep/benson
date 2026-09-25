@@ -1,0 +1,2458 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import hashlib
+import json
+import os
+import re
+import subprocess
+import sys
+import tempfile
+import uuid
+from pathlib import Path
+from typing import Any
+from zoneinfo import ZoneInfo
+
+ROOT = Path(__file__).resolve().parents[1]
+LINKS = Path(os.environ.get("REMINDER_LINK_DIR", ROOT / "state/links"))
+CONFIG_PATH = Path(os.environ.get("REMINDER_RECIPIENTS_CONFIG", ROOT / "config/recipients.json"))
+OPENCLAW = Path(os.environ.get("OPENCLAW_BIN", str(Path.home() / ".npm-global/bin/openclaw")))
+GOG = Path(os.environ.get(
+    "REMINDER_GOG_BIN",
+    "/home/oa/.local/lib/benson/reminder-service/gog-0.40.0-calendar",
+))
+GOG_HOME = Path(os.environ.get(
+    "REMINDER_GOG_HOME",
+    "/home/oa/.local/share/benson/reminder-service/gog",
+))
+GOG_ACCOUNT = os.environ.get("REMINDER_GOG_ACCOUNT", "benson-reminder-calendar")
+MANAGED_DESCRIPTION_PREFIX = "benson.reminder-service.v4:"
+
+
+class ReminderError(RuntimeError):
+    def __init__(self, code: str, message: str, *, retryable: bool = False):
+        super().__init__(message)
+        self.code = code
+        self.retryable = retryable
+
+
+def now_utc() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def json_dump(value: Any) -> str:
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def emit(value: dict[str, Any], rc: int = 0) -> int:
+    print(json_dump(value))
+    return rc
+
+
+def load_config() -> dict[str, Any]:
+    value = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+    if not isinstance(value, dict) or not isinstance(value.get("recipients"), list):
+        raise ReminderError("REMINDER_CONFIG_INVALID", "recipient configuration is invalid")
+    return value
+
+
+def atomic_write(path: Path, value: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    os.chmod(path.parent, 0o700)
+    encoded = json.dumps(value, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    tmp_path = Path(tmp)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(encoded)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(tmp_path, 0o600)
+        os.replace(tmp_path, path)
+        dir_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+    finally:
+        tmp_path.unlink(missing_ok=True)
+
+
+def read_input(path: str | None) -> dict[str, Any]:
+    raw = sys.stdin.read() if path in {None, "-"} else Path(path).read_text(encoding="utf-8")
+    try:
+        value = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ReminderError("REMINDER_INPUT_INVALID", f"invalid JSON: {exc.msg}") from exc
+    if not isinstance(value, dict):
+        raise ReminderError("REMINDER_INPUT_INVALID", "input must be a JSON object")
+    return value
+
+
+def run(args: list[str], *, timeout: int = 60) -> subprocess.CompletedProcess[str]:
+    proc = subprocess.run([str(OPENCLAW), *args], text=True, capture_output=True, timeout=timeout, check=False)
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"OpenClaw exited {proc.returncode}"
+        raise ReminderError("REMINDER_CRON_COMMAND_FAILED", detail, retryable=True)
+    return proc
+
+
+def run_json(args: list[str], *, timeout: int = 60) -> Any:
+    proc = run(args, timeout=timeout)
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ReminderError("REMINDER_CRON_RESPONSE_INVALID", "OpenClaw returned invalid JSON") from exc
+
+
+def all_jobs() -> list[dict[str, Any]]:
+    value = run_json(["automations", "list", "--all", "--json"])
+    if isinstance(value, list):
+        jobs = value
+    elif isinstance(value, dict):
+        jobs = value.get("jobs") or value.get("items") or value.get("entries") or []
+    else:
+        jobs = []
+    return [job for job in jobs if isinstance(job, dict)]
+
+
+def cron_get(job_id: str, *, required: bool = True) -> dict[str, Any] | None:
+    proc = subprocess.run(
+        [str(OPENCLAW), "automations", "get", job_id, "--json"],
+        text=True,
+        capture_output=True,
+        timeout=30,
+        check=False,
+    )
+    if proc.returncode != 0:
+        if required:
+            raise ReminderError("REMINDER_CRON_JOB_NOT_FOUND", f"cron job not found: {job_id}")
+        return None
+    try:
+        value = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ReminderError("REMINDER_CRON_RESPONSE_INVALID", f"invalid cron get response for {job_id}") from exc
+    if not isinstance(value, dict):
+        raise ReminderError("REMINDER_CRON_RESPONSE_INVALID", f"cron get did not return an object for {job_id}")
+    return value
+
+
+def resolve_identity(raw: str, config: dict[str, Any]) -> dict[str, Any]:
+    needle = str(raw).strip().casefold()
+    if not needle:
+        raise ReminderError("REMINDER_IDENTITY_INVALID", "identity must not be empty")
+    matches = []
+    for item in config["recipients"]:
+        if not isinstance(item, dict):
+            continue
+        values = [item.get("id"), item.get("to"), *(item.get("aliases") or [])]
+        if any(str(value).strip().casefold() == needle for value in values if value is not None):
+            matches.append(item)
+    if len(matches) != 1:
+        raise ReminderError("REMINDER_IDENTITY_UNKNOWN", f"unknown or ambiguous identity: {raw}")
+    return dict(matches[0])
+
+
+def trusted_requester_ids(config: dict[str, Any]) -> set[str]:
+    raw_ids = config.get("trustedRequesterIds")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        raise ReminderError(
+            "REMINDER_CONFIG_INVALID",
+            "trustedRequesterIds must be a non-empty list",
+        )
+    result: set[str] = set()
+    for raw_id in raw_ids:
+        canonical_id = str(raw_id or "").strip()
+        if not canonical_id or canonical_id in result:
+            raise ReminderError(
+                "REMINDER_CONFIG_INVALID",
+                "trustedRequesterIds must contain unique canonical ids",
+            )
+        identity = resolve_identity(canonical_id, config)
+        if str(identity.get("id") or "") != canonical_id or identity.get("type") != "person":
+            raise ReminderError(
+                "REMINDER_CONFIG_INVALID",
+                f"trusted requester must be a canonical person id: {canonical_id}",
+            )
+        result.add(canonical_id)
+    return result
+
+
+def resolve_trusted_requester(raw: str, config: dict[str, Any]) -> dict[str, Any]:
+    try:
+        requester = resolve_identity(raw, config)
+    except ReminderError as exc:
+        raise ReminderError(
+            "REMINDER_REQUESTER_UNTRUSTED",
+            "requester is unknown or untrusted",
+        ) from exc
+    if str(requester.get("id") or "") not in trusted_requester_ids(config):
+        raise ReminderError(
+            "REMINDER_REQUESTER_UNTRUSTED",
+            "requester is unknown or untrusted",
+        )
+    return requester
+
+
+def requester_can_access_record(record: dict[str, Any], requester_id: str) -> bool:
+    canonical_requester = str(requester_id)
+    return (
+        str(record.get("createdBy") or "") == canonical_requester
+        or canonical_requester in {str(value) for value in record.get("recipientIds", [])}
+    )
+
+
+def authorize_record(record: dict[str, Any], requester_raw: str, config: dict[str, Any]) -> dict[str, Any]:
+    requester = resolve_trusted_requester(requester_raw, config)
+    if not requester_can_access_record(record, str(requester["id"])):
+        raise ReminderError(
+            "REMINDER_AUTHORIZATION_DENIED",
+            "requester does not own and is not a recipient of this Reminder",
+        )
+    return requester
+
+
+def source_target(source: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    source_type = str(source.get("type") or "").strip()
+    source_id = str(source.get("id") or "").strip()
+    if source_type not in {"private", "group"} or not source_id:
+        raise ReminderError("REMINDER_SOURCE_INVALID", "sourceConversation requires type private|group and id")
+    account = str(config.get("accountId") or "benson")
+    return {
+        "channel": "whatsapp",
+        "accountId": account,
+        "to": source_id,
+        "conversationType": source_type,
+        "conversationId": source_id,
+    }
+
+
+def recipient_target(recipient: dict[str, Any], config: dict[str, Any]) -> dict[str, Any]:
+    target_type = "group" if recipient.get("type") == "group" else "private"
+    return {
+        "channel": str(recipient.get("channel") or "whatsapp"),
+        "accountId": str(config.get("accountId") or "benson"),
+        "to": str(recipient["to"]),
+        "conversationType": target_type,
+        "conversationId": str(recipient["to"]),
+        "recipientId": str(recipient["id"]),
+    }
+
+
+def lifecycle_delivery_key(
+    record: dict[str, Any],
+    operation: str,
+    recipient_id: str,
+    target: dict[str, Any],
+) -> str:
+    state_version = (
+        str(record.get("intentHash") or "")
+        if operation == "create"
+        else str(record.get("updatedAt") or "")
+    )
+    value = {
+        "schema": "benson.reminder-lifecycle-delivery.v1",
+        "reminderId": str(record["reminderId"]),
+        "operation": operation,
+        "recipientId": recipient_id,
+        "target": {
+            "channel": str(target["channel"]),
+            "accountId": str(target["accountId"]),
+            "to": str(target["to"]),
+        },
+        "stateVersion": state_version,
+        "status": str(record.get("status") or ""),
+        "content": str(record.get("content") or ""),
+        "schedules": record_schedules(record),
+        "calendar": record.get("calendar"),
+    }
+    digest = hashlib.sha256(json_dump(value).encode("utf-8")).hexdigest()
+    return f"benson-reminder-lifecycle:{digest}"
+
+
+def lifecycle_text(operation: str, record: dict[str, Any]) -> str:
+    content = str(record["content"])
+    schedule = " וגם ".join(schedule_description(item) for item in record_schedules(record))
+    if operation == "create":
+        return f"נקבעה עבורך תזכורת: {content} — {schedule}."
+    if operation == "update":
+        return f"התזכורת שלך עודכנה: {content} — {schedule}."
+    if operation == "pause":
+        return f"התזכורת שלך הושהתה: {content}."
+    if operation == "resume":
+        return f"התזכורת שלך הופעלה מחדש: {content} — {schedule}."
+    if operation == "delete":
+        return f"התזכורת שלך נמחקה: {content}."
+    raise ReminderError(
+        "REMINDER_NOTIFICATION_OPERATION_INVALID",
+        f"unsupported notification operation: {operation}",
+    )
+
+
+def outbound(
+    target: dict[str, Any],
+    text: str,
+    *,
+    record: dict[str, Any],
+    operation: str,
+    recipient_id: str,
+) -> dict[str, Any]:
+    return {
+        "kind": "reminder_lifecycle",
+        "operation": operation,
+        "reminderId": str(record["reminderId"]),
+        "idempotencyKey": lifecycle_delivery_key(
+            record,
+            operation,
+            recipient_id,
+            target,
+        ),
+        "status": "pending",
+        "target": target,
+        "text": text,
+        "onFailure": {
+            "status": "warning",
+            "code": "REMINDER_RECIPIENT_NOTIFICATION_FAILED",
+            "stateChangePreserved": True,
+            "message": "Reminder state was verified, but recipient notification delivery failed",
+        },
+    }
+
+
+def lifecycle_deliveries(
+    record: dict[str, Any],
+    requester_raw: str,
+    config: dict[str, Any],
+    operation: str,
+) -> list[dict[str, Any]]:
+    if record.get("notifyRecipients", True) is False:
+        return []
+    requester = resolve_trusted_requester(requester_raw, config)
+    requester_id = str(requester["id"])
+    deliveries: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for raw_recipient_id in record.get("recipientIds", []):
+        recipient = resolve_identity(str(raw_recipient_id), config)
+        recipient_id = str(recipient["id"])
+        if recipient_id == requester_id or recipient_id in seen:
+            continue
+        seen.add(recipient_id)
+        target = recipient_target(recipient, config)
+        deliveries.append(outbound(
+            target,
+            lifecycle_text(operation, record),
+            record=record,
+            operation=operation,
+            recipient_id=recipient_id,
+        ))
+    return deliveries
+
+
+def transport_result(deliveries: list[dict[str, Any]]) -> dict[str, Any]:
+    value: dict[str, Any] = {"deliveries": deliveries}
+    if deliveries:
+        value["deliveryFailurePolicy"] = {
+            "status": "warning",
+            "code": "REMINDER_RECIPIENT_NOTIFICATION_FAILED",
+            "stateChangePreserved": True,
+            "retryWithSameIdempotencyKey": True,
+        }
+    return value
+
+
+def parse_datetime(value: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReminderError("REMINDER_SCHEDULE_INVALID", f"invalid RFC3339 datetime: {value}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReminderError("REMINDER_SCHEDULE_INVALID", "one-shot datetime must include timezone")
+    if parsed.timestamp() <= dt.datetime.now(dt.timezone.utc).timestamp():
+        raise ReminderError("REMINDER_SCHEDULE_PAST", "reminder time is in the past")
+    return parsed
+
+
+def parse_aware_datetime(value: str, field: str) -> dt.datetime:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"invalid {field}: {value}") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"{field} must include timezone")
+    return parsed
+
+
+def normalize_schedule(
+    raw: Any,
+    config: dict[str, Any],
+    *,
+    patch: bool = False,
+) -> dict[str, Any]:
+    if not isinstance(raw, dict):
+        raise ReminderError(
+            "REMINDER_SCHEDULE_INVALID",
+            "schedule must be an object",
+        )
+
+    kind = str(raw.get("type") or raw.get("kind") or "").strip()
+    timezone = str(
+        raw.get("timezone")
+        or raw.get("tz")
+        or config.get("timezone")
+        or "Asia/Jerusalem"
+    ).strip()
+
+    if kind in {"relative", "offset"}:
+        if raw.get("baseTime") is not None or raw.get("referenceTime") is not None:
+            raise ReminderError(
+                "REMINDER_SCHEDULE_UNTRUSTED_BASE",
+                "relative baseTime/referenceTime is runtime-owned and must not be supplied",
+            )
+        runtime_base = str(raw.get("_runtimeBaseTime") or "").strip()
+        if runtime_base:
+            try:
+                base = dt.datetime.fromisoformat(runtime_base.replace("Z", "+00:00"))
+            except ValueError as exc:
+                raise ReminderError("REMINDER_SCHEDULE_INVALID", "internal runtime base is invalid") from exc
+        else:
+            base = dt.datetime.now(dt.timezone.utc)
+        if base.tzinfo is None or base.utcoffset() is None:
+            raise ReminderError("REMINDER_SCHEDULE_INVALID", "internal runtime base must include timezone")
+
+        offset = raw.get("offset")
+        if not isinstance(offset, dict):
+            raise ReminderError(
+                "REMINDER_SCHEDULE_INVALID",
+                "relative schedule requires offset object",
+            )
+
+        value = offset.get("value")
+        unit = str(offset.get("unit") or "").strip().lower()
+
+        if isinstance(value, bool) or not isinstance(value, int):
+            raise ReminderError(
+                "REMINDER_SCHEDULE_INVALID",
+                "relative offset.value must be an integer",
+            )
+
+        units = {
+            "second": "seconds",
+            "seconds": "seconds",
+            "minute": "minutes",
+            "minutes": "minutes",
+            "hour": "hours",
+            "hours": "hours",
+            "day": "days",
+            "days": "days",
+            "week": "weeks",
+            "weeks": "weeks",
+        }
+
+        delta_unit = units.get(unit)
+        if delta_unit is None:
+            raise ReminderError(
+                "REMINDER_SCHEDULE_INVALID",
+                "relative offset.unit is unsupported",
+            )
+
+        if value == 0:
+            raise ReminderError(
+                "REMINDER_SCHEDULE_INVALID",
+                "relative offset.value must not be zero",
+            )
+
+        try:
+            local_tz = ZoneInfo(timezone)
+        except Exception as exc:
+            raise ReminderError(
+                "REMINDER_SCHEDULE_INVALID",
+                f"invalid timezone: {timezone}",
+            ) from exc
+
+        base_local = base.astimezone(local_tz)
+        delta = dt.timedelta(**{delta_unit: value})
+        resolved = base_local + delta
+
+        if resolved.timestamp() <= dt.datetime.now(
+            dt.timezone.utc
+        ).timestamp():
+            raise ReminderError(
+                "REMINDER_SCHEDULE_PAST",
+                "reminder time is in the past",
+            )
+
+        return {
+            "type": "one-shot",
+            "resolvedTime": resolved.isoformat(timespec="seconds"),
+            "timezone": timezone,
+        }
+
+    if kind in {"one-shot", "at"}:
+        value = str(
+            raw.get("resolvedTime")
+            or raw.get("at")
+            or ""
+        ).strip()
+        parsed = parse_datetime(value)
+        return {
+            "type": "one-shot",
+            "resolvedTime": parsed.isoformat(timespec="seconds"),
+            "timezone": timezone,
+        }
+
+    if kind in {"recurring", "cron"}:
+        cron = str(raw.get("cron") or raw.get("expr") or "").strip()
+        if not cron:
+            raise ReminderError(
+                "REMINDER_SCHEDULE_INVALID",
+                "recurring schedule requires cron",
+            )
+        return {
+            "type": "recurring",
+            "cron": cron,
+            "timezone": timezone,
+        }
+
+    label = "update schedule" if patch else "schedule"
+    raise ReminderError(
+        "REMINDER_SCHEDULE_INVALID",
+        f"{label} type must be one-shot, relative, or recurring",
+    )
+
+def _requested_flag(value: dict[str, Any], *, existing_requested: bool | None = None) -> bool:
+    flags: list[bool] = []
+    for key in ("requested", "createEvent"):
+        if key not in value:
+            continue
+        raw = value[key]
+        if not isinstance(raw, bool):
+            raise ReminderError("REMINDER_CALENDAR_INVALID", f"calendar.{key} must be boolean")
+        flags.append(raw)
+    if flags and any(flag != flags[0] for flag in flags):
+        raise ReminderError("REMINDER_CALENDAR_INVALID", "calendar requested/createEvent flags conflict")
+    if flags:
+        return flags[0]
+    if existing_requested is not None:
+        return existing_requested
+    return False
+
+
+def normalize_provenance(
+    value: Any,
+    source: dict[str, str],
+    requester_id: str,
+    required_fields: list[str],
+) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict) or value.get("schemaVersion") != 1:
+        raise ReminderError("REMINDER_PROVENANCE_INVALID", "provenance schemaVersion must be 1")
+    if value.get("sourceConversation") != source or str(value.get("requesterId") or "") != requester_id:
+        raise ReminderError("REMINDER_PROVENANCE_ROUTE_MISMATCH", "provenance route does not match the request")
+    context_id = str(value.get("contextId") or "").strip()
+    current_evidence_id = str(value.get("currentEvidenceId") or "").strip()
+    revision = value.get("revision")
+    if not context_id or not current_evidence_id or isinstance(revision, bool) or not isinstance(revision, int) or revision < 1:
+        raise ReminderError("REMINDER_PROVENANCE_INVALID", "provenance contextId, revision, and currentEvidenceId are required")
+    created = parse_aware_datetime(str(value.get("createdAt") or ""), "provenance createdAt")
+    expires = parse_aware_datetime(str(value.get("expiresAt") or ""), "provenance expiresAt")
+    now = dt.datetime.now(dt.timezone.utc)
+    if created >= expires or expires < now or created > now + dt.timedelta(minutes=5):
+        raise ReminderError("REMINDER_PROVENANCE_EXPIRED", "provenance is expired or not yet valid")
+    evidence: dict[str, str] = {}
+    for item in value.get("evidence") or []:
+        if not isinstance(item, dict):
+            raise ReminderError("REMINDER_PROVENANCE_INVALID", "provenance evidence must contain objects")
+        evidence_id = str(item.get("id") or "").strip()
+        text = str(item.get("text") or "").strip()
+        if not evidence_id or not text or evidence_id in evidence:
+            raise ReminderError("REMINDER_PROVENANCE_INVALID", "provenance evidence ids and text must be non-empty and unique")
+        evidence[evidence_id] = text
+    if current_evidence_id not in evidence:
+        raise ReminderError("REMINDER_PROVENANCE_INVALID", "current provenance evidence is missing")
+    if revision != len(evidence) or current_evidence_id != next(reversed(evidence), None):
+        raise ReminderError(
+            "REMINDER_PROVENANCE_INVALID",
+            "provenance revision and currentEvidenceId must match the evidence turn sequence",
+        )
+    citations: dict[str, dict[str, str]] = {}
+    for item in value.get("fieldEvidence") or []:
+        if not isinstance(item, dict):
+            raise ReminderError("REMINDER_PROVENANCE_INVALID", "fieldEvidence must contain objects")
+        field = str(item.get("field") or "").strip()
+        evidence_id = str(item.get("evidenceId") or "").strip()
+        quote = str(item.get("quote") or "").strip()
+        if not field or field in citations or not quote or evidence_id not in evidence or quote not in evidence[evidence_id]:
+            raise ReminderError("REMINDER_PROVENANCE_NOT_GROUNDED", f"invalid provenance citation for {field or '<empty>'}")
+        citations[field] = {"evidenceId": evidence_id, "quote": quote}
+    missing = [field for field in required_fields if field not in citations]
+    if missing:
+        raise ReminderError("REMINDER_PROVENANCE_INCOMPLETE", "missing provenance for: " + ",".join(missing))
+    return {
+        "schemaVersion": 1,
+        "contextId": context_id,
+        "revision": revision,
+        "createdAt": created.isoformat(timespec="seconds"),
+        "expiresAt": expires.isoformat(timespec="seconds"),
+        "sourceConversation": source,
+        "requesterId": requester_id,
+        "currentEvidenceId": current_evidence_id,
+        "evidence": [{"id": key, "text": text} for key, text in evidence.items()],
+        "fieldEvidence": [{"field": key, **citation} for key, citation in citations.items()],
+    }
+
+
+def normalize_calendar(
+    value: Any,
+    schedules: dict[str, Any] | list[dict[str, Any]],
+    content: str,
+    *,
+    existing: dict[str, Any] | None = None,
+    verbatim_request: Any = None,
+    provenance: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    if value is None:
+        return {"requested": False}
+    if not isinstance(value, dict):
+        raise ReminderError("REMINDER_CALENDAR_INVALID", "calendar must be an object")
+
+    existing_linked = bool(isinstance(existing, dict) and existing.get("requested") is True)
+    requested = _requested_flag(value, existing_requested=(existing_linked if existing is not None else None))
+    if not requested:
+        return {"requested": False}
+
+    reminder_schedules = schedules if isinstance(schedules, list) else [schedules]
+    raw_event_schedule = value.get("eventSchedule")
+    if raw_event_schedule is not None:
+        event_schedule = normalize_schedule(raw_event_schedule, load_config())
+        event_schedule_follows_reminder = False
+    elif existing_linked and existing.get("eventScheduleFollowsReminder", True) is not False:
+        if len(reminder_schedules) != 1:
+            raise ReminderError("REMINDER_CALENDAR_EVENT_SCHEDULE_REQUIRED", "multi-schedule Calendar plans require calendar.eventSchedule")
+        event_schedule = dict(reminder_schedules[0])
+        event_schedule_follows_reminder = True
+    elif existing_linked and isinstance(existing.get("eventSchedule"), dict):
+        event_schedule = dict(existing["eventSchedule"])
+        event_schedule_follows_reminder = False
+    elif len(reminder_schedules) == 1:
+        event_schedule = dict(reminder_schedules[0])
+        event_schedule_follows_reminder = True
+    else:
+        raise ReminderError("REMINDER_CALENDAR_EVENT_SCHEDULE_REQUIRED", "multi-schedule Calendar plans require calendar.eventSchedule")
+    if event_schedule.get("type") != "one-shot":
+        raise ReminderError("REMINDER_CALENDAR_RECURRING_UNSUPPORTED", "Calendar linkage requires a one-shot eventSchedule")
+
+    duration = value.get("durationMinutes")
+    if duration is None and existing_linked:
+        duration = existing.get("durationMinutes")
+    if isinstance(duration, bool) or not isinstance(duration, int):
+        raise ReminderError("REMINDER_CALENDAR_DURATION_REQUIRED", "calendar.durationMinutes is required and must be an integer")
+    if duration < 1 or duration > 1440:
+        raise ReminderError("REMINDER_CALENDAR_DURATION_INVALID", "calendar.durationMinutes must be between 1 and 1440")
+
+    attendees = value.get("attendees")
+    if attendees:
+        raise ReminderError("REMINDER_CALENDAR_ATTENDEES_UNSUPPORTED", "Calendar attendees are not supported by Reminder Service")
+
+    calendar_id = str(value.get("calendarId") or (existing.get("calendarId") if existing_linked else None) or "primary").strip()
+    if calendar_id != "primary":
+        raise ReminderError("REMINDER_CALENDAR_ID_UNSUPPORTED", "Reminder Service supports only the primary calendar")
+
+    def explicit_metadata(field: str) -> str:
+        raw = value.get(field)
+        allowed = {"value", "evidenceQuote", "evidenceId"}
+        if not isinstance(raw, dict) or not {"value", "evidenceQuote"}.issubset(raw) or set(raw) - allowed:
+            raise ReminderError(
+                "REMINDER_CALENDAR_METADATA_PROVENANCE_INVALID",
+                f"calendar.{field} requires value and evidenceQuote",
+            )
+        metadata_value = str(raw.get("value") or "").strip()
+        evidence_quote = str(raw.get("evidenceQuote") or "").strip()
+        if not metadata_value or not evidence_quote:
+            raise ReminderError(
+                "REMINDER_CALENDAR_METADATA_PROVENANCE_INVALID",
+                f"calendar.{field} provenance must not be empty",
+            )
+        grounded = False
+        if provenance is not None:
+            evidence_id = str(raw.get("evidenceId") or "").strip()
+            citations = {str(item["field"]): item for item in provenance["fieldEvidence"]}
+            evidence = {str(item["id"]): str(item["text"]) for item in provenance["evidence"]}
+            citation = citations.get(f"calendar.{field}")
+            grounded = bool(
+                evidence_id and citation
+                and citation.get("evidenceId") == evidence_id
+                and citation.get("quote") == evidence_quote
+                and evidence_quote in evidence.get(evidence_id, "")
+            )
+        else:
+            request_text = str(verbatim_request or "").strip()
+            grounded = bool(request_text and evidence_quote in request_text)
+        if not grounded or metadata_value not in evidence_quote:
+            raise ReminderError(
+                "REMINDER_CALENDAR_METADATA_NOT_GROUNDED",
+                f"calendar.{field} is not grounded in verbatimRequest",
+            )
+        return metadata_value
+
+    explicit_summary = "summary" in value
+    if explicit_summary:
+        summary = explicit_metadata("summary")
+        follows_content = summary == content
+    elif existing_linked and existing.get("summaryFollowsContent") is False:
+        summary = str(existing.get("summary") or "").strip()
+        follows_content = False
+    else:
+        summary = content
+        follows_content = True
+
+    normalized: dict[str, Any] = {
+        "requested": True,
+        "calendarId": calendar_id,
+        "summary": summary,
+        "summaryFollowsContent": follows_content,
+        "durationMinutes": duration,
+        "eventSchedule": event_schedule,
+        "eventScheduleFollowsReminder": event_schedule_follows_reminder,
+    }
+
+    for key in ("description", "location"):
+        if key in value:
+            normalized[key] = explicit_metadata(key)
+        elif existing_linked and existing.get(key):
+            normalized[key] = str(existing[key])
+
+    return normalized
+
+
+HEBREW_MONTHS = {
+    1: "ינואר",
+    2: "פברואר",
+    3: "מרץ",
+    4: "אפריל",
+    5: "מאי",
+    6: "יוני",
+    7: "יולי",
+    8: "אוגוסט",
+    9: "ספטמבר",
+    10: "אוקטובר",
+    11: "נובמבר",
+    12: "דצמבר",
+}
+
+
+def format_user_datetime(
+    value: str,
+    timezone_name: str,
+    *,
+    now: dt.datetime | None = None,
+) -> str:
+    try:
+        parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ReminderError(
+            "REMINDER_SCHEDULE_INVALID",
+            f"invalid RFC3339 datetime: {value}",
+        ) from exc
+
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ReminderError(
+            "REMINDER_SCHEDULE_INVALID",
+            "user-facing datetime must include timezone",
+        )
+
+    try:
+        local_tz = ZoneInfo(timezone_name)
+    except Exception as exc:
+        raise ReminderError(
+            "REMINDER_SCHEDULE_INVALID",
+            f"invalid timezone: {timezone_name}",
+        ) from exc
+
+    local_value = parsed.astimezone(local_tz)
+    local_now = (now or dt.datetime.now(dt.timezone.utc)).astimezone(local_tz)
+    time_text = local_value.strftime("%H:%M")
+
+    if local_value.date() == local_now.date():
+        return f"היום ב־{time_text}"
+
+    if local_value.date() == local_now.date() + dt.timedelta(days=1):
+        return f"מחר ב־{time_text}"
+
+    month_name = HEBREW_MONTHS[local_value.month]
+    return (
+        f"{local_value.day} ב{month_name} {local_value.year} "
+        f"בשעה {time_text}"
+    )
+
+
+def schedule_description(schedule: dict[str, Any]) -> str:
+    if schedule["type"] == "one-shot":
+        return format_user_datetime(
+            str(schedule["resolvedTime"]),
+            str(schedule["timezone"]),
+        )
+
+    return "לפי לוח זמנים חוזר"
+
+
+def record_schedules(record: dict[str, Any]) -> list[dict[str, Any]]:
+    schedules = record.get("schedules")
+    if isinstance(schedules, list) and schedules:
+        return [dict(item) for item in schedules if isinstance(item, dict)]
+    schedule = record.get("schedule")
+    if isinstance(schedule, dict):
+        return [dict(schedule)]
+    raise ReminderError("REMINDER_RECORD_INVALID", "record has no schedule")
+
+
+# OpenClaw canonicalizes one-shot Automation times to UTC on readback.
+# Compare the instant and declared timezone, not the RFC3339 offset spelling.
+def schedules_match(actual: list[dict[str, Any]], expected: list[dict[str, Any]]) -> bool:
+    if len(actual) != len(expected):
+        return False
+    for observed, requested in zip(actual, expected):
+        if observed.get("type") != requested.get("type") or observed.get("timezone") != requested.get("timezone"):
+            return False
+        if observed.get("type") == "one-shot":
+            if set(observed) != set(requested):
+                return False
+            if parse_aware_datetime(str(observed.get("resolvedTime") or ""), "Automation readback time") != parse_aware_datetime(
+                str(requested.get("resolvedTime") or ""), "requested Reminder time"
+            ):
+                return False
+        elif observed != requested:
+            return False
+    return True
+
+
+def normalize_create(value: dict[str, Any]) -> dict[str, Any]:
+    config = load_config()
+    source = value.get("sourceConversation") or value.get("source_conversation")
+    if not isinstance(source, dict):
+        raise ReminderError("REMINDER_SOURCE_INVALID", "missing sourceConversation")
+    requester_raw = str(value.get("requesterId") or "").strip()
+    requester = resolve_trusted_requester(requester_raw, config)
+    raw_recipients = value.get("recipientIds")
+    if not isinstance(raw_recipients, list) or not raw_recipients:
+        raise ReminderError("REMINDER_RECIPIENTS_INVALID", "recipientIds must be a non-empty list")
+    recipients = [resolve_identity(str(item), config) for item in raw_recipients]
+    dedup: dict[str, dict[str, Any]] = {str(item["id"]): item for item in recipients}
+    recipients = list(dedup.values())
+    content = str(value.get("content") or "").strip()
+    if not content:
+        raise ReminderError("REMINDER_CONTENT_INVALID", "content must not be empty")
+    if len(content) > 1000:
+        raise ReminderError("REMINDER_CONTENT_INVALID", "content is too long")
+    source_value = {"type": str(source.get("type") or ""), "id": str(source.get("id") or "")}
+    source_target(source_value, config)
+    source_identity = resolve_identity(source_value["id"], config)
+    if source_value["type"] == "private":
+        if source_identity.get("type") != "person" or source_identity.get("id") != requester["id"]:
+            raise ReminderError(
+                "REMINDER_SOURCE_REQUESTER_MISMATCH",
+                "private sourceConversation must identify the trusted requester",
+            )
+    elif source_identity.get("type") != "group":
+        raise ReminderError("REMINDER_SOURCE_INVALID", "group sourceConversation must identify a configured group")
+    has_schedule = "schedule" in value
+    has_schedules = "schedules" in value
+    if has_schedule == has_schedules:
+        raise ReminderError("REMINDER_SCHEDULE_INVALID", "supply exactly one of schedule or schedules")
+    raw_schedules = value.get("schedules") if has_schedules else [value.get("schedule")]
+    if not isinstance(raw_schedules, list) or not raw_schedules:
+        raise ReminderError("REMINDER_SCHEDULE_INVALID", "schedules must be a non-empty list")
+    schedules = [normalize_schedule(item, config) for item in raw_schedules]
+    if len({json_dump(item) for item in schedules}) != len(schedules):
+        raise ReminderError("REMINDER_SCHEDULE_INVALID", "Reminder plan schedules must be unique")
+    calendar_value = value.get("calendar") if isinstance(value.get("calendar"), dict) else {}
+    required_fields = ["content", "calendar.requested"]
+    if any(str(recipient["id"]) != str(requester["id"]) for recipient in recipients):
+        required_fields.append("recipientIds")
+    required_fields.extend(
+        [f"schedules[{index}]" for index in range(len(schedules))]
+        if has_schedules else ["schedule"]
+    )
+    if calendar_value.get("requested") is True:
+        required_fields.append("calendar.durationMinutes")
+        if calendar_value.get("eventSchedule") is not None:
+            required_fields.append("calendar.eventSchedule")
+        required_fields.extend(
+            f"calendar.{field}" for field in ("summary", "description", "location")
+            if field in calendar_value
+        )
+    provenance = normalize_provenance(
+        value.get("provenance"), source_value, str(requester["id"]), required_fields,
+    )
+    if has_schedules and provenance is None:
+        raise ReminderError("REMINDER_PROVENANCE_REQUIRED", "multi-schedule Reminder plans require provenance")
+    calendar = normalize_calendar(
+        value.get("calendar"), schedules, content,
+        verbatim_request=value.get("verbatimRequest"), provenance=provenance,
+    )
+    scope = "group" if len(recipients) == 1 and recipients[0].get("type") == "group" else ("personal" if len(recipients) == 1 else "multi_person")
+    return {
+        "config": config,
+        "source": source_value,
+        "requester": requester,
+        "recipients": recipients,
+        "scope": scope,
+        "content": content,
+        "schedule": schedules[0] if len(schedules) == 1 else None,
+        "schedules": schedules,
+        "calendar": calendar,
+        "provenance": provenance,
+        "notifyRecipients": value.get("notifyRecipients", True) is not False,
+    }
+
+
+def intent_hash(normalized: dict[str, Any]) -> str:
+    stable = {
+        "source": normalized["source"],
+        "requesterId": normalized["requester"]["id"],
+        "recipientIds": sorted(str(item["id"]) for item in normalized["recipients"]),
+        "content": normalized["content"],
+        "schedules": normalized["schedules"],
+        "calendar": normalized["calendar"],
+    }
+    return hashlib.sha256(json_dump(stable).encode("utf-8")).hexdigest()
+
+
+def record_path(reminder_id: str) -> Path:
+    if not re.fullmatch(r"rem-[A-Za-z0-9._-]+", reminder_id):
+        raise ReminderError("REMINDER_ID_INVALID", "invalid reminder id")
+    return LINKS / f"{reminder_id}.json"
+
+
+def description_metadata(job: dict[str, Any]) -> dict[str, Any] | None:
+    description = str(job.get("description") or "")
+    if not description.startswith(MANAGED_DESCRIPTION_PREFIX):
+        return None
+    try:
+        value = json.loads(description[len(MANAGED_DESCRIPTION_PREFIX):])
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(value, dict) or value.get("schema") != "benson.reminder.v4":
+        return None
+    reminder_id = str(value.get("reminderId") or "")
+    recipient_id = str(value.get("recipientId") or "")
+    if not re.fullmatch(r"rem-[A-Za-z0-9._-]+", reminder_id) or not recipient_id:
+        return None
+    return value
+
+
+def managed_description(
+    reminder_id: str,
+    recipient_id: str,
+    index: int,
+    schedule_index: int,
+    timezone: str,
+    intent_digest: str | None,
+    notify_recipients: bool = True,
+    created_by: str | None = None,
+) -> str:
+    value: dict[str, Any] = {
+        "schema": "benson.reminder.v4",
+        "reminderId": reminder_id,
+        "recipientId": recipient_id,
+        "index": index,
+        "scheduleIndex": schedule_index,
+        "timezone": timezone,
+        "notifyRecipients": bool(notify_recipients),
+    }
+    if intent_digest:
+        value["intentHash"] = intent_digest
+    if created_by:
+        value["createdBy"] = created_by
+    return MANAGED_DESCRIPTION_PREFIX + json_dump(value)
+
+
+def job_content(job: dict[str, Any]) -> str:
+    payload = job.get("payload")
+    argv = payload.get("argv") if isinstance(payload, dict) else None
+    if not isinstance(argv, list) or not argv:
+        raise ReminderError("REMINDER_AUTOMATION_INVALID", "managed Automation has no command argv")
+    text = str(argv[-1])
+    return text[len("תזכורת: "):] if text.startswith("תזכורת: ") else text
+
+
+def job_schedule(job: dict[str, Any], timezone: str) -> dict[str, Any]:
+    schedule = job.get("schedule")
+    if not isinstance(schedule, dict):
+        raise ReminderError("REMINDER_AUTOMATION_INVALID", "managed Automation has no schedule")
+    kind = str(schedule.get("kind") or "")
+    if kind == "at":
+        value = str(schedule.get("at") or "")
+        parsed = parse_aware_datetime(value, "Automation one-shot time")
+        return {
+            "type": "one-shot",
+            "resolvedTime": parsed.isoformat(timespec="seconds"),
+            "timezone": timezone,
+        }
+    if kind == "cron":
+        expr = str(schedule.get("expr") or "")
+        if not expr:
+            raise ReminderError("REMINDER_AUTOMATION_INVALID", "managed Automation has an empty cron expression")
+        return {
+            "type": "recurring",
+            "cron": expr,
+            "timezone": str(schedule.get("tz") or timezone),
+        }
+    raise ReminderError("REMINDER_AUTOMATION_INVALID", f"unsupported managed Automation schedule kind: {kind}")
+
+
+def read_link(reminder_id: str) -> dict[str, Any] | None:
+    path = record_path(reminder_id)
+    if not path.is_file():
+        return None
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise ReminderError("REMINDER_LINK_INVALID", f"invalid Calendar link for {reminder_id}: {exc}") from exc
+    if not isinstance(value, dict) or value.get("schema") != "benson.reminder-calendar-link.v1":
+        raise ReminderError("REMINDER_LINK_INVALID", f"invalid Calendar link: {reminder_id}")
+    return value
+
+
+def persist_link(record: dict[str, Any]) -> None:
+    reminder_id = str(record["reminderId"])
+    path = record_path(reminder_id)
+    calendar = record.get("calendar")
+    if not isinstance(calendar, dict) or calendar.get("requested") is not True:
+        path.unlink(missing_ok=True)
+        return
+    value = {
+        "schema": "benson.reminder-calendar-link.v1",
+        "reminderId": reminder_id,
+        "automationIds": [str(item["jobId"]) for item in record.get("cronJobs", [])],
+        "calendar": calendar,
+        "createdAt": str(record.get("createdAt") or now_utc()),
+        "updatedAt": now_utc(),
+    }
+    atomic_write(path, value)
+
+
+def record_from_jobs(reminder_id: str, jobs: list[dict[str, Any]]) -> dict[str, Any]:
+    decorated: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for job in jobs:
+        meta = description_metadata(job)
+        if meta is None or str(meta["reminderId"]) != reminder_id:
+            continue
+        decorated.append((int(meta.get("index") or 0), job, meta))
+    decorated.sort(key=lambda item: (item[0], str(item[1].get("id") or "")))
+    if not decorated:
+        raise ReminderError("REMINDER_NOT_FOUND", f"reminder not found: {reminder_id}")
+
+    first_job, first_meta = decorated[0][1], decorated[0][2]
+    timezone = str(first_meta.get("timezone") or "Asia/Jerusalem")
+    content = job_content(first_job)
+    enabled = [job.get("enabled", True) is not False for _, job, _ in decorated]
+    if any(enabled) and not all(enabled):
+        raise ReminderError("REMINDER_AUTOMATION_PARTIAL_STATE", f"managed Automation group has mixed enabled state: {reminder_id}")
+
+    cron_jobs: list[dict[str, Any]] = []
+    intent_hashes: set[str] = set()
+    notify_values: set[bool] = set()
+    created_by_values: set[str] = set()
+    schedules_by_index: dict[int, dict[str, Any]] = {}
+    recipient_ids: list[str] = []
+    for index, job, meta in decorated:
+        if job_content(job) != content:
+            raise ReminderError("REMINDER_AUTOMATION_PARTIAL_STATE", f"managed Automation group content is inconsistent: {reminder_id}")
+        schedule_index = int(meta.get("scheduleIndex") or 0)
+        current_schedule = job_schedule(job, str(meta.get("timezone") or timezone))
+        if schedule_index in schedules_by_index and schedules_by_index[schedule_index] != current_schedule:
+            raise ReminderError("REMINDER_AUTOMATION_PARTIAL_STATE", f"managed Automation schedule group is inconsistent: {reminder_id}")
+        schedules_by_index[schedule_index] = current_schedule
+        job_id = job_id_of(job)
+        cron_jobs.append({
+            "jobId": job_id,
+            "recipientId": str(meta["recipientId"]),
+            "scheduleIndex": schedule_index,
+            "name": str(job.get("name") or ""),
+            "metadata": meta,
+        })
+        if str(meta["recipientId"]) not in recipient_ids:
+            recipient_ids.append(str(meta["recipientId"]))
+        if meta.get("intentHash"):
+            intent_hashes.add(str(meta["intentHash"]))
+        notify_values.add(meta.get("notifyRecipients", True) is not False)
+        created_by_values.add(str(meta.get("createdBy") or ""))
+
+    if len(notify_values) != 1:
+        raise ReminderError(
+            "REMINDER_AUTOMATION_PARTIAL_STATE",
+            f"managed Automation group has inconsistent notifyRecipients: {reminder_id}",
+        )
+    if len(created_by_values) != 1:
+        raise ReminderError(
+            "REMINDER_AUTOMATION_PARTIAL_STATE",
+            f"managed Automation group has inconsistent createdBy: {reminder_id}",
+        )
+
+    link = read_link(reminder_id)
+    calendar = dict(link.get("calendar") or {}) if link else {"requested": False}
+    created_ms = min(int(job.get("createdAtMs") or 0) for _, job, _ in decorated)
+    updated_ms = max(int(job.get("updatedAtMs") or created_ms) for _, job, _ in decorated)
+    schedule_indexes = sorted(schedules_by_index)
+    if schedule_indexes != list(range(len(schedule_indexes))):
+        raise ReminderError("REMINDER_AUTOMATION_PARTIAL_STATE", f"managed Automation schedule indexes are not contiguous: {reminder_id}")
+    schedules = [schedules_by_index[index] for index in schedule_indexes]
+    expected_pairs = {(schedule_index, recipient_id) for schedule_index in schedule_indexes for recipient_id in recipient_ids}
+    actual_pairs = {(int(item["scheduleIndex"]), str(item["recipientId"])) for item in cron_jobs}
+    if actual_pairs != expected_pairs or len(actual_pairs) != len(cron_jobs):
+        raise ReminderError("REMINDER_AUTOMATION_PARTIAL_STATE", f"managed Automation plan matrix is incomplete or duplicated: {reminder_id}")
+    record: dict[str, Any] = {
+        "schemaVersion": 4,
+        "reminderId": reminder_id,
+        "status": "active" if all(enabled) else "paused",
+        "recipientIds": recipient_ids,
+        "content": content,
+        "schedules": schedules,
+        "calendar": calendar,
+        "cronJobs": cron_jobs,
+        "notifyRecipients": next(iter(notify_values)),
+        "createdAt": dt.datetime.fromtimestamp(created_ms / 1000, dt.timezone.utc).isoformat(timespec="seconds") if created_ms else now_utc(),
+        "updatedAt": dt.datetime.fromtimestamp(updated_ms / 1000, dt.timezone.utc).isoformat(timespec="seconds") if updated_ms else now_utc(),
+    }
+    if len(schedules) == 1:
+        record["schedule"] = schedules[0]
+    if len(intent_hashes) == 1:
+        record["intentHash"] = next(iter(intent_hashes))
+    created_by = next(iter(created_by_values))
+    if created_by:
+        record["createdBy"] = created_by
+    if link and set(link.get("automationIds") or []) != {str(item["jobId"]) for item in cron_jobs}:
+        raise ReminderError("REMINDER_LINK_INVALID", f"Calendar link Automation ids do not match live state: {reminder_id}")
+    return record
+
+
+def load_records() -> list[dict[str, Any]]:
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for job in all_jobs():
+        meta = description_metadata(job)
+        if meta is None:
+            continue
+        groups.setdefault(str(meta["reminderId"]), []).append(job)
+    return [record_from_jobs(reminder_id, jobs) for reminder_id, jobs in sorted(groups.items())]
+
+
+def read_record(reminder_id: str) -> dict[str, Any]:
+    record_path(reminder_id)
+    jobs = [job for job in all_jobs() if (description_metadata(job) or {}).get("reminderId") == reminder_id]
+    return record_from_jobs(reminder_id, jobs)
+
+
+def find_job_by_name(name: str) -> dict[str, Any]:
+    matches = [job for job in all_jobs() if str(job.get("name") or "") == name]
+    if len(matches) != 1:
+        raise ReminderError("REMINDER_CRON_VERIFY_FAILED", f"expected one cron job named {name}, found {len(matches)}")
+    job_id = str(matches[0].get("id") or "")
+    if not job_id:
+        raise ReminderError("REMINDER_CRON_VERIFY_FAILED", f"cron job {name} has no id")
+    return cron_get(job_id) or matches[0]
+
+
+def job_id_of(job: dict[str, Any]) -> str:
+    job_id = str(job.get("id") or "")
+    if not job_id:
+        raise ReminderError("REMINDER_CRON_VERIFY_FAILED", "cron job has no id")
+    return job_id
+
+
+def command_argv(content: str) -> str:
+    return json_dump(["/usr/bin/printf", "%s\\n", f"תזכורת: {content}"])
+
+
+def walk_json_objects(value: Any):
+    if isinstance(value, dict):
+        yield value
+        for child in value.values():
+            yield from walk_json_objects(child)
+    elif isinstance(value, list):
+        for child in value:
+            yield from walk_json_objects(child)
+
+
+def invoke_gog_calendar(operation: str, args: list[str]) -> Any:
+    if not GOG.is_absolute() or not GOG_HOME.is_absolute():
+        raise ReminderError(
+            "REMINDER_CALENDAR_CONFIG_INVALID",
+            "gog binary and home paths must be absolute",
+        )
+    if not GOG_ACCOUNT.strip():
+        raise ReminderError("REMINDER_CALENDAR_CONFIG_INVALID", "gog account must be explicit")
+    proc = subprocess.run(
+        [
+            str(GOG),
+            "--home",
+            str(GOG_HOME),
+            "--account",
+            GOG_ACCOUNT,
+            "--no-input",
+            "--json",
+            *args,
+        ],
+        text=True,
+        capture_output=True,
+        timeout=45,
+        check=False,
+    )
+    if proc.returncode != 0:
+        detail = proc.stderr.strip() or proc.stdout.strip() or f"gog exited {proc.returncode}"
+        retryable = proc.returncode in {1, 7, 8}
+        raise ReminderError(
+            "REMINDER_CALENDAR_TOOL_FAILED",
+            f"{operation}: {detail}",
+            retryable=retryable,
+        )
+    try:
+        return json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise ReminderError("REMINDER_CALENDAR_RESPONSE_INVALID", f"{operation} returned invalid JSON") from exc
+
+
+def find_calendar_event(output: Any, expected_id: str | None = None, *, require_full_event: bool = False) -> dict[str, Any]:
+    for item in walk_json_objects(output):
+        event_id = str(item.get("id") or "").strip()
+        if not event_id:
+            continue
+        if expected_id and event_id != expected_id:
+            continue
+        if require_full_event:
+            if not isinstance(item.get("start"), dict) or not isinstance(item.get("end"), dict) or "summary" not in item:
+                continue
+        elif "status" not in item and "htmlLink" not in item:
+            continue
+        return item
+    if expected_id:
+        raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"calendar event {expected_id} was not found")
+    raise ReminderError("REMINDER_CALENDAR_CREATE_FAILED", "created Calendar event id was not found")
+
+
+def calendar_semantic_spec(calendar: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(calendar, dict) or calendar.get("requested") is not True:
+        return {"requested": False}
+    result: dict[str, Any] = {
+        "requested": True,
+        "calendarId": str(calendar.get("calendarId") or "primary"),
+        "summary": str(calendar.get("summary") or ""),
+        "summaryFollowsContent": calendar.get("summaryFollowsContent") is not False,
+        "durationMinutes": calendar.get("durationMinutes"),
+    }
+    if isinstance(calendar.get("eventSchedule"), dict):
+        result["eventSchedule"] = dict(calendar["eventSchedule"])
+        result["eventScheduleFollowsReminder"] = calendar.get("eventScheduleFollowsReminder", True) is not False
+    for key in ("description", "location"):
+        if calendar.get(key):
+            result[key] = str(calendar[key])
+    return result
+
+
+def calendar_expected(spec: dict[str, Any], schedule: dict[str, Any]) -> dict[str, str]:
+    if spec.get("requested") is not True:
+        raise ReminderError("REMINDER_CALENDAR_INVALID", "Calendar spec is not requested")
+    effective_schedule = spec.get("eventSchedule") if isinstance(spec.get("eventSchedule"), dict) else schedule
+    if effective_schedule.get("type") != "one-shot":
+        raise ReminderError("REMINDER_CALENDAR_RECURRING_UNSUPPORTED", "Calendar linkage currently supports one-shot reminders only")
+    start = parse_aware_datetime(str(effective_schedule.get("resolvedTime") or ""), "calendar start")
+    duration = spec.get("durationMinutes")
+    if isinstance(duration, bool) or not isinstance(duration, int) or not (1 <= duration <= 1440):
+        raise ReminderError("REMINDER_CALENDAR_RECORD_INVALID", "linked Calendar duration is invalid")
+    end = start + dt.timedelta(minutes=duration)
+    return {
+        "summary": str(spec.get("summary") or ""),
+        "start": start.isoformat(timespec="seconds"),
+        "end": end.isoformat(timespec="seconds"),
+        "timezone": str(effective_schedule.get("timezone") or ""),
+    }
+
+
+def verify_calendar_event(event: dict[str, Any], expected: dict[str, str]) -> dict[str, Any]:
+    event_id = str(event.get("id") or "").strip()
+    if not event_id:
+        raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", "Calendar event has no id")
+    if str(event.get("status") or "").lower() == "cancelled":
+        raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"Calendar event {event_id} is cancelled")
+    actual_summary = str(event.get("summary") or "")
+    if actual_summary != expected["summary"]:
+        raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"Calendar summary mismatch: expected {expected['summary']!r}, got {actual_summary!r}")
+    for field in ("start", "end"):
+        container = event.get(field)
+        if not isinstance(container, dict):
+            raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"Calendar event {field} is missing")
+        actual_value = str(container.get("dateTime") or "").strip()
+        actual_dt = parse_aware_datetime(actual_value, f"calendar event {field}")
+        expected_dt = parse_aware_datetime(expected[field], f"expected calendar {field}")
+        if actual_dt.timestamp() != expected_dt.timestamp():
+            raise ReminderError("REMINDER_CALENDAR_VERIFY_FAILED", f"Calendar {field} mismatch: expected {expected[field]}, got {actual_value}")
+    return {
+        "eventId": event_id,
+        "verified": True,
+        "summary": actual_summary,
+        "start": str(event["start"]["dateTime"]),
+        "end": str(event["end"]["dateTime"]),
+        "status": event.get("status"),
+    }
+
+
+def calendar_create_verified(spec: dict[str, Any], schedule: dict[str, Any]) -> dict[str, Any]:
+    expected = calendar_expected(spec, schedule)
+    calendar_id = str(spec.get("calendarId") or "primary")
+    create_args = [
+        "calendar", "create", calendar_id,
+        "--summary", expected["summary"],
+        "--from", expected["start"],
+        "--to", expected["end"],
+        "--timezone", expected["timezone"],
+        "--send-updates", "none",
+    ]
+    for key in ("description", "location"):
+        if spec.get(key):
+            create_args.extend([f"--{key}", str(spec[key])])
+    event_id = ""
+    try:
+        create_output = invoke_gog_calendar("calendar.create", create_args)
+        created = find_calendar_event(create_output)
+        event_id = str(created["id"])
+        get_output = invoke_gog_calendar(
+            "calendar.event",
+            ["calendar", "event", calendar_id, event_id],
+        )
+        persisted = find_calendar_event(get_output, expected_id=event_id, require_full_event=True)
+        verified = verify_calendar_event(persisted, expected)
+        return {
+            "created": True,
+            "verified": True,
+            "eventId": event_id,
+            "htmlLink": created.get("htmlLink"),
+            "status": verified.get("status"),
+            "summary": verified["summary"],
+            "start": verified["start"],
+            "end": verified["end"],
+        }
+    except Exception as exc:
+        rollback_error: Exception | None = None
+        if event_id:
+            try:
+                calendar_delete_verified(event_id, str(spec.get("calendarId") or "primary"))
+            except Exception as rollback_exc:
+                rollback_error = rollback_exc
+        if rollback_error is not None:
+            raise ReminderError("REMINDER_CALENDAR_ROLLBACK_FAILED", f"Calendar create failed: {exc}; rollback failed: {rollback_error}") from exc
+        raise
+
+
+def calendar_get_verified(calendar: dict[str, Any], schedule: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(calendar, dict) or calendar.get("requested") is not True:
+        return {"verified": True, "requested": False}
+    event_id = str(calendar.get("eventId") or "").strip()
+    if not event_id:
+        raise ReminderError("REMINDER_CALENDAR_RECORD_INVALID", "linked Calendar record has no eventId")
+    spec = calendar_semantic_spec(calendar)
+    expected = calendar_expected(spec, schedule)
+    output = invoke_gog_calendar(
+        "calendar.event",
+        ["calendar", "event", str(spec.get("calendarId") or "primary"), event_id],
+    )
+    event = find_calendar_event(output, expected_id=event_id, require_full_event=True)
+    return verify_calendar_event(event, expected)
+
+
+def calendar_delete_verified(event_id: str, calendar_id: str = "primary") -> None:
+    output = invoke_gog_calendar(
+        "calendar.delete",
+        [
+            "--force",
+            "calendar", "delete", calendar_id, event_id,
+            "--send-updates", "none",
+        ],
+    )
+
+    candidates: list[dict[str, Any]] = []
+    if isinstance(output, dict):
+        candidates.append(output)
+    candidates.extend(
+        item for item in walk_json_objects(output)
+        if isinstance(item, dict)
+    )
+
+    for item in candidates:
+        deleted_id = str(item.get("deletedEventId") or item.get("eventId") or "").strip()
+        ok = item.get("ok") is True or item.get("deleted") is True
+        if ok and deleted_id == event_id:
+            return
+
+    raise ReminderError(
+        "REMINDER_CALENDAR_DELETE_VERIFY_FAILED",
+        f"Calendar delete was not verified for event {event_id}",
+    )
+
+
+def calendar_record_from_execution(spec: dict[str, Any], execution: dict[str, Any]) -> dict[str, Any]:
+    record = calendar_semantic_spec(spec)
+    record.update({
+        "eventId": str(execution["eventId"]),
+        "start": str(execution["start"]),
+        "end": str(execution["end"]),
+        "status": execution.get("status"),
+    })
+    if execution.get("htmlLink"):
+        record["htmlLink"] = execution["htmlLink"]
+    return record
+
+
+def calendar_linked(record: dict[str, Any]) -> bool:
+    calendar = record.get("calendar")
+    return isinstance(calendar, dict) and calendar.get("requested") is True
+
+
+def create_job(
+    reminder_id: str,
+    index: int,
+    recipient: dict[str, Any],
+    content: str,
+    schedule: dict[str, Any],
+    config: dict[str, Any],
+    *,
+    schedule_index: int = 0,
+    name_nonce: str | None = None,
+    intent_digest: str | None = None,
+    notify_recipients: bool = True,
+    created_by: str | None = None,
+    initially_disabled: bool = False,
+) -> dict[str, Any]:
+    slug = re.sub(r"[^A-Za-z0-9_-]+", "-", str(recipient["id"]))[:30].strip("-") or "recipient"
+    suffix = f"-{name_nonce}" if name_nonce else ""
+    name = f"reminder-service-{slug}-{reminder_id[-16:]}-{index}{suffix}"
+    args = [
+        "automations", "add",
+        "--name", name,
+        "--description", managed_description(
+            reminder_id,
+            str(recipient["id"]),
+            index,
+            schedule_index,
+            str(schedule["timezone"]),
+            intent_digest,
+            notify_recipients,
+            created_by,
+        ),
+        "--agent", "reminder-service",
+        "--session", "isolated",
+        "--session-key", "agent:reminder-service:reminder-delivery",
+        "--command-argv", command_argv(content),
+        "--timeout-seconds", "10",
+        "--output-max-bytes", "4096",
+        "--announce",
+        "--channel", str(recipient.get("channel") or "whatsapp"),
+        "--to", str(recipient["to"]),
+        "--account", str(config.get("accountId") or "benson"),
+        "--best-effort-deliver",
+        "--json",
+    ]
+    if intent_digest:
+        args += ["--declaration-key", f"benson-reminder:{intent_digest}:{index}"]
+    if initially_disabled:
+        args += ["--disabled"]
+    if schedule["type"] == "one-shot":
+        args += ["--at", str(schedule["resolvedTime"]), "--delete-after-run"]
+    else:
+        args += ["--cron", str(schedule["cron"]), "--tz", str(schedule["timezone"])]
+    run(args, timeout=90)
+    job = find_job_by_name(name)
+    if str(job.get("name") or "") != name:
+        raise ReminderError("REMINDER_CRON_VERIFY_FAILED", f"cron job name mismatch for {name}")
+    if (job.get("enabled", True) is not False) == initially_disabled:
+        raise ReminderError("REMINDER_CRON_VERIFY_FAILED", f"new cron job enabled state mismatch: {name}")
+    return job
+
+
+def remove_jobs(job_ids: list[str]) -> list[str]:
+    failures = []
+    for job_id in reversed(job_ids):
+        try:
+            run(["automations", "rm", job_id])
+            if cron_get(job_id, required=False) is not None:
+                failures.append(job_id)
+        except Exception:
+            failures.append(job_id)
+    return failures
+
+
+def make_create_result(
+    record: dict[str, Any],
+    normalized: dict[str, Any],
+    *,
+    idempotent: bool = False,
+) -> dict[str, Any]:
+    deliveries = lifecycle_deliveries(
+        record,
+        str(normalized["requester"]["id"]),
+        normalized["config"],
+        "create",
+    )
+    return {
+        "status": "success",
+        "operation": "create",
+        "reminderId": record["reminderId"],
+        "idempotent": idempotent,
+        "transaction": {"status": "success", "verified": True},
+        "data": {"record": record},
+        "createdJobs": record["cronJobs"],
+        "transport": transport_result(deliveries),
+    }
+
+
+def cmd_create(args: argparse.Namespace) -> int:
+    raw = read_input(args.input)
+    if "items" in raw:
+        return cmd_create_plan(raw)
+    normalized = normalize_create(raw)
+    digest = intent_hash(normalized)
+    config = normalized["config"]
+    for record in load_records():
+        if record.get("intentHash") != digest or record.get("status") not in {"active", "paused"}:
+            continue
+        ids = [str(item.get("jobId")) for item in record.get("cronJobs", []) if isinstance(item, dict) and item.get("jobId")]
+        if ids and all(cron_get(job_id, required=False) is not None for job_id in ids):
+            if calendar_linked(record):
+                calendar_get_verified(record["calendar"], record_schedules(record)[0])
+            if set(record["recipientIds"]) != {str(item["id"]) for item in normalized["recipients"]}:
+                raise ReminderError("REMINDER_IDEMPOTENCY_VERIFY_FAILED", "matching declaration has different recipients")
+            if not schedules_match(record_schedules(record), normalized["schedules"]):
+                raise ReminderError("REMINDER_IDEMPOTENCY_VERIFY_FAILED", "matching declaration has different schedules")
+            expected_jobs = len(normalized["schedules"]) * len(normalized["recipients"])
+            if len(record.get("cronJobs") or []) != expected_jobs:
+                raise ReminderError("REMINDER_IDEMPOTENCY_VERIFY_FAILED", "matching declaration has an incomplete Automation matrix")
+            if record.get("createdBy") and record.get("createdBy") != normalized["requester"]["id"]:
+                raise ReminderError("REMINDER_IDEMPOTENCY_VERIFY_FAILED", "matching declaration has different creator")
+            return emit(make_create_result(record, normalized, idempotent=True))
+
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    reminder_id = f"rem-{stamp}-{uuid.uuid4().hex[:16]}"
+    created: list[dict[str, Any]] = []
+    calendar_record: dict[str, Any] = {"requested": False}
+    calendar_event_id = ""
+    try:
+        job_index = 0
+        for schedule_index, schedule in enumerate(normalized["schedules"]):
+            for recipient in normalized["recipients"]:
+                job_index += 1
+                job = create_job(
+                    reminder_id,
+                    job_index,
+                    recipient,
+                    normalized["content"],
+                    schedule,
+                    config,
+                    schedule_index=schedule_index,
+                    intent_digest=digest,
+                    notify_recipients=normalized["notifyRecipients"],
+                    created_by=str(normalized["requester"]["id"]),
+                    initially_disabled=True,
+                )
+                created.append({
+                    "jobId": job_id_of(job), "recipientId": str(recipient["id"]),
+                    "scheduleIndex": schedule_index, "name": str(job.get("name") or ""),
+                })
+
+        if normalized["calendar"].get("requested") is True:
+            execution = calendar_create_verified(normalized["calendar"], normalized["schedules"][0])
+            calendar_event_id = str(execution["eventId"])
+            calendar_record = calendar_record_from_execution(normalized["calendar"], execution)
+
+        now = now_utc()
+        record = {
+            "schemaVersion": 4,
+            "reminderId": reminder_id,
+            "status": "paused",
+            "scope": normalized["scope"],
+            "createdBy": str(normalized["requester"]["id"]),
+            "recipientIds": [str(item["id"]) for item in normalized["recipients"]],
+            "content": normalized["content"],
+            "schedules": normalized["schedules"],
+            "calendar": calendar_record,
+            "cronJobs": created,
+            "notifyRecipients": normalized["notifyRecipients"],
+            "intentHash": digest,
+            "createdAt": now,
+            "updatedAt": now,
+        }
+        if len(normalized["schedules"]) == 1:
+            record["schedule"] = normalized["schedules"][0]
+        persist_link(record)
+        for item in created:
+            job_id = str(item["jobId"])
+            run(["automations", "enable", job_id])
+            cron_get(job_id)
+        record["status"] = "active"
+        record["updatedAt"] = now_utc()
+        persist_link(record)
+        verified = read_record(reminder_id)
+        verify_jobs(verified, expected_enabled=True)
+        if (verified.get("content") != normalized["content"]
+                or verified.get("recipientIds") != [str(item["id"]) for item in normalized["recipients"]]
+                or not schedules_match(record_schedules(verified), normalized["schedules"])
+                or len(verified.get("cronJobs") or []) != len(created)):
+            raise ReminderError("REMINDER_CREATE_VERIFY_FAILED", "durable Reminder plan readback mismatch")
+        if calendar_linked(verified):
+            calendar_get_verified(verified["calendar"], normalized["schedules"][0])
+        return emit(make_create_result(verified, normalized))
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        try:
+            live_jobs = [
+                job for job in all_jobs()
+                if (description_metadata(job) or {}).get("reminderId") == reminder_id
+            ]
+        except Exception as read_exc:
+            raise ReminderError(
+                "REMINDER_CREATE_RECONCILIATION_UNAVAILABLE",
+                f"creation failed: {exc}; Automation side effects could not be read: {read_exc}",
+            ) from exc
+        # Native add may persist and then lose its acknowledgement. Include
+        # jobs create_job could not return in deterministic compensation.
+        live_ids = [job_id_of(job) for job in live_jobs]
+        for job in live_jobs:
+            job_id = job_id_of(job)
+            if job.get("enabled", True) is not False:
+                try:
+                    run(["automations", "disable", job_id])
+                except Exception as disable_exc:
+                    rollback_failures.append(f"disable:{job_id}:{disable_exc}")
+        cron_failures = remove_jobs(live_ids)
+        if cron_failures:
+            rollback_failures.append("cron:" + ",".join(cron_failures))
+        try:
+            if any((description_metadata(job) or {}).get("reminderId") == reminder_id for job in all_jobs()):
+                rollback_failures.append("cron:managed Automation residue remains")
+        except Exception as read_exc:
+            rollback_failures.append("cron-readback:" + str(read_exc))
+        if calendar_event_id:
+            try:
+                calendar_delete_verified(calendar_event_id, str(normalized["calendar"].get("calendarId") or "primary"))
+            except Exception as rollback_exc:
+                rollback_failures.append("calendar:" + str(rollback_exc))
+        if rollback_failures:
+            raise ReminderError("REMINDER_CREATE_ROLLBACK_FAILED", f"creation failed: {exc}; rollback failures: {'; '.join(rollback_failures)}") from exc
+        record_path(reminder_id).unlink(missing_ok=True)
+        raise
+
+
+def _create_plan_result(records: list[dict[str, Any]], normalized: list[dict[str, Any]], *, idempotent: bool = False) -> dict[str, Any]:
+    deliveries = [
+        delivery
+        for record, item in zip(records, normalized)
+        for delivery in lifecycle_deliveries(
+            record, str(item["requester"]["id"]), item["config"], "create",
+        )
+    ]
+    return {
+        "status": "success", "operation": "create", "idempotent": idempotent,
+        "transaction": {"status": "success", "verified": True},
+        "data": {"records": records},
+        "reminderIds": [record["reminderId"] for record in records],
+        "createdJobs": [job for record in records for job in record["cronJobs"]],
+        "transport": transport_result(deliveries),
+    }
+
+
+def cmd_create_plan(value: dict[str, Any]) -> int:
+    if set(value) != {"items"} or not isinstance(value["items"], list) or len(value["items"]) != 2:
+        raise ReminderError("REMINDER_PLAN_INVALID", "create plan requires exactly two items")
+    items = value["items"]
+    for item in items:
+        if not isinstance(item, dict):
+            raise ReminderError("REMINDER_PLAN_INVALID", "each plan item must be an object")
+        allowed_item_fields = {
+            "sourceConversation", "requesterId", "recipientIds", "content",
+            "verbatimRequest", "provenance", "schedule", "calendar",
+            "notifyRecipients",
+        }
+        if set(item) - allowed_item_fields or "schedule" not in item or "schedules" in item:
+            raise ReminderError("REMINDER_PLAN_INVALID", "each plan item requires exactly one schedule")
+        raw_schedule = item.get("schedule")
+        if (not isinstance(raw_schedule, dict)
+                or set(raw_schedule) != {"type", "resolvedTime", "timezone"}
+                or raw_schedule.get("type") != "one-shot"):
+            raise ReminderError(
+                "REMINDER_PLAN_INVALID",
+                "each plan item requires a strict one-shot schedule",
+            )
+        raw_calendar = item.get("calendar")
+        allowed_calendar_fields = {"requested", "durationMinutes", "calendarId", "eventSchedule"}
+        if (not isinstance(raw_calendar, dict)
+                or set(raw_calendar) - allowed_calendar_fields
+                or raw_calendar.get("requested") is not True):
+            raise ReminderError("REMINDER_PLAN_INVALID", "each plan item requires a Calendar event")
+        raw_event_schedule = raw_calendar.get("eventSchedule")
+        if (not isinstance(raw_event_schedule, dict)
+                or set(raw_event_schedule) != {"type", "resolvedTime", "timezone"}
+                or raw_event_schedule.get("type") != "one-shot"):
+            raise ReminderError(
+                "REMINDER_PLAN_INVALID",
+                "each plan item requires a strict one-shot Calendar eventSchedule",
+            )
+        if not isinstance(item.get("provenance"), dict):
+            raise ReminderError("REMINDER_PROVENANCE_REQUIRED", "each plan item requires provenance")
+    normalized = [normalize_create(item) for item in items]
+    if any(item["source"] != normalized[0]["source"]
+           or item["requester"]["id"] != normalized[0]["requester"]["id"]
+           for item in normalized[1:]):
+        raise ReminderError("REMINDER_PLAN_ROUTE_MISMATCH", "plan items must share one trusted requester and source")
+    item_hashes = [intent_hash(item) for item in normalized]
+    if len(set(item_hashes)) != 2:
+        raise ReminderError("REMINDER_PLAN_DUPLICATE", "plan items must be distinct")
+    plan_hash = hashlib.sha256(json_dump(sorted(item_hashes)).encode("utf-8")).hexdigest()
+    digests = [
+        hashlib.sha256(f"benson.atomic-pairs.v1:{plan_hash}:{item_hash}".encode("utf-8")).hexdigest()
+        for item_hash in item_hashes
+    ]
+    existing = load_records()
+    matches = [[record for record in existing if record.get("intentHash") == digest] for digest in digests]
+    if any(len(group) > 1 for group in matches):
+        raise ReminderError("REMINDER_PLAN_PARTIAL_STATE", "duplicate plan item already exists")
+    if any(matches) and not all(matches):
+        raise ReminderError("REMINDER_PLAN_PARTIAL_STATE", "only part of this plan exists; inspect state before retry")
+    if all(matches):
+        records = [group[0] for group in matches]
+        for record, item in zip(records, normalized):
+            if record.get("status") != "active" or record.get("createdBy") != item["requester"]["id"]:
+                raise ReminderError("REMINDER_PLAN_PARTIAL_STATE", "existing plan item is not active or owned by requester")
+            if (record.get("content") != item["content"]
+                    or record.get("recipientIds") != [str(recipient["id"]) for recipient in item["recipients"]]
+                    or not schedules_match(record_schedules(record), item["schedules"])
+                    or len(record.get("cronJobs") or []) != len(item["recipients"])):
+                raise ReminderError("REMINDER_PLAN_PARTIAL_STATE", "existing plan item does not match intent")
+            verify_jobs(record, expected_enabled=True)
+            if not calendar_linked(record) or calendar_semantic_spec(record["calendar"]) != item["calendar"]:
+                raise ReminderError("REMINDER_PLAN_PARTIAL_STATE", "existing plan Calendar link does not match intent")
+            calendar_get_verified(record["calendar"], item["schedules"][0])
+        if len({str(record["calendar"].get("eventId") or "") for record in records}) != 2:
+            raise ReminderError("REMINDER_PLAN_PARTIAL_STATE", "plan Calendar events are not distinct")
+        return emit(_create_plan_result(records, normalized, idempotent=True))
+
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    stages = [
+        {"reminderId": f"rem-{stamp}-{uuid.uuid4().hex[:16]}", "jobs": [], "eventId": "", "record": None}
+        for _ in normalized
+    ]
+    try:
+        for stage, item, digest in zip(stages, normalized, digests):
+            for index, recipient in enumerate(item["recipients"], start=1):
+                job = create_job(
+                    stage["reminderId"], index, recipient, item["content"],
+                    item["schedules"][0], item["config"],
+                    intent_digest=digest,
+                    notify_recipients=item["notifyRecipients"],
+                    created_by=str(item["requester"]["id"]),
+                    initially_disabled=True,
+                )
+                stage["jobs"].append({
+                    "jobId": job_id_of(job), "recipientId": str(recipient["id"]),
+                    "scheduleIndex": 0, "name": str(job.get("name") or ""),
+                })
+            execution = calendar_create_verified(item["calendar"], item["schedules"][0])
+            stage["eventId"] = str(execution["eventId"])
+            now = now_utc()
+            record = {
+                "schemaVersion": 4, "reminderId": stage["reminderId"],
+                "status": "paused", "scope": item["scope"],
+                "createdBy": str(item["requester"]["id"]),
+                "recipientIds": [str(recipient["id"]) for recipient in item["recipients"]],
+                "content": item["content"], "schedule": item["schedules"][0],
+                "schedules": item["schedules"],
+                "calendar": calendar_record_from_execution(item["calendar"], execution),
+                "cronJobs": stage["jobs"], "notifyRecipients": item["notifyRecipients"],
+                "intentHash": digest, "createdAt": now, "updatedAt": now,
+            }
+            stage["record"] = record
+            persist_link(record)
+        for stage in stages:
+            for job in stage["jobs"]:
+                run(["automations", "enable", str(job["jobId"])])
+                cron_get(str(job["jobId"]))
+        for stage in stages:
+            record = stage["record"]
+            record["status"] = "active"
+            record["updatedAt"] = now_utc()
+            persist_link(record)
+        records = []
+        for stage, item in zip(stages, normalized):
+            verified = read_record(stage["reminderId"])
+            verify_jobs(verified, expected_enabled=True)
+            if (verified.get("status") != "active"
+                    or verified.get("content") != item["content"]
+                    or verified.get("recipientIds") != [str(recipient["id"]) for recipient in item["recipients"]]
+                    or not schedules_match(record_schedules(verified), item["schedules"])
+                    or len(verified.get("cronJobs") or []) != len(item["recipients"])):
+                raise ReminderError("REMINDER_CREATE_VERIFY_FAILED", "durable plan item readback mismatch")
+            if not calendar_linked(verified) or calendar_semantic_spec(verified["calendar"]) != item["calendar"]:
+                raise ReminderError("REMINDER_CREATE_VERIFY_FAILED", "durable plan Calendar link mismatch")
+            calendar_get_verified(verified["calendar"], item["schedules"][0])
+            records.append(verified)
+        if len({str(record["calendar"].get("eventId") or "") for record in records}) != 2:
+            raise ReminderError("REMINDER_CREATE_VERIFY_FAILED", "plan Calendar events are not distinct")
+        return emit(_create_plan_result(records, normalized))
+    except Exception as exc:
+        reminder_ids = {str(stage["reminderId"]) for stage in stages}
+        try:
+            live_jobs = [
+                job for job in all_jobs()
+                if (description_metadata(job) or {}).get("reminderId") in reminder_ids
+            ]
+        except Exception as read_exc:
+            raise ReminderError(
+                "REMINDER_CREATE_RECONCILIATION_UNAVAILABLE",
+                f"plan creation failed: {exc}; Automation side effects could not be read: {read_exc}",
+            ) from exc
+        rollback_failures: list[str] = []
+        for job in live_jobs:
+            if job.get("enabled", True) is not False:
+                try:
+                    run(["automations", "disable", job_id_of(job)])
+                except Exception as disable_exc:
+                    rollback_failures.append(f"disable:{job_id_of(job)}:{disable_exc}")
+        failures = remove_jobs([job_id_of(job) for job in live_jobs])
+        if failures:
+            rollback_failures.append("cron:" + ",".join(failures))
+        try:
+            if any((description_metadata(job) or {}).get("reminderId") in reminder_ids for job in all_jobs()):
+                rollback_failures.append("cron:managed Automation residue remains")
+        except Exception as read_exc:
+            rollback_failures.append("cron-readback:" + str(read_exc))
+        for stage in stages:
+            if stage["eventId"]:
+                try:
+                    calendar_delete_verified(str(stage["eventId"]), "primary")
+                except Exception as calendar_exc:
+                    rollback_failures.append("calendar:" + str(calendar_exc))
+        if rollback_failures:
+            raise ReminderError(
+                "REMINDER_CREATE_ROLLBACK_FAILED",
+                f"plan creation failed: {exc}; rollback failures: {'; '.join(rollback_failures)}",
+            ) from exc
+        for stage in stages:
+            record_path(str(stage["reminderId"])).unlink(missing_ok=True)
+        raise
+
+
+def apply_edit(
+    job_id: str,
+    content: str,
+    schedule: dict[str, Any],
+    metadata: dict[str, Any],
+) -> None:
+    args = [
+        "automations", "edit", job_id,
+        "--command-argv", command_argv(content),
+        "--description", managed_description(
+            str(metadata["reminderId"]),
+            str(metadata["recipientId"]),
+            int(metadata.get("index") or 0),
+            int(metadata.get("scheduleIndex") or 0),
+            str(schedule["timezone"]),
+            None,
+            metadata.get("notifyRecipients", True) is not False,
+            str(metadata.get("createdBy") or "") or None,
+        ),
+        "--agent", "reminder-service",
+        "--session", "isolated",
+        "--session-key", "agent:reminder-service:reminder-delivery",
+    ]
+    if schedule["type"] == "one-shot":
+        args += ["--at", schedule["resolvedTime"], "--delete-after-run"]
+    else:
+        args += ["--cron", schedule["cron"], "--tz", schedule["timezone"]]
+    run(args, timeout=60)
+
+
+def verify_jobs(record: dict[str, Any], *, expected_enabled: bool | None = None) -> list[dict[str, Any]]:
+    jobs = []
+    for item in record.get("cronJobs", []):
+        if not isinstance(item, dict) or not item.get("jobId"):
+            raise ReminderError("REMINDER_RECORD_INVALID", "record contains invalid cronJobs")
+        job = cron_get(str(item["jobId"]))
+        if expected_enabled is not None and (job.get("enabled", True) is not False) != expected_enabled:
+            raise ReminderError("REMINDER_CRON_VERIFY_FAILED", f"cron enabled state mismatch: {item['jobId']}")
+        jobs.append(job)
+    if not jobs:
+        raise ReminderError("REMINDER_RECORD_INVALID", "record has no cron jobs")
+    return jobs
+
+
+def _recreate_job_for_item(record: dict[str, Any], item: dict[str, Any], index: int, config: dict[str, Any]) -> dict[str, Any]:
+    recipient = resolve_identity(str(item["recipientId"]), config)
+    schedule_index = int(item.get("scheduleIndex") or (item.get("metadata") or {}).get("scheduleIndex") or 0)
+    schedules = record_schedules(record)
+    if schedule_index < 0 or schedule_index >= len(schedules):
+        raise ReminderError("REMINDER_RECORD_INVALID", "Automation scheduleIndex is outside the Reminder plan")
+    job = create_job(
+        record["reminderId"],
+        index,
+        recipient,
+        record["content"],
+        schedules[schedule_index],
+        config,
+        schedule_index=schedule_index,
+        name_nonce="r" + uuid.uuid4().hex[:6],
+        intent_digest=str(record.get("intentHash") or "") or None,
+        notify_recipients=record.get("notifyRecipients", True) is not False,
+        created_by=str(record.get("createdBy") or "") or None,
+    )
+    job_id = job_id_of(job)
+    if record.get("status") == "paused":
+        run(["automations", "disable", job_id])
+        cron_get(job_id)
+    return {"jobId": job_id, "recipientId": str(item["recipientId"]), "scheduleIndex": schedule_index, "name": str(job.get("name") or "")}
+
+
+def _restore_removed_jobs(record: dict[str, Any], removed_indexes: list[int], config: dict[str, Any]) -> dict[str, Any]:
+    restored = json.loads(json.dumps(record))
+    created_ids: list[str] = []
+    try:
+        for index in removed_indexes:
+            old_item = record["cronJobs"][index]
+            replacement = _recreate_job_for_item(record, old_item, index + 1, config)
+            restored["cronJobs"][index] = replacement
+            created_ids.append(str(replacement["jobId"]))
+        restored["updatedAt"] = now_utc()
+        persist_link(restored)
+        verify_jobs(restored, expected_enabled=restored.get("status") != "paused")
+        return restored
+    except Exception as exc:
+        remove_jobs(created_ids)
+        raise ReminderError("REMINDER_LIFECYCLE_ROLLBACK_FAILED", f"could not restore removed Cron jobs: {exc}") from exc
+
+
+def cmd_pause_resume(args: argparse.Namespace, operation: str) -> int:
+    record = read_record(args.reminder_id)
+    config = load_config()
+    authorize_record(record, args.requester, config)
+    # Validate requester/recipient notification routing before changing live
+    # Automation state. The resulting intent is discarded; the final intent is
+    # derived from the verified post-transition record.
+    lifecycle_deliveries(record, args.requester, config, operation)
+    target_status = "paused" if operation == "pause" else "active"
+    target_enabled = operation == "resume"
+    if calendar_linked(record):
+        calendar_get_verified(record["calendar"], record_schedules(record)[0])
+    if record.get("status") == target_status:
+        verify_jobs(record, expected_enabled=target_enabled)
+        return emit({"status": "success", "operation": operation, "reminderId": args.reminder_id, "idempotent": True, "transaction": {"status": "success", "verified": True}, "data": {"record": record}, "transport": transport_result([])})
+    verify_jobs(record)
+    changed = []
+    command = "disable" if operation == "pause" else "enable"
+    rollback = "enable" if operation == "pause" else "disable"
+    try:
+        for item in record["cronJobs"]:
+            job_id = str(item["jobId"])
+            run(["automations", command, job_id])
+            cron_get(job_id)
+            changed.append(job_id)
+        verify_jobs(record, expected_enabled=target_enabled)
+    except Exception:
+        failures = []
+        for job_id in reversed(changed):
+            try:
+                run(["automations", rollback, job_id])
+            except Exception:
+                failures.append(job_id)
+        if failures:
+            raise ReminderError("REMINDER_LIFECYCLE_ROLLBACK_FAILED", f"rollback failed for: {','.join(failures)}")
+        raise
+    verified_record = read_record(args.reminder_id)
+    if verified_record.get("status") != target_status:
+        raise ReminderError(
+            "REMINDER_CRON_VERIFY_FAILED",
+            f"verified Reminder status did not become {target_status}",
+        )
+    deliveries = lifecycle_deliveries(
+        verified_record,
+        args.requester,
+        config,
+        operation,
+    )
+    return emit({"status": "success", "operation": operation, "reminderId": args.reminder_id, "transaction": {"status": "success", "verified": True}, "data": {"record": verified_record}, "transport": transport_result(deliveries)})
+
+
+def _calendar_spec_for_update(record: dict[str, Any], patch: dict[str, Any], new_content: str, new_schedule: dict[str, Any]) -> dict[str, Any]:
+    old_calendar = record.get("calendar") if isinstance(record.get("calendar"), dict) else {"requested": False}
+    if "calendar" in patch:
+        return normalize_calendar(
+            patch["calendar"],
+            new_schedule,
+            new_content,
+            existing=old_calendar,
+            verbatim_request=patch.get("verbatimRequest"),
+        )
+    if old_calendar.get("requested") is not True:
+        return {"requested": False}
+    return normalize_calendar({}, new_schedule, new_content, existing=old_calendar)
+
+
+def _calendar_needs_replacement(record: dict[str, Any], desired: dict[str, Any], new_schedule: dict[str, Any]) -> bool:
+    old = record.get("calendar") if isinstance(record.get("calendar"), dict) else {"requested": False}
+    old_requested = old.get("requested") is True
+    desired_requested = desired.get("requested") is True
+    if old_requested != desired_requested:
+        return True
+    if not desired_requested:
+        return False
+    if calendar_semantic_spec(old) != calendar_semantic_spec(desired):
+        return True
+    expected = calendar_expected(desired, new_schedule)
+    old_start = str(old.get("start") or "")
+    old_end = str(old.get("end") or "")
+    if not old_start or not old_end:
+        return True
+    return (
+        parse_aware_datetime(old_start, "stored calendar start").timestamp() != parse_aware_datetime(expected["start"], "expected calendar start").timestamp()
+        or parse_aware_datetime(old_end, "stored calendar end").timestamp() != parse_aware_datetime(expected["end"], "expected calendar end").timestamp()
+    )
+
+
+def _same_schedule_instant(expected: dict[str, Any], actual: dict[str, Any]) -> bool:
+    if expected.get("type") != actual.get("type") or expected.get("timezone") != actual.get("timezone"):
+        return False
+    if expected.get("type") == "one-shot":
+        return (
+            parse_aware_datetime(str(expected.get("resolvedTime") or ""), "expected Reminder time").timestamp()
+            == parse_aware_datetime(str(actual.get("resolvedTime") or ""), "verified Automation time").timestamp()
+        )
+    return expected == actual
+
+
+def _recipient_update_deliveries(
+    original: dict[str, Any], changed: dict[str, Any], recipient_id: str,
+    requester_id: str, config: dict[str, Any],
+) -> list[dict[str, Any]]:
+    if original.get("notifyRecipients", True) is False:
+        return []
+    deliveries: list[dict[str, Any]] = []
+    for raw_id in original["recipientIds"]:
+        current_id = str(raw_id)
+        if current_id == requester_id:
+            continue  # The requester receives Main's verified reply, not a duplicate transport.
+        recipient = resolve_identity(current_id, config)
+        target = recipient_target(recipient, config)
+        if current_id == recipient_id:
+            deliveries.append(outbound(target, lifecycle_text("update", changed), record=changed,
+                                       operation="update", recipient_id=current_id))
+        else:
+            notice_record = dict(original)
+            # The split id is a durable state version for the unaffected notice.
+            notice_record["updatedAt"] = str(changed["reminderId"])
+            text = f"התזכורת שלך לא השתנתה: {original['content']} — {schedule_description(original['schedule'])}."
+            deliveries.append(outbound(target, text, record=notice_record,
+                                       operation="update", recipient_id=current_id))
+    return deliveries
+
+
+def _cmd_update_recipient(
+    args: argparse.Namespace, record: dict[str, Any], config: dict[str, Any],
+    recipient_id: str, new_content: str, new_schedule: dict[str, Any],
+    desired_calendar: dict[str, Any],
+) -> int:
+    if recipient_id not in record["recipientIds"]:
+        raise ReminderError("REMINDER_RECIPIENT_NOT_FOUND", "recipient is not in this Reminder")
+    if len(record["recipientIds"]) < 2:
+        raise ReminderError("REMINDER_UPDATE_INVALID", "recipient-specific restructure requires multiple recipients")
+    if (new_content == record["content"] and new_schedule == record["schedule"]
+            and not _calendar_needs_replacement(record, desired_calendar, new_schedule)):
+        return emit({"status": "success", "operation": "update", "reminderId": args.reminder_id,
+                     "idempotent": True, "transaction": {"status": "success", "verified": True},
+                     "data": {"record": record}, "transport": transport_result([])})
+
+    requester_id = str(resolve_trusted_requester(args.requester, config)["id"])
+    recipient = resolve_identity(recipient_id, config)
+    # Preflight every target before creating any durable resource.
+    _recipient_update_deliveries(record, {**record, "content": new_content,
+        "schedule": new_schedule, "schedules": [new_schedule]}, recipient_id, requester_id, config)
+    old_job = next(item for item in record["cronJobs"] if item["recipientId"] == recipient_id)
+    old_job_id = str(old_job["jobId"])
+    old_calendar = record.get("calendar") or {"requested": False}
+    stamp = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    new_id = f"rem-{stamp}-{uuid.uuid4().hex[:16]}"
+    new_event_id = ""
+    new_job_id = ""
+    old_removed = False
+    old_state_unknown = False
+    new_record: dict[str, Any] = {}
+    try:
+        new_calendar: dict[str, Any] = {"requested": False}
+        if desired_calendar.get("requested") is True:
+            execution = calendar_create_verified(desired_calendar, new_schedule)
+            new_event_id = str(execution["eventId"])
+            new_calendar = calendar_record_from_execution(desired_calendar, execution)
+        job = create_job(new_id, 1, recipient, new_content, new_schedule, config,
+                         notify_recipients=record.get("notifyRecipients", True) is not False,
+                         created_by=str(record.get("createdBy") or "") or None,
+                         initially_disabled=True)
+        new_job_id = job_id_of(job)
+        new_record = {
+            "schemaVersion": 4, "reminderId": new_id, "status": record["status"],
+            "recipientIds": [recipient_id], "content": new_content,
+            "schedule": new_schedule, "schedules": [new_schedule], "calendar": new_calendar,
+            "cronJobs": [{"jobId": new_job_id, "recipientId": recipient_id,
+                          "name": str(job.get("name") or "")}],
+            "notifyRecipients": record.get("notifyRecipients", True),
+            "createdBy": record.get("createdBy"), "createdAt": now_utc(),
+            "updatedAt": now_utc(),
+        }
+        persist_link(new_record)
+        verify_jobs(new_record, expected_enabled=False)
+        if desired_calendar.get("requested") is True:
+            calendar_get_verified(new_calendar, new_schedule)
+        deliveries = _recipient_update_deliveries(record, new_record, recipient_id,
+                                                   requester_id, config)
+
+        # This is the commit point. If rm reports an error, inspect durable state
+        # before deciding whether compensation is necessary.
+        try:
+            run(["automations", "rm", old_job_id])
+        except Exception:
+            try:
+                old_removed = all(job_id_of(job) != old_job_id for job in all_jobs())
+            except Exception:
+                old_state_unknown = True
+            raise
+        try:
+            old_removed = all(job_id_of(job) != old_job_id for job in all_jobs())
+        except Exception:
+            old_state_unknown = True
+            raise
+        if not old_removed:
+            raise ReminderError("REMINDER_UPDATE_PARTIAL_FAILURE", "old recipient job still exists")
+        remaining = json.loads(json.dumps(record))
+        remaining["recipientIds"] = [value for value in record["recipientIds"] if value != recipient_id]
+        remaining["cronJobs"] = [item for item in record["cronJobs"] if item["recipientId"] != recipient_id]
+        remaining["updatedAt"] = now_utc()
+        persist_link(remaining)
+        verified_remaining = read_record(args.reminder_id)
+        if record["status"] == "active":
+            run(["automations", "enable", new_job_id])
+            if cron_get(new_job_id).get("enabled", True) is False:
+                raise ReminderError("REMINDER_CRON_VERIFY_FAILED", "new recipient job was not enabled")
+        verified_changed = read_record(new_id)
+        if (verified_remaining["recipientIds"] != remaining["recipientIds"]
+                or verified_remaining["content"] != record["content"]
+                or not _same_schedule_instant(record["schedule"], verified_remaining["schedule"])
+                or [item["jobId"] for item in verified_remaining["cronJobs"]]
+                != [item["jobId"] for item in remaining["cronJobs"]]
+                or verified_changed["recipientIds"] != [recipient_id]
+                or verified_changed["content"] != new_content
+                or not _same_schedule_instant(new_schedule, verified_changed["schedule"])):
+            raise ReminderError("REMINDER_UPDATE_VERIFY_FAILED", "recipient restructure verification failed")
+        if old_calendar.get("requested") is True:
+            calendar_get_verified(old_calendar, record["schedule"])
+        if desired_calendar.get("requested") is True:
+            calendar_get_verified(new_calendar, new_schedule)
+        return emit({"status": "success", "operation": "update", "reminderId": args.reminder_id,
+                     "transaction": {"status": "success", "verified": True},
+                     "data": {"record": verified_remaining, "restructuredRecord": verified_changed,
+                              "changedRecipientId": recipient_id},
+                     "transport": transport_result(deliveries)})
+    except Exception as exc:
+        failures: list[str] = []
+        if old_state_unknown:
+            raise ReminderError("REMINDER_UPDATE_RECONCILIATION_UNAVAILABLE",
+                                "old job state could not be read; staged job remains disabled for operator reconciliation") from exc
+        # A successful rm followed by an error must restore the original target
+        # before staged resources are removed. The unaffected jobs are untouched.
+        if old_removed:
+            try:
+                _restore_removed_jobs(record, [record["cronJobs"].index(old_job)], config)
+            except Exception as rollback_exc:
+                failures.append("old-job:" + str(rollback_exc))
+        if not failures:
+            try:
+                staged_ids = {str(job_id_of(job)) for job in all_jobs()
+                              if (description_metadata(job) or {}).get("reminderId") == new_id}
+                if new_job_id:
+                    staged_ids.add(new_job_id)
+                if remove_jobs(sorted(staged_ids)) or any(
+                    (description_metadata(job) or {}).get("reminderId") == new_id
+                    for job in all_jobs()
+                ):
+                    failures.append("new-job-removal")
+            except Exception as rollback_exc:
+                failures.append("new-job:" + str(rollback_exc))
+            if not failures and new_event_id:
+                try:
+                    calendar_delete_verified(new_event_id, str(desired_calendar.get("calendarId") or "primary"))
+                except Exception as rollback_exc:
+                    failures.append("new-calendar:" + str(rollback_exc))
+            if not failures:
+                record_path(new_id).unlink(missing_ok=True)
+        if failures:
+            raise ReminderError("REMINDER_UPDATE_ROLLBACK_FAILED", f"recipient update failed: {exc}; compensation failed: {'; '.join(failures)}") from exc
+        raise ReminderError("REMINDER_UPDATE_PARTIAL_FAILURE", f"recipient update failed and was rolled back: {exc}") from exc
+
+
+def cmd_update(args: argparse.Namespace) -> int:
+    record = read_record(args.reminder_id)
+    config = load_config()
+    authorize_record(record, args.requester, config)
+    patch = read_input(args.input)
+    unsupported = set(patch) - {"content", "schedule", "calendar", "verbatimRequest", "recipientId"}
+    if unsupported:
+        raise ReminderError("REMINDER_UPDATE_INVALID", f"unsupported update fields: {','.join(sorted(unsupported))}")
+    if not any(field in patch for field in ("content", "schedule", "calendar")):
+        raise ReminderError("REMINDER_UPDATE_INVALID", "update patch must not be empty")
+    if len(record_schedules(record)) != 1:
+        raise ReminderError(
+            "REMINDER_PLAN_UPDATE_UNSUPPORTED",
+            "updates to multi-schedule Reminder plans require a future explicit plan-update operation",
+        )
+
+    new_content = record["content"]
+    if "content" in patch:
+        new_content = str(patch.get("content") or "").strip()
+        if not new_content or len(new_content) > 1000:
+            raise ReminderError("REMINDER_CONTENT_INVALID", "updated content is empty or too long")
+    new_schedule = record["schedule"]
+    if "schedule" in patch:
+        schedule_patch = patch["schedule"]
+        if not isinstance(schedule_patch, dict):
+            raise ReminderError("REMINDER_SCHEDULE_INVALID", "update schedule must be an object")
+        schedule_patch = dict(schedule_patch)
+        schedule_kind = str(
+            schedule_patch.get("type") or schedule_patch.get("kind") or ""
+        ).strip().lower()
+        if schedule_kind in {"relative", "offset"}:
+            reference = str(schedule_patch.pop("reference", "existing") or "existing").strip().lower()
+            if reference not in {"existing", "request"}:
+                raise ReminderError("REMINDER_SCHEDULE_INVALID", "relative update reference must be existing or request")
+            if reference == "existing":
+                existing_schedule = record.get("schedule")
+                if not isinstance(existing_schedule, dict) or existing_schedule.get("type") != "one-shot":
+                    raise ReminderError(
+                        "REMINDER_SCHEDULE_RELATIVE_REFERENCE_UNAVAILABLE",
+                        "relative-to-existing update requires an existing one-shot reminder time",
+                    )
+                existing_time = str(existing_schedule.get("resolvedTime") or "").strip()
+                if not existing_time:
+                    raise ReminderError(
+                        "REMINDER_SCHEDULE_RELATIVE_REFERENCE_UNAVAILABLE",
+                        "existing reminder has no verified resolvedTime",
+                    )
+                schedule_patch["_runtimeBaseTime"] = existing_time
+        new_schedule = normalize_schedule(schedule_patch, config, patch=True)
+
+    desired_calendar = _calendar_spec_for_update(record, patch, new_content, new_schedule)
+    expected_enabled = record.get("status") != "paused"
+    verify_jobs(record, expected_enabled=expected_enabled)
+    if calendar_linked(record):
+        calendar_get_verified(record["calendar"], record["schedule"])
+
+    if "recipientId" in patch:
+        target_id = str(patch["recipientId"] or "").strip()
+        if not target_id:
+            raise ReminderError("REMINDER_RECIPIENT_INVALID", "recipientId must be non-empty")
+        return _cmd_update_recipient(args, record, config, target_id,
+                                     new_content, new_schedule, desired_calendar)
+
+    cron_changed = new_content != record["content"] or new_schedule != record["schedule"]
+    calendar_changed = _calendar_needs_replacement(record, desired_calendar, new_schedule)
+    if not cron_changed and not calendar_changed:
+        return emit({"status": "success", "operation": "update", "reminderId": args.reminder_id, "idempotent": True, "transaction": {"status": "success", "verified": True}, "data": {"record": record}, "transport": transport_result([])})
+
+    old_record = json.loads(json.dumps(record))
+    old_calendar = old_record.get("calendar") if isinstance(old_record.get("calendar"), dict) else {"requested": False}
+    old_event_id = str(old_calendar.get("eventId") or "") if old_calendar.get("requested") is True else ""
+    new_event_id = ""
+    new_calendar_record: dict[str, Any] = {"requested": False}
+    changed_job_ids: list[str] = []
+    link_committed = False
+
+    try:
+        if desired_calendar.get("requested") is True:
+            if calendar_changed:
+                execution = calendar_create_verified(desired_calendar, new_schedule)
+                new_event_id = str(execution["eventId"])
+                new_calendar_record = calendar_record_from_execution(desired_calendar, execution)
+            else:
+                new_calendar_record = json.loads(json.dumps(old_calendar))
+        if cron_changed:
+            for item in record["cronJobs"]:
+                job_id = str(item["jobId"])
+                apply_edit(job_id, new_content, new_schedule, dict(item["metadata"]))
+                cron_get(job_id)
+                changed_job_ids.append(job_id)
+            verify_jobs(record, expected_enabled=expected_enabled)
+
+        new_record = json.loads(json.dumps(record))
+        new_record["content"] = new_content
+        new_record["schedule"] = new_schedule
+        new_record["schedules"] = [new_schedule]
+        new_record["calendar"] = new_calendar_record
+        new_record["updatedAt"] = now_utc()
+        new_record.pop("intentHash", None)
+        persist_link(new_record)
+        link_committed = True
+
+        # Construct the deterministic delivery intent while rollback is still
+        # fully possible. It is returned only after the old Calendar event (if
+        # any) has been deleted and that final state transition is verified.
+        deliveries = lifecycle_deliveries(
+            new_record,
+            args.requester,
+            config,
+            "update",
+        )
+
+        if old_event_id and calendar_changed:
+            calendar_delete_verified(old_event_id, str(old_calendar.get("calendarId") or "primary"))
+
+        return emit({"status": "success", "operation": "update", "reminderId": args.reminder_id, "transaction": {"status": "success", "verified": True}, "data": {"record": new_record}, "transport": transport_result(deliveries)})
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        if link_committed:
+            try:
+                persist_link(old_record)
+            except Exception as rollback_exc:
+                rollback_failures.append("link:" + str(rollback_exc))
+        if changed_job_ids:
+            old_items = {str(item["jobId"]): item for item in old_record["cronJobs"]}
+            for job_id in reversed(changed_job_ids):
+                try:
+                    apply_edit(job_id, old_record["content"], old_record["schedule"], dict(old_items[job_id]["metadata"]))
+                except Exception as rollback_exc:
+                    rollback_failures.append(f"cron:{job_id}:{rollback_exc}")
+        if new_event_id:
+            try:
+                calendar_delete_verified(new_event_id, str(desired_calendar.get("calendarId") or "primary"))
+            except Exception as rollback_exc:
+                rollback_failures.append("new-calendar:" + str(rollback_exc))
+        if rollback_failures:
+            raise ReminderError("REMINDER_UPDATE_ROLLBACK_FAILED", f"update failed: {exc}; rollback failures: {'; '.join(rollback_failures)}") from exc
+        raise
+
+
+def cmd_delete(args: argparse.Namespace) -> int:
+    record = read_record(args.reminder_id)
+    config = load_config()
+    authorize_record(record, args.requester, config)
+    # Fail before deletion if lifecycle notification routing cannot be
+    # constructed. Once state deletion is verified, only native delivery may
+    # fail, and that failure is handled by Main without state rollback.
+    lifecycle_deliveries(record, args.requester, config, "delete")
+    expected_enabled = record.get("status") != "paused"
+    verify_jobs(record, expected_enabled=expected_enabled)
+    if calendar_linked(record):
+        calendar_get_verified(record["calendar"], record_schedules(record)[0])
+
+    removed_indexes: list[int] = []
+    try:
+        for index, item in enumerate(record["cronJobs"]):
+            job_id = str(item["jobId"])
+            run(["automations", "rm", job_id])
+            if cron_get(job_id, required=False) is not None:
+                raise ReminderError("REMINDER_DELETE_PARTIAL_FAILURE", f"cron job still exists after removal: {job_id}")
+            removed_indexes.append(index)
+    except Exception as exc:
+        if removed_indexes:
+            _restore_removed_jobs(record, removed_indexes, config)
+        raise ReminderError("REMINDER_DELETE_PARTIAL_FAILURE", f"Cron removal failed: {exc}") from exc
+
+    calendar_deleted = False
+    old_calendar = record.get("calendar") if isinstance(record.get("calendar"), dict) else {"requested": False}
+    try:
+        if old_calendar.get("requested") is True:
+            event_id = str(old_calendar.get("eventId") or "")
+            if not event_id:
+                raise ReminderError("REMINDER_CALENDAR_RECORD_INVALID", "linked Calendar record has no eventId")
+            calendar_delete_verified(event_id, str(old_calendar.get("calendarId") or "primary"))
+            calendar_deleted = True
+    except Exception as exc:
+        _restore_removed_jobs(record, list(range(len(record["cronJobs"]))), config)
+        raise ReminderError("REMINDER_DELETE_CALENDAR_FAILED", f"Calendar deletion failed; Cron was restored: {exc}") from exc
+
+    deleted_record = json.loads(json.dumps(record))
+    deleted_record["status"] = "deleted"
+    deleted_record["updatedAt"] = now_utc()
+    try:
+        record_path(args.reminder_id).unlink(missing_ok=True)
+    except Exception as exc:
+        rollback_record = json.loads(json.dumps(record))
+        rollback_failures: list[str] = []
+        if calendar_deleted:
+            try:
+                spec = calendar_semantic_spec(old_calendar)
+                execution = calendar_create_verified(spec, record_schedules(record)[0])
+                rollback_record["calendar"] = calendar_record_from_execution(spec, execution)
+            except Exception as rollback_exc:
+                rollback_failures.append("calendar:" + str(rollback_exc))
+        try:
+            restored = _restore_removed_jobs(rollback_record, list(range(len(record["cronJobs"]))), config)
+            rollback_record = restored
+        except Exception as rollback_exc:
+            rollback_failures.append("cron:" + str(rollback_exc))
+        try:
+            persist_link(rollback_record)
+        except Exception as rollback_exc:
+            rollback_failures.append("link:" + str(rollback_exc))
+        if rollback_failures:
+            raise ReminderError("REMINDER_DELETE_ROLLBACK_FAILED", f"delete link commit failed: {exc}; rollback failures: {'; '.join(rollback_failures)}") from exc
+        raise ReminderError("REMINDER_DELETE_COMMIT_FAILED", f"delete link commit failed but durable resources were restored: {exc}") from exc
+
+    deliveries = lifecycle_deliveries(
+        deleted_record,
+        args.requester,
+        config,
+        "delete",
+    )
+    return emit({"status": "success", "operation": "delete", "reminderId": args.reminder_id, "transaction": {"status": "success", "verified": True}, "data": {"record": deleted_record}, "transport": transport_result(deliveries)})
+
+
+def failure(operation: str, exc: Exception, reminder_id: str | None = None) -> dict[str, Any]:
+    if isinstance(exc, ReminderError):
+        code, message, retryable = exc.code, str(exc), exc.retryable
+    else:
+        code, message, retryable = "REMINDER_INTERNAL_ERROR", str(exc), False
+    result: dict[str, Any] = {"status": "failure", "operation": operation, "error": {"code": code, "message": message, "retryable": retryable}, "transport": {"deliveries": []}}
+    if reminder_id:
+        result["reminderId"] = reminder_id
+    return result
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(prog="reminder-service")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    create = sub.add_parser("create-intent")
+    create.add_argument("--input", required=True, choices=["-"])
+    create.set_defaults(func=cmd_create)
+    update = sub.add_parser("update-reminder")
+    update.add_argument("--reminder-id", required=True)
+    update.add_argument("--requester", required=True)
+    update.add_argument("--input", required=True, choices=["-"])
+    update.set_defaults(func=cmd_update)
+    for name in ("delete-reminder", "pause-reminder", "resume-reminder"):
+        command = sub.add_parser(name)
+        command.add_argument("--reminder-id", required=True)
+        command.add_argument("--requester", required=True)
+        if name == "delete-reminder":
+            command.set_defaults(func=cmd_delete)
+        elif name == "pause-reminder":
+            command.set_defaults(func=lambda args: cmd_pause_resume(args, "pause"))
+        else:
+            command.set_defaults(func=lambda args: cmd_pause_resume(args, "resume"))
+    return parser
+
+
+def main() -> int:
+    parser = build_parser()
+    args = parser.parse_args()
+    operation = {"create-intent": "create", "update-reminder": "update", "delete-reminder": "delete", "pause-reminder": "pause", "resume-reminder": "resume"}.get(args.cmd, args.cmd)
+    try:
+        return args.func(args)
+    except Exception as exc:
+        return emit(failure(operation, exc, getattr(args, "reminder_id", None)), 1)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,9 @@
+{
+  "id": "benson-jessica-tool",
+  "name": "Benson Jessica Tool",
+  "description": "Jessica read tool, scoped canary execution, and native child-completion integrity validator.",
+  "version": "1.0.0",
+  "activation": { "onCapabilities": ["tool"] },
+  "contracts": { "tools": ["jessica_read", "jessica_execute", "jessica_validate_completion"] },
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

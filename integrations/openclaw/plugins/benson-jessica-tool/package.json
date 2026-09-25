@@ -1,0 +1,9 @@
+{
+  "name": "benson-jessica-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist", "openclaw.plugin.json"],
+  "peerDependencies": { "openclaw": ">=2026.9.4" },
+  "openclaw": { "extensions": ["./dist/index.js"] }
+}

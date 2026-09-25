@@ -1,0 +1,352 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+TS="$(date +%Y%m%d-%H%M%S)"
+OUT_DIR="$HOME/projects/benson/output/context"
+OUT="$OUT_DIR/benson-context-$TS.md"
+
+mkdir -p "$OUT_DIR"
+
+section() {
+  echo
+  echo "## $1"
+  echo
+}
+
+subsection() {
+  echo
+  echo "### $1"
+  echo
+}
+
+is_sensitive_path() {
+  local p="$1"
+  case "$p" in
+    *secrets*|*Secrets*|*credential*|*Credential*|*credentials*|*Credentials*|*token*|*Token*|*auth*|*Auth*|*password*|*Password*|*.env|*.pem|*.key|*.crt|*.p12)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_backup_or_temp_path() {
+  local p="$1"
+  case "$p" in
+    *.bak|*.bak-*|*.old|*~|*.tmp|*.swp|*.swo|*.orig|*.rej|*.pid|.DS_Store)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+is_media_or_binary_path() {
+  local p="$1"
+  case "$p" in
+    *.png|*.PNG|*.jpg|*.JPG|*.jpeg|*.JPEG|*.webp|*.WEBP|*.gif|*.GIF|*.svg|*.SVG|*.pdf|*.PDF|*.mp4|*.MP4|*.mov|*.MOV|*.mp3|*.MP3|*.wav|*.WAV|*.zip|*.tar|*.gz|*.tgz|*.sqlite|*.db)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+redact_stream() {
+  sed -E \
+    -e 's/sk-[A-Za-z0-9_-]{8,}/[REDACTED_SK]/g' \
+    -e 's/(Bearer[[:space:]]+)[A-Za-z0-9._-]+/\1[REDACTED]/g' \
+    -e 's/ya29\.[A-Za-z0-9._-]+/[REDACTED_GOOGLE_ACCESS_TOKEN]/g' \
+    -e 's/GOCSPX-[A-Za-z0-9_-]+/[REDACTED_GOOGLE_CLIENT_SECRET]/g' \
+    -e 's/"apiKey"[[:space:]]*:[[:space:]]*"[^"]+"/"apiKey": "[REDACTED]"/g' \
+    -e 's/"api_key"[[:space:]]*:[[:space:]]*"[^"]+"/"api_key": "[REDACTED]"/g' \
+    -e 's/"access_token"[[:space:]]*:[[:space:]]*"[^"]+"/"access_token": "[REDACTED]"/g' \
+    -e 's/"refresh_token"[[:space:]]*:[[:space:]]*"[^"]+"/"refresh_token": "[REDACTED]"/g' \
+    -e 's/"client_secret"[[:space:]]*:[[:space:]]*"[^"]+"/"client_secret": "[REDACTED]"/g' \
+    -e 's/"token"[[:space:]]*:[[:space:]]*"[^"]+"/"token": "[REDACTED]"/g' \
+    -e 's/"password"[[:space:]]*:[[:space:]]*"[^"]+"/"password": "[REDACTED]"/g'
+}
+
+safe_cat() {
+  local f="$1"
+
+  [ -f "$f" ] || return 0
+
+  if is_sensitive_path "$f"; then
+    echo "- skipped sensitive-like file: $f"
+    return 0
+  fi
+
+  if is_backup_or_temp_path "$f"; then
+    echo "- skipped backup/temp file: $f"
+    return 0
+  fi
+
+  if is_media_or_binary_path "$f"; then
+    echo "- skipped media/binary/generated file: $f"
+    return 0
+  fi
+
+  local size
+  size="$(wc -c < "$f" 2>/dev/null || echo 0)"
+
+  if [ "$size" -gt 100000 ]; then
+    echo "- skipped large file: $f ($size bytes)"
+    return 0
+  fi
+
+  subsection "$f"
+  redact_stream < "$f" | sed -n '1,260p'
+}
+
+safe_find_tree() {
+  local root="$1"
+  local depth="${2:-5}"
+
+  if [ ! -e "$root" ]; then
+    echo "$root not found"
+    return 0
+  fi
+
+  find "$root" -maxdepth "$depth" \
+    \( -path "*/secrets" \
+    -o -path "*/secrets/*" \
+    -o -path "*/credentials" \
+    -o -path "*/credentials/*" \
+    -o -path "*/sessions" \
+    -o -path "*/sessions/*" \
+    -o -path "*/extensions/whatsapp" \
+    -o -path "*/extensions/whatsapp/*" \
+    -o -path "*/media" \
+    -o -path "*/media/*" \
+    -o -path "*/backups" \
+    -o -path "*/backups/*" \
+    -o -path "*/node_modules" \
+    -o -path "*/node_modules/*" \
+    -o -path "*/.git" \
+    -o -path "*/.git/*" \
+    -o -path "*/output" \
+    -o -path "*/output/*" \
+    -o -path "*/logs" \
+    -o -path "*/logs/*" \
+    -o -path "*/dist" \
+    -o -path "*/dist/*" \
+    -o -path "*/build" \
+    -o -path "*/build/*" \
+    -o -path "*/target" \
+    -o -path "*/target/*" \
+    -o -path "*/coverage" \
+    -o -path "*/coverage/*" \
+    -o -path "*/.cache" \
+    -o -path "*/.cache/*" \
+    -o -path "*/__pycache__" \
+    -o -path "*/__pycache__/*" \) -prune -o \
+    -print \
+  | grep -Eiv '(^|/)(media|backups|assets)(/|$)|cleaning-reports|maps/source|\.bak|\.old|~$|\.tmp$|\.swp$|\.swo$|\.orig$|\.rej$|\.pid$|\.(png|jpg|jpeg|webp|gif|svg|pdf|mp4|mov|mp3|wav|zip|tar|gz|tgz|sqlite|db)(\.|$)' \
+  | sort
+}
+
+safe_source_find() {
+  local root="$1"
+
+  [ -d "$root" ] || return 0
+
+  find "$root" -type f \
+    ! -path "*/secrets/*" \
+    ! -path "*/credentials/*" \
+    ! -path "*/sessions/*" \
+    ! -path "*/extensions/whatsapp/*" \
+    ! -path "*/media/*" \
+    ! -path "*/backups/*" \
+    ! -path "*/assets/*" \
+    ! -path "*/cleaning-reports/*" \
+    ! -path "*/maps/source/*" \
+    ! -path "*/node_modules/*" \
+    ! -path "*/.git/*" \
+    ! -path "*/output/*" \
+    ! -path "*/logs/*" \
+    ! -path "*/dist/*" \
+    ! -path "*/build/*" \
+    ! -path "*/target/*" \
+    ! -path "*/coverage/*" \
+    ! -path "*/.cache/*" \
+    ! -path "*/__pycache__/*" \
+    ! -iname "*.bak*" \
+    ! -iname "*.old*" \
+    ! -name "*~" \
+    ! -name "*.tmp" \
+    ! -name "*.swp" \
+    ! -name "*.swo" \
+    ! -iname "*.png*" \
+    ! -iname "*.jpg*" \
+    ! -iname "*.jpeg*" \
+    ! -iname "*.webp*" \
+    ! -iname "*.gif*" \
+    ! -iname "*.svg*" \
+    ! -iname "*.pdf*" \
+    ! -name "*.mp4" \
+    ! -name "*.mov" \
+    ! -name "*.mp3" \
+    ! -name "*.wav" \
+    ! -name "*.zip" \
+    ! -name "*.tar" \
+    ! -name "*.gz" \
+    ! -name "*.tgz" \
+    ! -name "*.sqlite" \
+    ! -name "*.db" \
+    | sort
+}
+
+{
+  echo "# Benson / OpenClaw System Snapshot"
+  echo
+  echo "Generated: $(date)"
+  echo "Host: $(hostname)"
+  echo "User: $(whoami)"
+  echo
+  echo "Purpose: provide ChatGPT Project with a safe, current map of Benson/OpenClaw."
+  echo
+
+  section "OpenClaw version"
+  openclaw --version 2>/dev/null || echo "openclaw --version failed"
+
+  section "OpenClaw models"
+  openclaw models list 2>/dev/null || echo "openclaw models list failed"
+
+  section "OpenClaw cron jobs"
+  openclaw cron list --json 2>/dev/null | redact_stream || echo "openclaw cron list failed or unavailable"
+
+  section "Core ~/.openclaw tree"
+  safe_find_tree "$HOME/.openclaw" 5
+
+  section "Benson project tree"
+  safe_find_tree "$HOME/projects/benson" 7
+
+  section "Skills tree"
+  safe_find_tree "$HOME/projects/benson/skills" 8
+
+  section "Channels tree"
+  safe_find_tree "$HOME/projects/benson/channels" 5
+
+  section "External Benson tools tree: ~/bin"
+  if [ -d "$HOME/bin" ]; then
+    find "$HOME/bin" -maxdepth 1 -type f \
+      ! -name "*.bak" \
+      ! -name "*.bak-*" \
+      ! -name "*.old" \
+      ! -name "*~" \
+      ! -name "*.tmp" \
+      -printf "%p\t%k KB\t%TY-%Tm-%Td %TH:%TM\n" | sort
+  else
+    echo "$HOME/bin not found"
+  fi
+
+  section "External Benson tools contents: ~/bin"
+  if [ -d "$HOME/bin" ]; then
+    find "$HOME/bin" -maxdepth 1 -type f \
+      ! -name "*.bak" \
+      ! -name "*.bak-*" \
+      ! -name "*.old" \
+      ! -name "*~" \
+      ! -name "*.tmp" \
+      | sort | while read -r f; do
+        safe_cat "$f"
+      done
+  fi
+
+  section "Relevant /usr/local/bin tools"
+  if [ -d "/usr/local/bin" ]; then
+    find /usr/local/bin -maxdepth 1 -type f \
+      \( -iname "*benson*" \
+      -o -iname "*openclaw*" \
+      -o -iname "*jessica*" \
+      -o -iname "*jesica*" \
+      -o -iname "*dreame*" \
+      -o -iname "*vacuum*" \
+      -o -iname "*boiler*" \
+      -o -iname "*home*" \
+      -o -iname "*ha*" \) \
+      ! -name "*.bak" \
+      ! -name "*.old" \
+      ! -name "*~" \
+      ! -name "*.tmp" \
+      -printf "%p\t%k KB\t%TY-%Tm-%Td %TH:%TM\n" | sort
+  else
+    echo "/usr/local/bin not found"
+  fi
+
+  section "Relevant /usr/local/bin contents"
+  if [ -d "/usr/local/bin" ]; then
+    find /usr/local/bin -maxdepth 1 -type f \
+      \( -iname "*benson*" \
+      -o -iname "*openclaw*" \
+      -o -iname "*jessica*" \
+      -o -iname "*jesica*" \
+      -o -iname "*dreame*" \
+      -o -iname "*vacuum*" \
+      -o -iname "*boiler*" \
+      -o -iname "*home*" \
+      -o -iname "*ha*" \) \
+      ! -name "*.bak" \
+      ! -name "*.old" \
+      ! -name "*~" \
+      ! -name "*.tmp" \
+      | sort | while read -r f; do
+        safe_cat "$f"
+      done
+  fi
+
+  section "Instruction / memory files"
+  for f in \
+    "$HOME/projects/benson/AGENTS.md" \
+    "$HOME/projects/benson/SOUL.md" \
+    "$HOME/projects/benson/USER.md" \
+    "$HOME/projects/benson/MEMORY.md" \
+    "$HOME/projects/benson/TOOLS.md" \
+    "$HOME/projects/benson/CLAUDE.md" \
+    "$HOME/projects/benson/README.md"
+  do
+    safe_cat "$f"
+  done
+
+  section "Skill source file contents"
+  safe_source_find "$HOME/projects/benson/skills" | while read -r f; do
+    safe_cat "$f"
+  done
+
+  section "Generated artifact summary"
+  if [ -d "$HOME/projects/benson/output" ]; then
+    echo "workspace/output exists but content is excluded."
+    echo
+    echo "Top-level output directories:"
+    find "$HOME/projects/benson/output" -maxdepth 2 -type d | sort | sed -n '1,120p'
+    echo
+    echo "Output total size:"
+    du -sh "$HOME/projects/benson/output" 2>/dev/null || true
+  else
+    echo "workspace/output not found"
+  fi
+
+  section "Safety exclusions"
+  echo "This snapshot intentionally excludes or redacts:"
+  echo "- ~/.openclaw/secrets"
+  echo "- ~/.openclaw/credentials"
+  echo "- ~/.openclaw/agents/main/sessions"
+  echo "- ~/.openclaw/extensions/whatsapp"
+  echo "- auth/token/credential/secret/password-like files"
+  echo "- .env, *.pem, *.key, *.crt, *.p12"
+  echo "- node_modules, dist, build, target, coverage, .cache, __pycache__"
+  echo "- .git"
+  echo "- output and logs contents"
+  echo "- media/generated files: png, jpg, jpeg, webp, gif, svg, pdf, mp4, mov, mp3, wav"
+  echo "- archives/dbs: zip, tar, gz, tgz, sqlite, db"
+  echo "- backup/temp files: *.bak, *.bak-*, *.old, *~, *.tmp, *.swp, *.swo"
+  echo "- files larger than 100KB"
+  echo "- API keys, bearer tokens, Google access tokens, refresh tokens, client secrets, passwords"
+
+} > "$OUT"
+
+echo "$OUT"

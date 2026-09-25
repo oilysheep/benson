@@ -1,0 +1,551 @@
+{
+  "version": "1",
+  "mapFingerprint": "f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+  "mapBinding": {
+    "deviceEntity": "vacuum.jesica_jesica",
+    "mapId": 1,
+    "mapName": "הבית",
+    "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+    "observedAt": "2026-09-23T09:15:06.879Z",
+    "source": "authenticated Home Assistant selected-map metadata",
+    "reviewProvenance": "FC2 reconciliation: E13 owner screenshots, E14 live labels, and matching 2026-09-23 HA fingerprint"
+  },
+  "rooms": [
+    {
+      "slug": "kids_bathroom",
+      "segmentId": 1,
+      "label": "אמבטיית ילדים",
+      "aliases": [
+        "kids-bathroom",
+        "children_bathroom",
+        "children-bathroom",
+        "אמבטיית הילדים",
+        "חדר הרחצה של הילדים"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "harel_room",
+      "segmentId": 2,
+      "label": "חדר הראל",
+      "aliases": [
+        "harel-room",
+        "החדר של הראל"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "west_balcony",
+      "segmentId": 3,
+      "label": "מרפסת מערבית",
+      "aliases": [
+        "west-balcony"
+      ],
+      "enabled": false,
+      "disabledReason": "do_not_use; absent from selected live map",
+      "binding": null
+    },
+    {
+      "slug": "parents_room",
+      "segmentId": 4,
+      "label": "חדר הורים",
+      "aliases": [
+        "parents-room",
+        "master_bedroom",
+        "master-bedroom",
+        "חדר ההורים",
+        "חדר השינה של ההורים"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "parents_shower",
+      "segmentId": 5,
+      "label": "מקלחת הורים",
+      "aliases": [
+        "parents-shower",
+        "master_shower",
+        "master-shower",
+        "מקלחת ההורים"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "amit_room",
+      "segmentId": 6,
+      "label": "חדר עמית",
+      "aliases": [
+        "amit-room",
+        "החדר של עמית"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "hallway",
+      "segmentId": 7,
+      "label": "מסדרון",
+      "aliases": [
+        "corridor",
+        "המסדרון",
+        "hallway"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "living_room",
+      "segmentId": 8,
+      "label": "סלון",
+      "aliases": [
+        "living-room",
+        "salon",
+        "הסלון",
+        "living room"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "north_balcony",
+      "segmentId": 9,
+      "label": "מרפסת צפונית",
+      "aliases": [
+        "north-balcony"
+      ],
+      "enabled": false,
+      "disabledReason": "do_not_use; absent from selected live map",
+      "binding": null
+    },
+    {
+      "slug": "guest_bathroom",
+      "segmentId": 10,
+      "label": "שירותי אורחים",
+      "aliases": [
+        "guest-bathroom",
+        "guest_toilet",
+        "guest-toilet",
+        "services",
+        "שירותי האורחים"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "dining_area",
+      "segmentId": 11,
+      "label": "פינת אוכל",
+      "aliases": [
+        "dining-area",
+        "dining",
+        "dining_room",
+        "dining-room",
+        "פינת האוכל"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "kitchen",
+      "segmentId": 12,
+      "label": "מטבח",
+      "aliases": [
+        "המטבח"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "home_center",
+      "segmentId": 13,
+      "label": "מרכז הבית",
+      "aliases": [
+        "home-center",
+        "center",
+        "האזור המרכזי בבית"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "tal_room",
+      "segmentId": 14,
+      "label": "חדר טל",
+      "aliases": [
+        "tal-room",
+        "החדר של טל"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    },
+    {
+      "slug": "kitchen_sitting_area",
+      "segmentId": 16,
+      "label": "מטבח ישיבה",
+      "aliases": [
+        "kitchen-sitting-area",
+        "kitchen_sitting",
+        "kitchen-sitting",
+        "מטבח פינת ישיבה",
+        "פינת הישיבה במטבח"
+      ],
+      "enabled": true,
+      "disabledReason": null,
+      "binding": {
+        "generation": "map-1-f4c3c8c53c1682614045103960d6e84334cb60afd4f8c9b5654d31506ef464e4",
+        "observedAt": "2026-09-23T09:15:06.879Z",
+        "source": "authenticated Home Assistant selected-map metadata",
+        "reviewProvenance": "FC2 semantic identity review against E13/E14; cleaning acceptance remains capability-scoped"
+      }
+    }
+  ],
+  "workflows": [
+    {
+      "id": "kitchen_three_pass",
+      "kind": "shortcut",
+      "room": "kitchen",
+      "shortcutId": 32,
+      "expectedPasses": 3,
+      "enabled": false
+    }
+  ],
+  "capabilities": [
+    {
+      "name": "read_status",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "Stage 0 authenticated HA GET"
+    },
+    {
+      "name": "read_rooms",
+      "support": "reported",
+      "observedAt": "2026-09-19T11:36:20Z",
+      "provenance": "authenticated HA map-status GET"
+    },
+    {
+      "name": "read_capabilities",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "Stage 0 authenticated HA GET and local integration inventory"
+    },
+    {
+      "name": "read_maintenance",
+      "support": "reported",
+      "observedAt": "2026-09-22T10:52:00Z",
+      "provenance": "FC0 read-only HA sensor inventory; production Benson acceptance pending"
+    },
+    {
+      "name": "read_statistics",
+      "support": "reported",
+      "observedAt": "2026-09-22T10:52:00Z",
+      "provenance": "FC0 read-only HA lifetime/current-task sensors; today/history coverage unverified"
+    },
+    {
+      "name": "read_room_settings",
+      "support": "disabled",
+      "observedAt": null,
+      "provenance": "live read contract not verified"
+    },
+    {
+      "name": "read_operation_status",
+      "support": "disabled",
+      "observedAt": null,
+      "provenance": "FC1 native operation index implemented; production acceptance and D2 correlation pending; dispatch outcome is not physical completion"
+    },
+    {
+      "name": "clean_single_room",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "Stage 6 v1: only listed verifiedRooms are enabled; global support unverified",
+      "verifiedRooms": [
+        {
+          "room": "kids_bathroom",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        },
+        {
+          "room": "harel_room",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        },
+        {
+          "room": "parents_room",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        },
+        {
+          "room": "parents_shower",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        },
+        {
+          "room": "amit_room",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        },
+        {
+          "room": "hallway",
+          "observedAt": "2026-09-23T12:31:31.003Z",
+          "provenance": "FC2 production canary j4-2478e920c94a16157c7a84771ea9bb31: fresh HA room_cleaning on exact segment 7 after the claimed dispatch; Oren observed physical hallway cleaning; supervised Dreame-app cleanup ended docked and charging"
+        },
+        {
+          "room": "living_room",
+          "observedAt": "2026-09-23T13:07:54.868Z",
+          "provenance": "FC2 production canary j4-f393906b811e6c073f368673425fa5b3: fresh HA room_cleaning on exact segment 8 after the claimed dispatch; Oren observed physical living-room cleaning; supervised Dreame-app cleanup ended docked and charging"
+        },
+        {
+          "room": "guest_bathroom",
+          "observedAt": "2026-09-20T11:28:05.385Z",
+          "provenance": "Stage 6 production canary j4-a6766e87921efd52f199a6fe0102e23e: HA room_cleaning on segment 10; Oren observed cleaning and return to dock"
+        },
+        {
+          "room": "dining_area",
+          "observedAt": "2026-09-23T20:20:11.887Z",
+          "provenance": "FC2 bounded canary j4-241d4fc83d005033814b9cd01cfa101a: exact dining-area start and physical room identity accepted; supervised Dreame-app cleanup ended docked and charging"
+        },
+        {
+          "room": "kitchen",
+          "observedAt": "2026-09-24T05:47:27.565Z",
+          "provenance": "FC2 bounded canary j4-bde4b1b4ef11a50d02acab49d9500cdc: exact ordinary-kitchen start and physical room identity accepted; supervised Dreame-app cleanup ended docked and charging"
+        },
+        {
+          "room": "home_center",
+          "observedAt": "2026-09-24T05:28:45.157Z",
+          "provenance": "FC2 bounded canary j4-90ad7b606f33cf01dad4dcba40de432a: exact home-center start and physical room identity accepted from durable result, recorder evidence and Oren observation; supervised cleanup ended docked and charging"
+        },
+        {
+          "room": "tal_room",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        },
+        {
+          "room": "kitchen_sitting_area",
+          "observedAt": "2026-09-24T06:12:00.000Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: current-generation Dreame label and physical room independently confirmed; representative exact-target canaries verify the shared no-settings single-room dispatch path"
+        }
+      ]
+    },
+    {
+      "name": "clean_multi_room",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "FC2 exact-pair scope only; family production approved by Oren after accepted start and pause canaries; global multi-room support remains unverified",
+      "verifiedRoomSets": [
+        {
+          "rooms": ["living_room", "hallway"],
+          "observedAt": "2026-09-25T02:54:43.709Z",
+          "provenance": "FC2 unordered living_room + hallway start canary j4-24295cd94511ebb62896f96024e4f3fb, exact-pair pause canary j4-ae6a6f571291b7fa398e801efe1b3d71 with physical stop and app-dock cleanup, and Oren approval for five-family-member production promotion; no order, settings, home or completion claim"
+        }
+      ]
+    },
+    {
+      "name": "clean_home",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "Stage 6 v1 deferred: task scope cannot be verified by the current result contract"
+    },
+    {
+      "name": "workflow_kitchen_three_pass",
+      "support": "reported",
+      "observedAt": "2026-09-19T11:36:20Z",
+      "provenance": "Stage 6 v1 deferred: HA shortcut 32 reports three passes; physical execution unverified"
+    },
+    {
+      "name": "clean_settings",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "Stage 7: only listed room and setting pairs are verified; global settings support remains unverified",
+      "verifiedSettings": [
+        {
+          "room": "guest_bathroom",
+          "settings": {
+            "suction": "strong"
+          },
+          "observedAt": "2026-09-20T13:25:20.464Z",
+          "provenance": "Stage 7 production canary j4-53f733b1ecc5a9dd176c8410124bdc47: fresh HA selector and vacuum suction read-back during guest-bathroom cleaning; Oren observed cleaning and return to dock"
+        }
+      ]
+    },
+    {
+      "name": "pause",
+      "support": "verified",
+      "observedAt": "2026-09-24T11:31:43.439Z",
+      "provenance": "FC1 guest-bathroom and FC2 hallway production canaries physically verified single-room pause; FC2 exact living_room + hallway current-task pause canary physically verified the additional pair; Oren approved these bounded scopes for all five family members",
+      "verifiedRoomSets": [
+        {
+          "rooms": ["living_room", "hallway"],
+          "observedAt": "2026-09-25T02:54:43.709Z",
+          "provenance": "FC2 exact-pair pause canary j4-ae6a6f571291b7fa398e801efe1b3d71: new room_cleaning_paused transition for unchanged living_room + hallway, Oren-observed physical stop and app-dock cleanup; Oren approved five-family-member exact-pair production scope"
+        }
+      ],
+      "verifiedRooms": [
+        {
+          "room": "kids_bathroom",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "harel_room",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "parents_room",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "parents_shower",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "amit_room",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "hallway",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 production canary j4-bf74ba8560056a14c5ed9e4a1bd8fb2d: fresh room_cleaning_paused signal on active hallway segment 7; Oren observed physical pause; proves current pause only, not same-task identity"
+        },
+        {
+          "room": "living_room",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "guest_bathroom",
+          "observedAt": "2026-09-23T07:56:17.228Z",
+          "provenance": "FC1 production canary j4-e20e74217213c23114c98859362ea764: fresh room_cleaning_paused signal on active guest-bathroom segment 10; Oren observed physical pause; proves current pause only, not same-task identity"
+        },
+        {
+          "room": "dining_area",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "kitchen",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "home_center",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "tal_room",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        },
+        {
+          "room": "kitchen_sitting_area",
+          "observedAt": "2026-09-24T11:31:43.439Z",
+          "provenance": "FC2 bounded-equivalence promotion approved by Oren: pause physically verified on guest-bathroom and hallway single-room tasks through the identical command/verifier; current-generation room identity independently reviewed"
+        }
+      ]
+    },
+    {
+      "name": "resume",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "Stage 6 v1 deferred: same-task correlation and physical transition unverified"
+    },
+    {
+      "name": "stop",
+      "support": "reported",
+      "observedAt": null,
+      "provenance": "FC1 blocked: installed integration optimistically changes stop state/segments; no independent completion or cancellation correlation"
+    },
+    {
+      "name": "dock",
+      "support": "verified",
+      "observedAt": "2026-09-23T08:49:57.348Z",
+      "provenance": "FC1 production canary j4-4b083f108e87927444184f8e727d1a53: active guest-bathroom task reached dock after a new device charging transition; Oren observed physical arrival; proves current-task dock only, not task completion",
+      "verifiedRooms": [
+        {
+          "room": "guest_bathroom",
+          "observedAt": "2026-09-23T08:49:57.348Z",
+          "provenance": "FC1 production canary j4-4b083f108e87927444184f8e727d1a53: active guest-bathroom task reached dock after a new device charging transition; Oren observed physical arrival; proves current-task dock only, not task completion"
+        }
+      ]
+    }
+  ]
+}

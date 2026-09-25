@@ -1,0 +1,61 @@
+--- a/dist/tools-CsMTOSB6.mjs
++++ b/dist/tools-CsMTOSB6.mjs
+@@ -14 +14 @@
+-import { i as resolveMemoryIndexIdentityDiagnostic, o as resolveMemorySearchStaleness, t as formatMemoryIndexRebuildGuidance } from "./types-BjDhSE8R.mjs";
++import { i as resolveMemoryIndexIdentityDiagnostic, o as resolveMemorySearchStaleness } from "./types-BjDhSE8R.mjs";
+@@ -408,23 +408,5 @@
+ function buildMemorySearchUnavailableResult(error, overrides) {
+-	const reason = (error ?? "memory search unavailable").trim() || "memory search unavailable";
+-	const normalizedReason = normalizeLowercaseStringOrEmpty(reason);
+-	const isQuotaError = /insufficient_quota|quota|429/.test(normalizedReason);
+-	const isMissingNodeSqlite = /missing node:sqlite|no such built-?in module: node:sqlite/.test(normalizedReason);
+-	const isSearchDeadline = overrides?.deadline === true;
+-	const deadlineAction = overrides?.agentId ? `Retry memory_search after a short wait: a memory-corpus timeout pauses retries for up to a minute. If memory-corpus timeouts persist, run: openclaw memory status --deep --agent ${overrides.agentId}, and rebuild with openclaw memory index --force --agent ${overrides.agentId} only if it reports the index dirty or incomplete` : "Retry memory_search after a short wait. If memory-corpus timeouts persist, inspect this agent's memory index before rebuilding it.";
+-	const warning = overrides?.warning ?? (overrides?.code === SESSION_CANONICAL_KEY_MIGRATION_REQUIRED ? SESSION_CANONICAL_KEY_MIGRATION_WARNING : isQuotaError ? "Memory search is unavailable because the embedding provider quota is exhausted." : isMissingNodeSqlite ? "Memory search is unavailable because this OpenClaw Node runtime does not provide SQLite support." : isSearchDeadline ? "Memory search did not finish within its time limit." : "Memory search is unavailable due to an embedding/provider error.");
+-	const action = overrides?.action ?? (overrides?.code === SESSION_CANONICAL_KEY_MIGRATION_REQUIRED ? SESSION_CANONICAL_KEY_MIGRATION_ACTION : isQuotaError ? "Top up or switch embedding provider, then retry memory_search." : isMissingNodeSqlite ? "Run OpenClaw with a Node runtime that includes node:sqlite, then retry memory_search." : isSearchDeadline ? deadlineAction : "Check embedding provider configuration and retry memory_search.");
+ 	return {
+ 		results: [],
+-		disabled: true,
+-		unavailable: true,
+-		error: reason,
+-		warning,
+-		action,
+-		debug: {
+-			warning,
+-			action,
+-			error: reason
+-		}
+ 	};
+ }
+@@ -434,7 +416,3 @@
+ function buildPausedMemoryIndexUnavailableResult(diagnostic, params) {
+-	const cause = diagnostic.owner === "configuration" ? `the current memory configuration no longer matches the index (${diagnostic.reason})` : diagnostic.code === "metadata_missing" ? `the memory index metadata is missing (${diagnostic.reason}); no configuration change is needed` : `this OpenClaw version changed the memory index format (${diagnostic.reason}); no configuration change is needed`;
+-	return buildMemorySearchUnavailableResult(diagnostic.reason, {
+-		warning: `Tell the user: memory search is paused because ${cause}.`,
+-		action: `Tell the user to run: ${formatMemoryIndexRebuildGuidance(params.status, params.agentId)}`
+-	});
++	return buildMemorySearchUnavailableResult();
+ }
+@@ -898,21 +880,5 @@
+-						const recoveryAction = memoryValue?.unavailableResult?.action;
+-						const metadata = composeMemoryCorpusMetadata(attempts, [...staleness?.warning ? [staleness.warning] : [], ...memory?.outcome === "partial" ? ["Only memory-file keyword matches are included; semantic memory retrieval did not finish within the search time limit. Session transcript results are not included."] : []]);
+-						const elapsed = Math.max(0, Date.now() - toolStartedAt);
+-						const debug = memoryValue?.debug ? {
+-							...memoryValue.debug,
+-							toolMs: elapsed,
+-							outsideSearchMs: Math.max(0, elapsed - memoryValue.debug.searchMs)
+-						} : void 0;
+ 						return jsonResult({
+ 							results: results.map((result) => presentation.get(result) ?? result),
+-							provider: memoryValue?.provider,
+-							model: memoryValue?.model,
+-							fallback: memoryValue?.fallback,
+ 							citations: citationsMode,
+-							mode: memoryValue?.mode,
+-							...staleness,
+-							...attempts.length > 0 ? metadata : {},
+-							...memory?.outcome === "partial" ? { partial: true } : {},
+-							...recoveryAction ? { action: recoveryAction } : {},
+-							debug
++							...memory?.outcome === "partial" ? { partial: true } : {}
+ 						});

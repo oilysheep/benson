@@ -1,0 +1,218 @@
+--- a/dist/openclaw-state-db-DoQEJuhr.mjs
++++ b/dist/openclaw-state-db-DoQEJuhr.mjs
+@@ -963,14 +963,14 @@
+ //#endregion
+ //#region src/agents/agent-run-terminal-reply.ts
+-const AGENT_RUN_TERMINAL_REPLY_MAX_CHARS = 4096;
++const AGENT_RUN_TERMINAL_REPLY_MAX_CHARS = 12000;
+ function isMessageToolNotCalledTerminalReply(reply) {
+ 	return reply?.disposition === "empty" && reply.code === "message-tool-not-called";
+ }
+ /** Sanitizes and caps producer-owned text before it enters lifecycle or durable state. */
+ function sanitizeAgentRunTerminalReplyText(text) {
+ 	const sanitized = stripInternalMetadataForDisplay(text).trim();
+ 	if (sanitized.length <= AGENT_RUN_TERMINAL_REPLY_MAX_CHARS) return sanitized;
+-	return `${truncateUtf16Safe(sanitized, 4095).trimEnd()}…`;
++	return `${truncateUtf16Safe(sanitized, AGENT_RUN_TERMINAL_REPLY_MAX_CHARS - 1).trimEnd()}…`;
+ }
+ /** Builds the authoritative terminal reply fact while raw assistant text is still available. */
+ function buildAgentRunTerminalReplySnapshot(params) {
+--- a/dist/reply-admission-ticket-EMIiz0gS.mjs
++++ b/dist/reply-admission-ticket-EMIiz0gS.mjs
+@@ -248,7 +248,7 @@
+ 	};
+ }
+ function markAgentRunFailureReplyPayload(payload) {
+-	const marked = markReplyPayloadForSourceSuppressionDelivery(payload);
++	const marked = setReplyPayloadMetadata(markReplyPayloadForSourceSuppressionDelivery(payload), { agentRunFailure: true });
+ 	if (!isSilentReplyText(marked.text, "NO_REPLY")) marked.isError = true;
+ 	return marked;
+ }
+--- a/dist/subagent-announce-output-CUuHxi5b.mjs
++++ b/dist/subagent-announce-output-CUuHxi5b.mjs
+@@ -489,7 +489,7 @@
+ * Reads child session output, detects waiting states, and formats completion findings for announcements.
+ */
+ const FAST_TEST_RETRY_INTERVAL_MS = 8;
+-const MAX_CHILD_COMPLETION_RESULT_CHARS = 512;
++const MAX_CHILD_COMPLETION_RESULT_CHARS = 12000;
+ const MAX_CHILD_COMPLETION_FIELD_CHARS = 256;
+-const MAX_CHILD_COMPLETION_FINDINGS_CHARS = 4096;
++const MAX_CHILD_COMPLETION_FINDINGS_CHARS = 16384;
+ const CHILD_RESULT_TRUNCATION_NOTICE = "\n[child result truncated]";
+--- a/dist/agent-runner.runtime-BVB4SNqA.mjs
++++ b/dist/agent-runner.runtime-BVB4SNqA.mjs
+@@ -540,8 +540,11 @@
+ 		}));
+ 	}
+ 	replyOperation.fail("run_failed", error);
+-	returnWithQueuedFollowupDrain(void 0);
+-	throw error;
++	return returnWithQueuedFollowupDrain(buildTerminalAgentRunFailureReplyPayload({
++		visibleReplyDelivered: false,
++		sessionCtx,
++		cfg
++	}));
+ }
+ async function cleanupReplyAgentRun(context) {
+ 	const { blockReplyPipeline, clearRestartRecoveryDeliveryClaim, providedReplyOperation, queueKey, replyOperation, runFollowupTurn, sessionKey, shouldDrainQueuedFollowupsAfterClear, typing } = context;
+@@ -5136,6 +5136,77 @@
+ 	};
+ }
+ //#endregion
++//#region src/auto-reply/reply/failure-reconciliation-recovery.ts
++const FAILURE_RECONCILIATION_RETRY_MARKER = "failure-reconciliation-retry";
++function isInternalFailureArtifact(payload) {
++	const metadata = getReplyPayloadMetadata(payload);
++	return metadata?.agentRunFailure === true || metadata?.toolErrorWarning !== void 0;
++}
++function collectInternalFailureFacts(payloads) {
++	const toolNames = [];
++	let terminalRunFailure = false;
++	for (const payload of payloads) {
++		const metadata = getReplyPayloadMetadata(payload);
++		if (metadata?.agentRunFailure === true) terminalRunFailure = true;
++		const toolName = metadata?.toolErrorWarning?.toolName;
++		if (typeof toolName === "string" && toolName.trim()) toolNames.push(toolName.trim());
++	}
++	return {
++		terminalRunFailure,
++		toolNames: [...new Set(toolNames)].sort()
++	};
++}
++function buildFailureReconciliationPrompt(facts) {
++	const toolFact = facts.toolNames.length > 0 ? ` Failed tool calls recorded by the host: ${facts.toolNames.join(", ")}. A tool warning is not evidence that a child task failed.` : "";
++	return formatSystemTurnPrompt(`The previous Main turn ended with an internal execution failure that must not be shown verbatim to the user.${facts.terminalRunFailure ? " The host recorded a terminal agent-run failure." : ""}${toolFact}
++
++Do not replay the original request or repeat any state-changing operation yet. First determine from the transcript and native child/task result whether a state-changing operation may have executed. If it may have executed, use the existing deterministic read-only domain tools to verify every relevant durable surface before deciding what happened. For Reminder work this means Reminder, Automation, and Calendar state.
++
++Then continue exactly once:
++- If read-back proves the requested action succeeded, report success briefly in the user's language and explain only that the confirmation path had an internal problem.
++- If read-back proves it did not execute and a retry is safe, perform at most one bounded retry and verify the resulting durable state before reporting success.
++- If the outcome remains ambiguous, do not retry; explain briefly that you could not verify whether it happened and avoided a duplicate.
++
++Do not expose provider, model, session, tool, stack, harness, or subagent diagnostics. Main remains the sole user-facing renderer.`);
++}
++function buildFailureReconciliationFollowupRun(base, facts) {
++	return {
++		...base,
++		prompt: buildFailureReconciliationPrompt(facts),
++		summaryLine: FAILURE_RECONCILIATION_RETRY_MARKER,
++		failureReconciliationRetry: true,
++		disableCollectBatching: true,
++		transcriptPrompt: void 0,
++		userTurnTranscriptRecorder: void 0,
++		currentInboundContext: void 0,
++		turnAdoptionLifecycle: void 0,
++		replyOperationRunStates: void 0,
++		run: {
++			...base.run,
++			suppressNextUserMessagePersistence: true
++		}
++	};
++}
++function resolveFailureReconciliation(params) {
++	const facts = collectInternalFailureFacts(params.payloads);
++	if (!facts.terminalRunFailure && facts.toolNames.length === 0) return {
++		kind: "none",
++		payloads: params.payloads
++	};
++	const payloads = params.payloads.filter((payload) => !isInternalFailureArtifact(payload));
++	if (!params.canRetry || params.completedSourceDelivery || params.base.failureReconciliationRetry === true) return {
++		kind: "suppress",
++		payloads,
++		facts
++	};
++	return {
++		kind: "retry",
++		payloads,
++		facts,
++		run: buildFailureReconciliationFollowupRun(params.base, facts)
++	};
++}
++//#endregion
+ //#region src/auto-reply/reply/agent-runner-result-complete.ts
+ async function completeReplyAgentRun(input) {
+ 	const { context, accounting, prepared } = input;
+@@ -5189,6 +5260,14 @@
+ 	if (trailingPluginStatusPayload) finalPayloads = [...finalPayloads, trailingPluginStatusPayload];
+ 	if (responseUsageLine) finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
+ 	if (isHookBlockedRun) finalPayloads = markBeforeAgentRunBlockedPayloads(finalPayloads);
++	const failureReconciliation = resolveFailureReconciliation({
++		base: followupRun,
++		payloads: finalPayloads,
++		canRetry: Boolean(sessionKey && storePath && !isHeartbeat && !isSubagentSessionKey(sessionKey) && sessionCtx.InboundEventKind !== "room_event"),
++		completedSourceDelivery: completedSourceReplyDelivery
++	});
++	finalPayloads = failureReconciliation.payloads;
++	if (failureReconciliation.kind === "retry" && !enqueueFollowupRun(queueKey, failureReconciliation.run, resolvedQueue, "none", runFollowupTurn, false, { position: "front" })) defaultRuntime.error?.("failure reconciliation follow-up could not be enqueued; raw failure delivery remains suppressed");
+ 	const isStrandedReplyRetryRun = followupRun.strandedReplyRetry === true;
+ 	if (sessionKey && storePath && (finalPayloads.length > 0 || isStrandedReplyRetryRun)) {
+ 		const sourceReplyPolicy = resolveSourceReplyPolicy({
+@@ -6291,6 +6370,18 @@
+ 	});
+ 	if (responseUsageLine) payloads = appendUsageLine(payloads, responseUsageLine);
+ 	payloads = renderFailurePayloads(payloads);
++	const failureReconciliation = resolveFailureReconciliation({
++		base: turn.queued,
++		payloads,
++		canRetry: Boolean(turn.session.kind === "session" && !isSubagentSessionKey(turn.session.key) && !opts?.isHeartbeat && (isRoutableChannel(turn.queued.originatingChannel) && turn.queued.originatingTo || opts?.onBlockReply)),
++		completedSourceDelivery: completedSourceDelivery
++	});
++	payloads = failureReconciliation.payloads;
++	if (failureReconciliation.kind === "retry") return {
++		kind: "retry-failure-reconciliation",
++		run: failureReconciliation.run,
++		resolved: runtimeResolved
++	};
+ 	if (sourcePolicy.sourceReplyDeliveryMode === "message_tool_only") {
+ 		const explicitlyDeliverable = payloads.filter((payload) => getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true);
+ 		return explicitlyDeliverable.length > 0 ? {
+@@ -6450,6 +6541,16 @@
+ 		});
+ 		return;
+ 	}
++	if (decision.kind === "retry-failure-reconciliation") {
++		const key = turn.session.kind === "session" ? turn.session.key : turn.queued.run.sessionKey;
++		if (key && enqueueFollowupRun(key, decision.run, resolveQueueSettings({
++			cfg: turn.config,
++			channel: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
++			sessionEntry: turn.session.current()
++		}), "none", params.runFollowup, false, { position: "front" })) return;
++		defaultRuntime.error?.("failure reconciliation follow-up could not be enqueued; raw failure delivery remains suppressed");
++		return;
++	}
+ 	await sendFollowupPayloads({
+ 		payloads: decision.kind === "deliver" ? decision.payloads : [decision.payload],
+ 		turn,
+@@ -8219,7 +8323,7 @@
+ 		});
+ 	} catch (error) {
+ 		recordReplyOperationAgentTurn(followupRun.replyOperationRunStates, replyOperation);
+-		return await handleReplyAgentRunError(error, {
++		const failureResult = await handleReplyAgentRunError(error, {
+ 			cfg,
+ 			resolveVisibleReplyDelivery,
+ 			isHeartbeat,
+@@ -8229,6 +8333,15 @@
+ 			returnWithQueuedFollowupDrain,
+ 			sessionCtx
+ 		});
++		const failurePayloads = Array.isArray(failureResult) ? failureResult : failureResult ? [failureResult] : [];
++		const failureReconciliation = resolveFailureReconciliation({
++			base: followupRun,
++			payloads: failurePayloads,
++			canRetry: Boolean(sessionKey && storePath && !isHeartbeat && !isSubagentSessionKey(sessionKey) && sessionCtx.InboundEventKind !== "room_event"),
++			completedSourceDelivery: await resolveVisibleReplyDelivery() === true
++		});
++		if (failureReconciliation.kind === "retry" && !enqueueFollowupRun(queueKey, failureReconciliation.run, resolvedQueue, "none", runFollowupTurn, false, { position: "front" })) defaultRuntime.error?.("failure reconciliation follow-up could not be enqueued; raw failure delivery remains suppressed");
++		return failureReconciliation.payloads.length === 1 ? failureReconciliation.payloads[0] : failureReconciliation.payloads.length > 1 ? failureReconciliation.payloads : void 0;
+ 	} finally {
+ 		await cleanupReplyAgentRun({
+ 			blockReplyPipeline,
+@@ -8244,4 +8357,4 @@
+ 	}
+ }
+ //#endregion
+-export { runReplyAgent };
++export { buildFailureReconciliationFollowupRun as __testBuildFailureReconciliationFollowupRun, resolveFailureReconciliation as __testResolveFailureReconciliation, runReplyAgent };

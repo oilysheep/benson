@@ -1,0 +1,65 @@
+--- a/dist/agent-runner.runtime-BVB4SNqA.mjs
++++ b/dist/agent-runner.runtime-BVB4SNqA.mjs
+@@ -7712,17 +7712,8 @@
+ 		outcome = { status: "answered" };
+ 	} catch (error) {
+ 		if (error instanceof QuestionDispatchRefusedError) {
+-			if (state) state.admission = {
+-				status: "skipped",
+-				reason: "question-response-refused"
+-			};
+-			return {
+-				handled: true,
+-				payload: markReplyPayloadForSourceSuppressionDelivery({
+-					text: `The answer was not sent: ${error.message}. Use the question controls in the Control UI, or check the active run and your permissions before retrying.`,
+-					isError: true
+-				})
+-			};
++			logVerbose(`pending question belongs to a different caller; admitting the input as an ordinary turn: ${String(error)}`);
++			return { handled: false };
+ 		}
+ 		if (!(error instanceof QuestionAnswerUnconfirmedError)) throw error;
+ 		outcome = {
+--- a/dist/task-registry.store.sqlite-CI1kWe-v.mjs
++++ b/dist/task-registry.store.sqlite-CI1kWe-v.mjs
+@@ -83,8 +83,7 @@
+ }
+ function shouldAutoDeliverTaskTerminalUpdate(task) {
+ 	if (task.notifyPolicy === "silent") return false;
+-	if (task.runtime === "subagent" && task.status !== "cancelled") return false;
+-	if (task.runtime === "subagent" && task.status === "cancelled" && task.error === "Subagent run killed.") return false;
++	if (task.runtime === "subagent") return false;
+ 	if (!isTerminalTaskStatus(task.status)) return false;
+ 	return task.deliveryStatus === "pending";
+ }
+--- a/dist/openclaw-tools-Bo9W_tg_.mjs
++++ b/dist/openclaw-tools-Bo9W_tg_.mjs
+@@ -2843,6 +2843,8 @@
+ }
+ /** Includes ask_user only on a primary session and when normal deny policy permits it. */
+ function shouldIncludeAskUserToolForOpenClawTools(params) {
++	const provenanceKind = params.inputProvenance?.kind;
++	if (provenanceKind !== void 0 && provenanceKind !== "external_user") return false;
+ 	return shouldIncludePrimarySessionToolForOpenClawTools("ask_user", params);
+ }
+ /** Keeps credential management on primary sessions allowed by the normal tool policy. */
+@@ -18120,7 +18122,8 @@
+ 		...shouldIncludeAskUserToolForOpenClawTools({
+ 			config: resolvedConfig,
+ 			agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+-			pluginToolDenylist: options?.pluginToolDenylist
++			pluginToolDenylist: options?.pluginToolDenylist,
++			inputProvenance: options?.inputProvenance
+ 		}) ? [createAskUserTool({
+ 			agentId: sessionAgentId,
+ 			sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+--- a/dist/agent-tools-DXxcrXNI.mjs
++++ b/dist/agent-tools-DXxcrXNI.mjs
+@@ -578,6 +578,7 @@
+ 			runSessionKey: options?.runSessionKey,
+ 			agentChannel: resolveGatewayMessageChannel(options?.messageChannel ?? options?.messageProvider),
+ 			agentAccountId: options?.agentAccountId,
++			inputProvenance: options?.inputProvenance,
+ 			gatewayCallerAccountId: gatewayCaller.accountId,
+ 			gatewayCallerChannel: gatewayCaller.channel,
+ 			gatewayCallerLocal: gatewayCaller.local,

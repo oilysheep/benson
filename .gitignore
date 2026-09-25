@@ -1,0 +1,55 @@
+# Benson runtime, rollback and generated evidence
+/output/
+/.checkpoints/
+
+# Local agent/tool runtime data
+/.openclaw/
+/main/.openclaw/
+/.agents/
+/.codex/
+
+# Main runtime/user data
+/main/memory/
+/main/media/
+
+# Dependency and interpreter caches
+node_modules/
+__pycache__/
+*.py[cod]
+.cache/
+.pytest_cache/
+
+# Logs and runtime databases
+*.log
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.db
+*.db-*
+*.wal
+*.shm
+
+# Secret-bearing local files
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.json
+.npmrc
+.pypirc
+id_rsa
+id_ed25519
+
+# Editor/temporary/history artifacts
+*.orig
+*~
+*.swp
+*.swo
+.DS_Store
+
+# Domain-agent runtime state
+/agents/*/memory/
+/agents/*/state/

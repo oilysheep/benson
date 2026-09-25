@@ -1,0 +1,14 @@
+{
+  "accountId": "benson",
+  "timezone": "Asia/Jerusalem",
+  "trustedRequesterIds": ["oren", "ilana", "amit", "tal", "harel"],
+  "recipients": [
+    {"id": "oren", "displayName": "Oren", "type": "person", "channel": "whatsapp", "to": "+972546977100", "aliases": ["oren", "אורן", "+972546977100", "972546977100"]},
+    {"id": "ilana", "displayName": "Ilana", "type": "person", "channel": "whatsapp", "to": "+972545901448", "aliases": ["ilana", "אילנה", "+972545901448", "972545901448"]},
+    {"id": "amit", "displayName": "Amit", "type": "person", "channel": "whatsapp", "to": "+972586977100", "aliases": ["amit", "עמית", "+972586977100", "972586977100"]},
+    {"id": "tal", "displayName": "Tal", "type": "person", "channel": "whatsapp", "to": "+972585901448", "aliases": ["tal", "טל", "+972585901448", "972585901448"]},
+    {"id": "harel", "displayName": "Harel", "type": "person", "channel": "whatsapp", "to": "+972584977100", "aliases": ["harel", "הראל", "+972584977100", "972584977100"]},
+    {"id": "family", "displayName": "Family", "type": "group", "channel": "whatsapp", "to": "972546977100-1584879277@g.us", "aliases": ["family", "משפחה", "המשפחה", "972546977100-1584879277@g.us"]},
+    {"id": "shopping", "displayName": "Shopping", "type": "group", "channel": "whatsapp", "to": "972546977100-1563854048@g.us", "aliases": ["shopping", "קניות", "972546977100-1563854048@g.us"]}
+  ]
+}

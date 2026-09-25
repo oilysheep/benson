@@ -1,0 +1,14 @@
+{
+  "name": "benson-reminder-tool",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "files": ["dist", "openclaw.plugin.json"],
+  "peerDependencies": {
+    "openclaw": ">=2026.5.17"
+  },
+  "openclaw": {
+    "extensions": ["./dist/index.js"]
+  }
+}
+

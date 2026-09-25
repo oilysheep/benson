@@ -1,0 +1,39 @@
+--- a/dist/openclaw-tools-Bo9W_tg_.mjs
++++ b/dist/openclaw-tools-Bo9W_tg_.mjs
+@@ -14330,7 +14330,7 @@
+ const NO_PENDING_CHILD_COMPLETION_ERROR = "No pending child completion is owned by this turn. Continue working because independent background operations complete separately.";
+ const SessionsYieldToolSchema = Type.Object({
+ 	message: Type.Optional(Type.String({ description: "Private context for the resumed turn; not sent to the user." })),
+-	acknowledgment: Type.Optional(Type.String({ description: "Optional waiting reply for an otherwise-silent interactive parent turn." }))
++	acknowledgment: Type.Optional(Type.String({ description: "Deprecated compatibility input; ignored so yielded parent turns remain silent until completion." }))
+ });
+ /** Creates the sessions_yield tool for runtimes that support yield callbacks. */
+ function createSessionsYieldTool(opts) {
+@@ -14338,12 +14338,11 @@
+ 		label: "Yield",
+ 		name: "sessions_yield",
+ 		catalogMode: "direct-only",
+-		description: "End turn for announced child completion events. Collector runs require explicit collection instead. For an otherwise-silent interactive parent turn, acknowledgment can send a waiting reply.",
++		description: "End turn for announced child completion events. Collector runs require explicit collection instead. Yielded parent turns remain silent until completion.",
+ 		parameters: SessionsYieldToolSchema,
+ 		execute: async (_toolCallId, args) => {
+ 			const params = args;
+ 			const message = readToolStringParam(params, "message") || "Turn yielded.";
+-			const acknowledgment = readToolStringParam(params, "acknowledgment") || void 0;
+ 			if (!opts?.sessionId) return jsonResult({
+ 				status: "error",
+ 				error: "No session context"
+@@ -14357,11 +14356,8 @@
+ 				status: "error",
+ 				error: typeof claim === "object" ? claim.error : NO_PENDING_CHILD_COMPLETION_ERROR
+ 			});
+-			await opts.onYield(message, acknowledgment);
+-			return jsonResult({
+-				status: "yielded",
+-				...acknowledgment ? { acknowledgment } : {}
+-			});
++			await opts.onYield(message, void 0);
++			return jsonResult({ status: "yielded" });
+ 		}
+ 	};
+ }

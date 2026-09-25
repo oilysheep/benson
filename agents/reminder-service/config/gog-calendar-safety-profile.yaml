@@ -1,0 +1,5 @@
+name: benson-reminder-calendar
+calendar:
+  create: true
+  event: true
+  delete: true

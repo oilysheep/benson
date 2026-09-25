@@ -1,0 +1,26 @@
+{
+  "id": "benson-reminder-tool",
+  "name": "Benson Reminder Tool",
+  "description": "Structured tool boundary for the existing deterministic Benson Reminder Service.",
+  "version": "1.0.0",
+  "activation": {
+    "onCapabilities": ["tool"]
+  },
+  "contracts": {
+    "tools": [
+      "benson_reminder_create",
+      "benson_reminder_create_plan",
+      "benson_reminder_list",
+      "benson_reminder_find",
+      "benson_reminder_update",
+      "benson_reminder_pause",
+      "benson_reminder_resume",
+      "benson_reminder_delete"
+    ]
+  },
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
