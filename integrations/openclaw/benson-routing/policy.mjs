@@ -16,6 +16,7 @@ export const ROUTING_REASONS = Object.freeze([
   "context_required",
   "ambiguous",
   "continuation_required",
+  "unknown_evidence",
   "low_route_confidence",
   "low_self_contained_probability",
   "domain_disabled",
@@ -307,6 +308,12 @@ export function evaluateRouting(
 
   if (outcome.continuationRequired) {
     return decision({ ...base, reason: "continuation_required" });
+  }
+
+  if (["unsupportedInput", "contextRequired", "ambiguous", "continuationRequired"].some(
+    (field) => outcome[field] === null,
+  ) || outcome.routeConfidence === null || outcome.selfContainedProbability === null) {
+    return decision({ ...base, reason: "unknown_evidence" });
   }
 
   if (outcome.routeConfidence.value < config.thresholds.routeConfidence) {
