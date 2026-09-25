@@ -4,7 +4,7 @@ Status: S01–S03 ACCEPTED (S03 staged and production-disabled); S04–S18 not s
 Date: 2026-09-25.
 Canonical owner: `BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md`.
 Authority: [approved target architecture](architecture/BENSON_SUBAGENT_ARCHITECTURE.md), especially Sections 3–7, 10, 13–17, 24–26. The operator's current request establishes architecture approval; historical review-pending wording in the architecture is not a new approval gate.
-Execution policy: one bounded stage per Sol session; no stage is implemented by this document.
+Execution policy: one bounded stage at a time; no stage is implemented by this document.
 
 ## 1. Objective and acceptance
 
