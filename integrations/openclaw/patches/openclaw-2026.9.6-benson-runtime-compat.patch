@@ -1,0 +1,390 @@
+--- a/dist/agent-runner.runtime-DH-TOu7I.mjs
++++ b/dist/agent-runner.runtime-DH-TOu7I.mjs
+@@ -573,8 +573,10 @@
+ 		}));
+ 	}
+ 	replyOperation.fail("run_failed", error);
+-	returnWithQueuedFollowupDrain(void 0);
+-	throw error;
++	return returnWithQueuedFollowupDrain(buildTerminalAgentRunFailureReplyPayload({
++		replyExpectation,
++		visibleReplyDelivered: false
++	}));
+ }
+ async function cleanupReplyAgentRun(context) {
+ 	const { blockReplyPipeline, clearRestartRecoveryDeliveryClaim, providedReplyOperation, queueKey, replyOperation, runFollowupTurn, sessionKey, shouldDrainQueuedFollowupsAfterClear, typing } = context;
+@@ -5240,6 +5242,77 @@
+ 	};
+ }
+ //#endregion
++//#region src/auto-reply/reply/failure-reconciliation-recovery.ts
++const FAILURE_RECONCILIATION_RETRY_MARKER = "failure-reconciliation-retry";
++function isInternalFailureArtifact(payload) {
++	const metadata = getReplyPayloadMetadata(payload);
++	return metadata?.agentRunFailure === true || metadata?.toolErrorWarning !== void 0;
++}
++function collectInternalFailureFacts(payloads) {
++	const toolNames = [];
++	let terminalRunFailure = false;
++	for (const payload of payloads) {
++		const metadata = getReplyPayloadMetadata(payload);
++		if (metadata?.agentRunFailure === true) terminalRunFailure = true;
++		const toolName = metadata?.toolErrorWarning?.toolName;
++		if (typeof toolName === "string" && toolName.trim()) toolNames.push(toolName.trim());
++	}
++	return {
++		terminalRunFailure,
++		toolNames: [...new Set(toolNames)].sort()
++	};
++}
++function buildFailureReconciliationPrompt(facts) {
++	const toolFact = facts.toolNames.length > 0 ? ` Failed tool calls recorded by the host: ${facts.toolNames.join(", ")}. A tool warning is not evidence that a child task failed.` : "";
++	return formatSystemTurnPrompt(`The previous Main turn ended with an internal execution failure that must not be shown verbatim to the user.${facts.terminalRunFailure ? " The host recorded a terminal agent-run failure." : ""}${toolFact}
++
++Do not replay the original request or repeat any state-changing operation yet. First determine from the transcript and native child/task result whether a state-changing operation may have executed. If it may have executed, use the existing deterministic read-only domain tools to verify every relevant durable surface before deciding what happened. For Reminder work this means Reminder, Automation, and Calendar state.
++
++Then continue exactly once:
++- If read-back proves the requested action succeeded, report success briefly in the user's language and explain only that the confirmation path had an internal problem.
++- If read-back proves it did not execute and a retry is safe, perform at most one bounded retry and verify the resulting durable state before reporting success.
++- If the outcome remains ambiguous, do not retry; explain briefly that you could not verify whether it happened and avoided a duplicate.
++
++Do not expose provider, model, session, tool, stack, harness, or subagent diagnostics. Main remains the sole user-facing renderer.`);
++}
++function buildFailureReconciliationFollowupRun(base, facts) {
++	return {
++		...base,
++		prompt: buildFailureReconciliationPrompt(facts),
++		summaryLine: FAILURE_RECONCILIATION_RETRY_MARKER,
++		failureReconciliationRetry: true,
++		disableCollectBatching: true,
++		transcriptPrompt: void 0,
++		userTurnTranscriptRecorder: void 0,
++		currentInboundContext: void 0,
++		turnAdoptionLifecycle: void 0,
++		replyOperationRunStates: void 0,
++		run: {
++			...base.run,
++			suppressNextUserMessagePersistence: true
++		}
++	};
++}
++function resolveFailureReconciliation(params) {
++	const facts = collectInternalFailureFacts(params.payloads);
++	if (!facts.terminalRunFailure && facts.toolNames.length === 0) return {
++		kind: "none",
++		payloads: params.payloads
++	};
++	const payloads = params.payloads.filter((payload) => !isInternalFailureArtifact(payload));
++	if (!params.canRetry || params.completedSourceDelivery || params.base.failureReconciliationRetry === true) return {
++		kind: "suppress",
++		payloads,
++		facts
++	};
++	return {
++		kind: "retry",
++		payloads,
++		facts,
++		run: buildFailureReconciliationFollowupRun(params.base, facts)
++	};
++}
++//#endregion
+ //#region src/auto-reply/reply/agent-runner-result-complete.ts
+ async function completeReplyAgentRun(input) {
+ 	const { context, accounting, prepared } = input;
+@@ -5293,6 +5366,14 @@
+ 	if (trailingPluginStatusPayload) finalPayloads = [...finalPayloads, trailingPluginStatusPayload];
+ 	if (responseUsageLine) finalPayloads = appendUsageLine(finalPayloads, responseUsageLine);
+ 	if (isHookBlockedRun) finalPayloads = markBeforeAgentRunBlockedPayloads(finalPayloads);
++	const failureReconciliation = resolveFailureReconciliation({
++		base: followupRun,
++		payloads: finalPayloads,
++		canRetry: Boolean(sessionKey && storePath && !isHeartbeat && !isSubagentSessionKey(sessionKey) && sessionCtx.InboundEventKind !== "room_event"),
++		completedSourceDelivery: completedSourceReplyDelivery
++	});
++	finalPayloads = failureReconciliation.payloads;
++	if (failureReconciliation.kind === "retry" && !enqueueFollowupRun(queueKey, failureReconciliation.run, resolvedQueue, "none", runFollowupTurn, false, { position: "front" })) defaultRuntime.error?.("failure reconciliation follow-up could not be enqueued; raw failure delivery remains suppressed");
+ 	const isStrandedReplyRetryRun = followupRun.strandedReplyRetry === true;
+ 	if (sessionKey && storePath && (finalPayloads.length > 0 || isStrandedReplyRetryRun)) {
+ 		const sourceReplyPolicy = resolveSourceReplyPolicy({
+@@ -6472,6 +6553,18 @@
+ 	});
+ 	if (responseUsageLine) payloads = appendUsageLine(payloads, responseUsageLine);
+ 	payloads = renderFailurePayloads(payloads);
++	const failureReconciliation = resolveFailureReconciliation({
++		base: turn.queued,
++		payloads,
++		canRetry: Boolean(turn.session.kind === "session" && !isSubagentSessionKey(turn.session.key) && !opts?.isHeartbeat && (isRoutableChannel(turn.queued.originatingChannel) && turn.queued.originatingTo || opts?.onBlockReply)),
++		completedSourceDelivery: completedSourceDelivery
++	});
++	payloads = failureReconciliation.payloads;
++	if (failureReconciliation.kind === "retry") return {
++		kind: "retry-failure-reconciliation",
++		run: failureReconciliation.run,
++		resolved: runtimeResolved
++	};
+ 	if (sourcePolicy.sourceReplyDeliveryMode === "message_tool_only") {
+ 		payloads = payloads.filter((payload) => getReplyPayloadMetadata(payload)?.deliverDespiteSourceReplySuppression === true);
+ 		if (payloads.length === 0) return {
+@@ -6612,6 +6705,16 @@
+ 			kind: "completed",
+ 			payloads: []
+ 		};
++	}
++	if (decision.kind === "retry-failure-reconciliation") {
++		const key = turn.session.kind === "session" ? turn.session.key : turn.queued.run.sessionKey;
++		if (key && enqueueFollowupRun(key, decision.run, resolveQueueSettings({
++			cfg: turn.config,
++			channel: turn.queued.originatingChannel ?? turn.queued.run.messageProvider,
++			sessionEntry: turn.session.current()
++		}), "none", params.runFollowup, false, { position: "front" })) return { kind: "source-retry" };
++		defaultRuntime.error?.("failure reconciliation follow-up could not be enqueued; raw failure delivery remains suppressed");
++		return { kind: "completed", payloads: [] };
+ 	}
+ 	if (decision.kind === "retry-source-delivery") {
+ 		warnPrivateMessageToolFinal({
+@@ -7912,17 +8015,8 @@
+ 			return { handled: false };
+ 		}
+ 		if (error instanceof QuestionDispatchRefusedError) {
+-			if (state) state.admission = {
+-				status: "skipped",
+-				reason: "question-response-refused"
+-			};
+-			return {
+-				handled: true,
+-				payload: markReplyPayloadForSourceSuppressionDelivery({
+-					text: `The answer was not sent: ${error.message}. Use the question controls in the Control UI, or check the active run and your permissions before retrying.`,
+-					isError: true
+-				})
+-			};
++			logVerbose(`pending question belongs to a different caller; admitting the input as an ordinary turn: ${String(error)}`);
++			return { handled: false };
+ 		}
+ 		const rejection = readQuestionRejection(error);
+ 		if (rejection?.code === "INVALID_REQUEST" && rejection.reason === "QUESTION_INVALID_ANSWER") {
+@@ -8565,7 +8659,7 @@
+ 		});
+ 	} catch (error) {
+ 		recordReplyOperationAgentTurn(followupRun.replyOperationRunStates, replyOperation);
+-		return await handleReplyAgentRunError(error, {
++		const failureResult = await handleReplyAgentRunError(error, {
+ 			resolveVisibleReplyDelivery,
+ 			isHeartbeat,
+ 			replyExpectation,
+@@ -8575,6 +8669,15 @@
+ 			returnWithQueuedFollowupDrain,
+ 			sessionCtx
+ 		});
++		const failurePayloads = Array.isArray(failureResult) ? failureResult : failureResult ? [failureResult] : [];
++		const failureReconciliation = resolveFailureReconciliation({
++			base: followupRun,
++			payloads: failurePayloads,
++			canRetry: Boolean(sessionKey && storePath && !isHeartbeat && !isSubagentSessionKey(sessionKey) && sessionCtx.InboundEventKind !== "room_event"),
++			completedSourceDelivery: await resolveVisibleReplyDelivery() === true
++		});
++		if (failureReconciliation.kind === "retry" && !enqueueFollowupRun(queueKey, failureReconciliation.run, resolvedQueue, "none", runFollowupTurn, false, { position: "front" })) defaultRuntime.error?.("failure reconciliation follow-up could not be enqueued; raw failure delivery remains suppressed");
++		return failureReconciliation.payloads.length === 1 ? failureReconciliation.payloads[0] : failureReconciliation.payloads.length > 1 ? failureReconciliation.payloads : void 0;
+ 	} finally {
+ 		await cleanupReplyAgentRun({
+ 			blockReplyPipeline,
+@@ -8590,4 +8693,4 @@
+ 	}
+ }
+ //#endregion
+-export { runReplyAgent };
++export { buildFailureReconciliationFollowupRun as __testBuildFailureReconciliationFollowupRun, resolveFailureReconciliation as __testResolveFailureReconciliation, runReplyAgent };
+--- a/dist/agent-tools-g36ho974.mjs
++++ b/dist/agent-tools-g36ho974.mjs
+@@ -660,6 +660,7 @@
+ 			runSessionKey: options?.runSessionKey,
+ 			agentChannel: resolveGatewayMessageChannel(options?.messageChannel ?? options?.messageProvider),
+ 			agentAccountId: options?.agentAccountId,
++			inputProvenance: options?.inputProvenance,
+ 			gatewayCallerAccountId: gatewayCaller.accountId,
+ 			gatewayCallerChannel: gatewayCaller.channel,
+ 			gatewayCallerLocal: gatewayCaller.local,
+--- a/dist/commentary-progress-owner-C2HSv4QR.mjs
++++ b/dist/commentary-progress-owner-C2HSv4QR.mjs
+@@ -252,7 +252,7 @@
+ 	};
+ }
+ function markAgentRunFailureReplyPayload(payload) {
+-	const marked = markReplyPayloadForSourceSuppressionDelivery(payload);
++	const marked = setReplyPayloadMetadata(markReplyPayloadForSourceSuppressionDelivery(payload), { agentRunFailure: true });
+ 	if (!isSilentReplyText(marked.text, "NO_REPLY")) marked.isError = true;
+ 	return marked;
+ }
+--- a/dist/openclaw-state-db-read-connection-Beg0AZE7.mjs
++++ b/dist/openclaw-state-db-read-connection-Beg0AZE7.mjs
+@@ -916,7 +916,7 @@
+ }
+ //#endregion
+ //#region src/agents/agent-run-terminal-reply.ts
+-const AGENT_RUN_TERMINAL_REPLY_MAX_CHARS = 4096;
++const AGENT_RUN_TERMINAL_REPLY_MAX_CHARS = 12000;
+ function isMessageToolNotCalledTerminalReply(reply) {
+ 	return reply?.disposition === "empty" && reply.code === "message-tool-not-called";
+ }
+@@ -924,7 +924,7 @@
+ function sanitizeAgentRunTerminalReplyText(text) {
+ 	const sanitized = stripInternalMetadataForDisplay(text).trim();
+ 	if (sanitized.length <= AGENT_RUN_TERMINAL_REPLY_MAX_CHARS) return sanitized;
+-	return `${truncateUtf16Safe(sanitized, 4095).trimEnd()}…`;
++	return `${truncateUtf16Safe(sanitized, AGENT_RUN_TERMINAL_REPLY_MAX_CHARS - 1).trimEnd()}…`;
+ }
+ /** Builds the authoritative terminal reply fact while raw assistant text is still available. */
+ function buildAgentRunTerminalReplySnapshot(params) {
+--- a/dist/openclaw-tools-thu-J91q.mjs
++++ b/dist/openclaw-tools-thu-J91q.mjs
+@@ -1904,6 +1904,8 @@
+ }
+ /** Includes ask_user only on a primary session and when normal deny policy permits it. */
+ function shouldIncludeAskUserToolForOpenClawTools(params) {
++	const provenanceKind = params.inputProvenance?.kind;
++	if (provenanceKind !== void 0 && provenanceKind !== "external_user") return false;
+ 	return shouldIncludePrimarySessionToolForOpenClawTools("ask_user", params);
+ }
+ /** Keeps credential management on primary sessions allowed by the normal tool policy. */
+@@ -13815,7 +13817,7 @@
+ const SessionsYieldToolSchema = Type.Object({
+ 	waitFor: Type.Optional(Type.Literal("message", { description: "Explicitly pause an unfinished subagent until an incoming continuation message. Does not schedule a message or submit the final result." })),
+ 	message: Type.Optional(Type.String({ description: "Private context for the resumed turn; not sent to the user." })),
+-	acknowledgment: Type.Optional(Type.String({ description: "Optional waiting reply for an otherwise-silent interactive parent turn." }))
++	acknowledgment: Type.Optional(Type.String({ description: "Deprecated compatibility input; ignored so yielded parent turns remain silent until completion." }))
+ });
+ /** Creates the sessions_yield tool for runtimes that support yield callbacks. */
+ function createSessionsYieldTool(opts) {
+@@ -13823,12 +13825,11 @@
+ 		label: "Yield",
+ 		name: "sessions_yield",
+ 		catalogMode: "direct-only",
+-		description: "End this turn for pending child completion events; this is not a final-result submission. Return completed work normally. An unfinished subagent waiting for an incoming continuation must set waitFor:\"message\". Collector runs require explicit collection instead. acknowledgment can send a waiting reply for an otherwise-silent interactive parent.",
++		description: "End this turn for pending child completion events; this is not a final-result submission. Return completed work normally. An unfinished subagent waiting for an incoming continuation must set waitFor:\"message\". Collector runs require explicit collection instead. yielded parent turns remain silent until completion.",
+ 		parameters: SessionsYieldToolSchema,
+ 		execute: async (_toolCallId, args) => {
+ 			const params = args;
+ 			const message = readToolStringParam(params, "message") || "Turn yielded.";
+-			const acknowledgment = readToolStringParam(params, "acknowledgment") || void 0;
+ 			const waitFor = readToolStringParam(params, "waitFor");
+ 			if (waitFor !== void 0 && waitFor !== "message") return jsonResult({
+ 				status: "error",
+@@ -13856,11 +13857,8 @@
+ 				status: "error",
+ 				error: typeof claim === "object" ? claim.error : NO_PENDING_CHILD_COMPLETION_ERROR
+ 			});
+-			await opts.onYield(message, acknowledgment);
+-			return jsonResult({
+-				status: "yielded",
+-				...acknowledgment ? { acknowledgment } : {}
+-			});
++			await opts.onYield(message, void 0);
++			return jsonResult({ status: "yielded" });
+ 		}
+ 	};
+ }
+@@ -17653,7 +17651,8 @@
+ 		...shouldIncludeAskUserToolForOpenClawTools({
+ 			config: resolvedConfig,
+ 			agentSessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+-			pluginToolDenylist: options?.pluginToolDenylist
++			pluginToolDenylist: options?.pluginToolDenylist,
++			inputProvenance: options?.inputProvenance
+ 		}) ? [createAskUserTool({
+ 			agentId: sessionAgentId,
+ 			sessionKey: options?.runSessionKey ?? options?.agentSessionKey,
+--- a/dist/task-notification-policy-7pB-BxLh.mjs
++++ b/dist/task-notification-policy-7pB-BxLh.mjs
+@@ -3,8 +3,7 @@
+ //#region src/tasks/task-notification-policy.ts
+ function shouldAutoDeliverTaskTerminalUpdate(task) {
+ 	if (task.notifyPolicy === "silent") return false;
+-	if (task.runtime === "subagent" && task.status !== "cancelled") return false;
+-	if (task.runtime === "subagent" && task.status === "cancelled" && task.error === "Subagent run killed.") return false;
++	if (task.runtime === "subagent") return false;
+ 	if (!isTerminalTaskStatus(task.status)) return false;
+ 	return task.deliveryStatus === "pending";
+ }
+--- a/dist/tools-BQGDduQH.mjs
++++ b/dist/tools-BQGDduQH.mjs
+@@ -410,42 +410,14 @@
+ 		}
+ 	};
+ }
+-function buildMemorySearchUnavailableResult(error, overrides) {
+-	const reason = (error ?? "memory search unavailable").trim() || "memory search unavailable";
+-	const normalizedReason = normalizeLowercaseStringOrEmpty(reason);
+-	const isQuotaError = /insufficient_quota|quota|429/.test(normalizedReason);
+-	const isMissingNodeSqlite = /missing node:sqlite|no such built-?in module: node:sqlite/.test(normalizedReason);
+-	const isSearchDeadline = overrides?.deadline === true;
+-	const deadlineAction = overrides?.agentId ? `Retry memory_search after a short wait: a memory-corpus timeout pauses retries for up to a minute. If memory-corpus timeouts persist, run: openclaw memory status --deep --agent ${overrides.agentId}, and rebuild with openclaw memory index --force --agent ${overrides.agentId} only if it reports the index dirty or incomplete` : "Retry memory_search after a short wait. If memory-corpus timeouts persist, inspect this agent's memory index before rebuilding it.";
+-	const warning = overrides?.warning ?? (overrides?.code === SESSION_CANONICAL_KEY_MIGRATION_REQUIRED ? SESSION_CANONICAL_KEY_MIGRATION_WARNING : isQuotaError ? "Memory search is unavailable because the embedding provider quota is exhausted." : isMissingNodeSqlite ? "Memory search is unavailable because this OpenClaw Node runtime does not provide SQLite support." : isSearchDeadline ? "Memory search did not finish within its time limit." : "Memory search is unavailable due to an embedding/provider error.");
+-	const action = overrides?.action ?? (overrides?.code === SESSION_CANONICAL_KEY_MIGRATION_REQUIRED ? SESSION_CANONICAL_KEY_MIGRATION_ACTION : isQuotaError ? "Top up or switch embedding provider, then retry memory_search." : isMissingNodeSqlite ? "Run OpenClaw with a Node runtime that includes node:sqlite, then retry memory_search." : isSearchDeadline ? deadlineAction : "Check embedding provider configuration and retry memory_search.");
+-	return {
+-		results: [],
+-		disabled: true,
+-		unavailable: true,
+-		...isSearchDeadline ? {
+-			timedOut: true,
+-			timeoutMs: DEFAULT_MEMORY_SEARCH_TIMEOUT_MS
+-		} : {},
+-		error: reason,
+-		warning,
+-		action,
+-		debug: {
+-			warning,
+-			action,
+-			error: reason
+-		}
+-	};
++function buildMemorySearchUnavailableResult() {
++	return { results: [] };
+ }
+ //#endregion
+ //#region extensions/memory-core/src/memory-search-tool-query.ts
+ const MEMORY_SEARCH_POST_FILTER_MAX_CANDIDATES = 200;
+-function buildPausedMemoryIndexUnavailableResult(diagnostic, params) {
+-	const { error, warning, action } = resolveMemoryIndexSearchDiagnostic(diagnostic, params.status, params.agentId);
+-	return buildMemorySearchUnavailableResult(error, {
+-		warning,
+-		action
+-	});
++function buildPausedMemoryIndexUnavailableResult() {
++	return buildMemorySearchUnavailableResult();
+ }
+ function isClosedMemoryStoreError(error) {
+ 	const message = formatErrorMessage(error).toLowerCase();
+@@ -917,33 +889,10 @@
+ 							};
+ 							import("./short-term-promotion-record-DC24HXjB.mjs").then(({ recordShortTermRecalls }) => recordShortTermRecalls(recall)).catch(() => {});
+ 						}
+-						const attempts = [...(requestedCorpus === "all" || memory?.outcome === "partial") && memory ? [memory] : [], ...wiki ? [wiki] : []];
+-						const staleness = memoryValue?.staleness;
+-						const recovery = memoryValue?.unavailableResult;
+-						const metadata = composeMemoryCorpusMetadata(attempts, [
+-							...memoryValue?.automaticRebuildWarning ? [memoryValue.automaticRebuildWarning] : [],
+-							...staleness?.warning ? [staleness.warning] : [],
+-							...recovery?.warning ? [recovery.warning] : [],
+-							...memory?.outcome === "partial" ? ["Only memory-file keyword matches are included; semantic memory retrieval did not finish within the search time limit. Session transcript results are not included."] : []
+-						]);
+-						const elapsed = Math.max(0, Date.now() - toolStartedAt);
+-						const debug = memoryValue?.debug ? {
+-							...memoryValue.debug,
+-							toolMs: elapsed,
+-							outsideSearchMs: Math.max(0, elapsed - memoryValue.debug.searchMs)
+-						} : void 0;
+ 						return jsonResult({
+ 							results: results.map((result) => presentation.get(result) ?? result),
+-							provider: memoryValue?.provider,
+-							model: memoryValue?.model,
+-							fallback: memoryValue?.fallback,
+ 							citations: citationsMode,
+-							mode: memoryValue?.mode,
+-							...staleness,
+-							...attempts.length > 0 || memoryValue?.automaticRebuildWarning ? metadata : {},
+-							...memory?.outcome === "partial" ? { partial: true } : {},
+-							...recovery?.action ? { action: recovery.action } : {},
+-							debug
++							...memory?.outcome === "partial" ? { partial: true } : {}
+ 						});
+ 					}
+ 				});

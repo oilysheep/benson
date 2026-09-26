@@ -127,10 +127,10 @@ export function buildArgv(params) {
   return argv;
 }
 
-export function runReminderService(params, signal) {
+export function runReminderService(params, signal, servicePath = REMINDER_SERVICE_PATH) {
   const argv = buildArgv(params);
   return new Promise((resolve, reject) => {
-    const child = spawn(REMINDER_SERVICE_PATH, argv, {
+    const child = spawn(servicePath, argv, {
       env: process.env,
       stdio: ["ignore", "pipe", "pipe"],
     });

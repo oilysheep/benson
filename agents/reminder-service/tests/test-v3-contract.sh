@@ -86,7 +86,7 @@ OPENCLAW_ENTRY="$(readlink -f "$OPENCLAW_CLI")"
 OPENCLAW_PKG="$(dirname "$OPENCLAW_ENTRY")"
 OPENCLAW_SCHEMA_RUNTIME="$OPENCLAW_PKG/dist/plugin-sdk/json-schema-runtime.js"
 [[ -f "$OPENCLAW_SCHEMA_RUNTIME" ]] || fail "missing OpenClaw native JSON-schema runtime"
-OPENCLAW_TOOL_VALIDATOR="$OPENCLAW_PKG/dist/validation-BDzVDnTs.mjs"
+OPENCLAW_TOOL_VALIDATOR="$OPENCLAW_PKG/dist/validation-Dw7cb6BV.mjs"
 [[ -f "$OPENCLAW_TOOL_VALIDATOR" ]] || fail "missing OpenClaw native tool argument validator"
 
 node --input-type=module - "$TOOL" "$PLUGIN_RUNNER" "$PLUGIN_CONTRACTS" "$ROOT/config/recipients.json" "$OPENCLAW_SCHEMA_RUNTIME" "$OPENCLAW_TOOL_VALIDATOR" <<'JS'

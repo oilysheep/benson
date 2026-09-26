@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import canonicalRecipients from "../../../../../agents/reminder-service/config/recipients.json" with { type: "json" };
 
 const nonEmptyString = { type: "string", minLength: 1, pattern: "\\S" };
 
@@ -22,18 +22,8 @@ const explicitUserMetadata = {
   },
 };
 
-const RECIPIENTS_CONFIG_URL = new URL(
-  "../../../../../agents/reminder-service/config/recipients.json",
-  import.meta.url,
-);
-
 function loadCanonicalIdentityContract() {
-  let config;
-  try {
-    config = JSON.parse(readFileSync(RECIPIENTS_CONFIG_URL, "utf8"));
-  } catch (error) {
-    throw new Error(`Unable to load canonical Reminder recipients config: ${error.message}`);
-  }
+  const config = structuredClone(canonicalRecipients);
   if (!config || typeof config !== "object" || !Array.isArray(config.recipients)) {
     throw new Error("Canonical Reminder recipients config must contain recipients[]");
   }

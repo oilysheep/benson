@@ -1,0 +1,74 @@
+--- a/dist/dispatch-from-config-Cu599NRF.mjs
++++ b/dist/dispatch-from-config-Cu599NRF.mjs
+@@ -606,6 +606,51 @@
+ }
+ //#endregion
+ //#region src/auto-reply/reply/dispatch-from-config.choose-route.ts
++// Benson S03 admission projection is data only. No controller is registered here;
++// native dispatch remains the sole production execution path.
++function resolveBensonRequestAdmission(state) {
++	const blocked = (kind, reason, requestId = null, sessionKey = null) => Object.freeze({
++		schemaVersion: 1,
++		kind,
++		reason,
++		requestId,
++		sessionKey,
++		request: null
++	});
++	const ctx = state.ctx;
++	if (!state.allowInboundHandlers || ctx.InternalTurnSource ||
++		ctx.InputProvenance?.kind && ctx.InputProvenance.kind !== "external_user" ||
++		ctx.ParentSessionKey || ctx.InboundEventKind && ctx.InboundEventKind !== "message") {
++		return blocked("bypass", "non_external");
++	}
++	if (state.sessionAgentId !== "main") return blocked("bypass", "non_main_owner");
++	if (state.pluginOwnedBinding) return blocked("bypass", "plugin_binding");
++	if (ctx.CommandTurn?.kind !== "normal" || state.explicitCommandTurnCtx ||
++		/^\s*\//u.test(ctx.commandText ?? "")) return blocked("bypass", "command");
++	if (state.inboundDedupeClaim.status !== "claimed" || state.inboundDedupeClaim.recovered) {
++		return blocked("bypass", "duplicate_or_recovery");
++	}
++	if (!state.getDispatchReplyOperation()) return blocked("bypass", "already_owned");
++	if (state.isPreDispatchOperationAborted()) return blocked("bypass", "cancelled");
++	const requestId = readChannelSourceTurnId(ctx);
++	const sessionKey = state.sessionStoreEntry.sessionKey ?? state.sessionKey;
++	if (!requestId || !sessionKey) return blocked("main_only", "identity_unavailable");
++	if (state.inboundAudio || ctx.media?.length > 0) {
++		return blocked("main_only", "unsupported_input", requestId, sessionKey);
++	}
++	const request = ctx.rawText;
++	if (typeof request !== "string" || !request.trim() || Buffer.byteLength(request, "utf8") > 8192) {
++		return blocked("main_only", "empty_or_oversized", requestId, sessionKey);
++	}
++	return Object.freeze({
++		schemaVersion: 1,
++		kind: "candidate",
++		reason: null,
++		requestId,
++		sessionKey,
++		request
++	});
++}
+ async function chooseDispatchRoute(state) {
+ 	const { acpDispatchSessionKey, attachSourceReplyDeliveryMode, cfg, commitInboundDedupeIfClaimed, completeDispatchReplyOperation, ctx, deliveryChannel, dispatcher, getPreDispatchAbortSignal, hookRunner, isRoutedReplyDelivered, markIdle, markInboundDedupeReplayUnsafe, params, recordProcessed, replyContextAccountId, replyRoute, resolvePreparedTranscriptBinding, routeReplyChannel, routeReplyThreadId, routeReplyTo, runWithDispatchLifecycleAdmission, sendPayloadAsync, sessionAgentId, sessionKey, sessionStoreEntry, sessionTtsAuto, shouldEmitVerboseProgress, shouldRouteToOriginating, traceReplyPhase, trackDispatchLifecycleWork, turnLedger } = state;
+ 	const shouldSuppressProgressDelivery = () => state.sendPolicyDenied || state.suppressDelivery && !shouldDeliverVerboseProgressDespiteSourceSuppression();
+@@ -981,9 +1026,11 @@
+ 		status: "complete",
+ 		result: state.finishReplyOperationBusyDispatch({ dedupeDisposition: "release" })
+ 	};
++	const bensonRequestAdmission = resolveBensonRequestAdmission(state);
+ 	return {
+ 		status: "ready",
+ 		state: extendPreparedDispatchState(state, {
++			bensonRequestAdmission,
+ 			shouldSuppressDefaultToolProgressMessages,
+ 			shouldSendVerboseProgressMessages,
+ 			shouldSendToolSummaries,
+@@ -2553,6 +2600,7 @@
+ 	inboundDedupeInFlight.set(key, owner);
+ 	return {
+ 		status: "claimed",
++		recovered,
+ 		commit: () => {
+ 			if (inboundDedupeInFlight.get(key) === owner) {
+ 				inboundDedupeCache.check(key, void 0, owner);

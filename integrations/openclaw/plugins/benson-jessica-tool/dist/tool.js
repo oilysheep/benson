@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import canonicalRegistry from '../../../../../agents/jessica-vacuum/config/registry.v1.json' with { type: 'json' };
+import canonicalPolicy from '../../../../../agents/jessica-vacuum/config/policy.v1.json' with { type: 'json' };
 import { createDomainCore } from '../../../../../agents/jessica-vacuum/lib/domain-core.mjs';
 import { DomainError } from '../../../../../agents/jessica-vacuum/lib/errors.mjs';
 import { readVacuumState, readJessicaSensors, projectMap, projectStatus, projectHealth, projectSensorCollection } from '../../../../../agents/jessica-vacuum/lib/ha-read.mjs';
@@ -8,8 +9,6 @@ import { parseReadRequest, READ_OPERATIONS } from '../../../../../agents/jessica
 import { assertRosterPolicyAgreement, loadTrustedRoutes, resolveTrustedIdentity } from './identity.js';
 import { createOperationState } from './operation-state.js';
 
-const REGISTRY_URL = new URL('../../../../../agents/jessica-vacuum/config/registry.v1.json', import.meta.url);
-const POLICY_URL = new URL('../../../../../agents/jessica-vacuum/config/policy.v1.json', import.meta.url);
 const envelope = (operation, status, verified, data, error = null) => ({
   schemaVersion: '1', status, domain: 'jessica-vacuum', operation, verified,
   data, warnings: [], error, pendingContext: null,
@@ -18,8 +17,8 @@ const envelope = (operation, status, verified, data, error = null) => ({
 export function createJessicaReadToolFactory({
   jsonResult,
   createStore,
-  registryConfig = JSON.parse(readFileSync(REGISTRY_URL, 'utf8')),
-  policyConfig = JSON.parse(readFileSync(POLICY_URL, 'utf8')),
+  registryConfig = structuredClone(canonicalRegistry),
+  policyConfig = structuredClone(canonicalPolicy),
   roster = loadTrustedRoutes(),
   readState = readVacuumState,
   readSensors = readJessicaSensors,

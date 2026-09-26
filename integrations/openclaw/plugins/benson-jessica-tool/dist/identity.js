@@ -1,10 +1,9 @@
 import { readFileSync } from 'node:fs';
+import canonicalRecipients from '../../../../../agents/reminder-service/config/recipients.json' with { type: 'json' };
 import { DomainError } from '../../../../../agents/jessica-vacuum/lib/errors.mjs';
 
-const ROSTER_URL = new URL('../../../../../agents/reminder-service/config/recipients.json', import.meta.url);
-
-export function loadTrustedRoutes(path = ROSTER_URL) {
-  const config = JSON.parse(readFileSync(path, 'utf8'));
+export function loadTrustedRoutes(path) {
+  const config = path ? JSON.parse(readFileSync(path, 'utf8')) : structuredClone(canonicalRecipients);
   if (!config || typeof config.accountId !== 'string' || !config.accountId ||
       !Array.isArray(config.trustedRequesterIds) || !config.trustedRequesterIds.length ||
       !Array.isArray(config.recipients)) {

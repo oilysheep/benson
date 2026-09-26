@@ -12,9 +12,9 @@ import { projectRequestAdmission } from "../request-control.mjs";
 
 const packageRoot = process.env.OPENCLAW_PACKAGE_ROOT ??
   resolve(homedir(), ".npm-global/lib/node_modules/openclaw");
-const bundleName = "dispatch-from-config-CmAXENud.mjs";
+const bundleName = "dispatch-from-config-Cu599NRF.mjs";
 const installedBundle = join(packageRoot, "dist", bundleName);
-const patchFile = new URL("../../patches/openclaw-2026.9.4-benson-request-admission.patch", import.meta.url);
+const patchFile = new URL("../../patches/openclaw-2026.9.6-benson-request-admission.patch", import.meta.url);
 const original = readFileSync(installedBundle, "utf8");
 const patchText = readFileSync(patchFile, "utf8");
 const tempRoot = mkdtempSync(join(tmpdir(), "benson-s03-native-"));
@@ -33,7 +33,7 @@ try {
 } finally {
   rmSync(tempRoot, { recursive: true, force: true });
 }
-const sourceTurn = await import(pathToFileURL(join(packageRoot, "dist", "source-turn-id-DGFTKeMf.mjs")).href);
+const sourceTurn = await import(pathToFileURL(join(packageRoot, "dist", "source-turn-id-BZGK3amb.mjs")).href);
 const nativeFunction = patched.match(/function resolveBensonRequestAdmission\(state\) \{[^]*?\n\}/u);
 assert.ok(nativeFunction, "patched native admission function missing");
 const resolveNativeAdmission = vm.runInNewContext("(" + nativeFunction[0] + ")", {

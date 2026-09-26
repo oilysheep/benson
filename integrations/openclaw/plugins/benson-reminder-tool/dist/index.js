@@ -24,6 +24,7 @@ export default definePluginEntry({
   description:
     "Operation-specific OpenClaw tool contracts over the deterministic Benson Reminder Service.",
   register(api) {
+    const reminderServicePath = api.resolvePath("../../../../agents/reminder-service/tools/reminder-service");
     for (const definition of REMINDER_TOOL_DEFINITIONS) {
       api.registerTool(
         (toolContext) => {
@@ -75,7 +76,8 @@ export default definePluginEntry({
               return jsonResult(
                 await executeReminderTool(definition, params, signal, {
                   validateJsonSchemaValue,
-                  runReminderService,
+                  runReminderService: (params, operationSignal) =>
+                    runReminderService(params, operationSignal, reminderServicePath),
                   readCurrentUserText,
                   runtimeRoute,
                   runtimeSchema,

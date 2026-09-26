@@ -1,4 +1,5 @@
-import { readFileSync } from 'node:fs';
+import canonicalRegistry from '../../../../../agents/jessica-vacuum/config/registry.v1.json' with { type: 'json' };
+import canonicalPolicy from '../../../../../agents/jessica-vacuum/config/policy.v1.json' with { type: 'json' };
 import { createHaCanaryDriver } from '../../../../../agents/jessica-vacuum/lib/ha-control.mjs';
 import { DomainError } from '../../../../../agents/jessica-vacuum/lib/errors.mjs';
 import { authorize, loadPolicy } from '../../../../../agents/jessica-vacuum/lib/policy.mjs';
@@ -8,8 +9,6 @@ import { EXECUTE_OPERATIONS } from '../../../../../agents/jessica-vacuum/lib/sch
 import { assertRosterPolicyAgreement, loadTrustedRoutes, resolveTrustedIdentity } from './identity.js';
 import { createJessicaExecutor } from './executor.js';
 
-const REGISTRY_URL = new URL('../../../../../agents/jessica-vacuum/config/registry.v1.json', import.meta.url);
-const POLICY_URL = new URL('../../../../../agents/jessica-vacuum/config/policy.v1.json', import.meta.url);
 
 function failure(operation, error, now) {
   const known = error instanceof DomainError;
@@ -24,8 +23,8 @@ function failure(operation, error, now) {
 
 export function createJessicaExecuteToolFactory({
   jsonResult, createStore,
-  registryConfig = JSON.parse(readFileSync(REGISTRY_URL, 'utf8')),
-  policyConfig = JSON.parse(readFileSync(POLICY_URL, 'utf8')),
+  registryConfig = structuredClone(canonicalRegistry),
+  policyConfig = structuredClone(canonicalPolicy),
   roster = loadTrustedRoutes(),
   driverFactory = createHaCanaryDriver,
   clock = () => new Date(),
