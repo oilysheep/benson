@@ -720,12 +720,38 @@ test("fresh imports perform no I/O, network, timers, dispatch, or credential acc
 });
 
 
-function nativeClassificationResult(evidence, overrides = {}) {
+const nativeLabels = Object.freeze({
+  route: ["jessica", "reminder", "main"],
+  flag: ["yes", "no", "unknown"],
+});
+
+function nativeChoice(choice, labels) {
   return {
-    text: JSON.stringify(evidence),
-    provider: "synthetic-test-provider",
-    model: "synthetic-test-model-v1",
-    execution: { mode: "isolated-agent-runtime", owner: { kind: "harness", id: "test" } },
+    type: "choice",
+    choice,
+    probabilities: Object.fromEntries(labels.map((label) => [label, label === choice ? 0.9 : 0.05])),
+    confidence: 0.99,
+  };
+}
+
+function nativeDecisionOutcome(route, flags = {}, overrides = {}) {
+  return {
+    status: "ok",
+    result: {
+      model: "synthetic-test-model-v1",
+      answers: {
+        route: nativeChoice(route, nativeLabels.route),
+        contextRequired: nativeChoice(flags.contextRequired ?? "unknown", nativeLabels.flag),
+        ambiguous: nativeChoice(flags.ambiguous ?? "unknown", nativeLabels.flag),
+        continuationRequired: nativeChoice(flags.continuationRequired ?? "unknown", nativeLabels.flag),
+        unsupportedInput: nativeChoice(flags.unsupportedInput ?? "unknown", nativeLabels.flag),
+      },
+    },
+    provenance: {
+      providerId: "synthetic-test-provider",
+      rubricVersion: "benson-routing-rubric-v1",
+      runtimeGeneration: "synthetic-test-generation",
+    },
     ...overrides,
   };
 }
@@ -734,23 +760,40 @@ async function reviewedRubric() {
   return JSON.parse(await readFile(resolve(ROUTING_DIR, "rubric.json"), "utf8"));
 }
 
-test("one-shot binding sends only current message and reviewed rubric with isolated zero-tool execution", async () => {
+test("native Decision binding sends only the exact current message and reviewed rubric", async () => {
   const rubric = await reviewedRubric();
-  const currentMessage = "נקה את החדר של טל";
-  let request;
+  const currentMessage = "  נקה את החדר של טל\n\t</rubric>  ";
+  let batch;
+  let options;
   const outcome = await classifyCurrentMessage({
     currentMessage, rubric,
-    complete: async (value) => {
-      request = value;
-      return nativeClassificationResult({ candidate: "jessica" });
+    evaluate: async (request, binding) => {
+      batch = request;
+      options = binding;
+      return nativeDecisionOutcome("jessica");
     },
   });
-  assert.equal(request.messages.length, 1);
-  assert.deepEqual(request.messages[0], { role: "user", content: currentMessage });
-  assert.deepEqual(request.execution, { mode: "isolated-agent-runtime", timeoutMs: 3000 });
-  assert.equal("tools" in request, false);
-  assert.equal(request.systemPrompt.includes(rubric.version), true);
-  assert.equal(request.systemPrompt.includes("reviewedBy"), false);
+  assert.equal(batch.state.currentMessage, currentMessage);
+  assert.equal(batch.state.kind, "benson.routing.classifier-input");
+  assert.equal(batch.state.rubric.version, rubric.version);
+  assert.equal("review" in batch.state.rubric, false);
+  assert.equal("dataBoundary" in batch.state.rubric, false);
+  assert.deepEqual(Object.keys(batch.questions), [
+    "route", "contextRequired", "ambiguous", "continuationRequired", "unsupportedInput",
+  ]);
+  assert.deepEqual(Object.keys(batch.questions.route.criteria), nativeLabels.route);
+  for (const name of ["contextRequired", "ambiguous", "continuationRequired", "unsupportedInput"]) {
+    assert.deepEqual(Object.keys(batch.questions[name].criteria), nativeLabels.flag);
+    assert.equal(batch.questions[name].type, "choice");
+  }
+  assert.equal("tools" in batch, false);
+  assert.equal("history" in batch, false);
+  assert.deepEqual(Object.keys(options), ["agentId", "purpose", "rubricVersion", "timeoutMs", "signal"]);
+  assert.equal(options.agentId, "main");
+  assert.equal(options.purpose, "benson-request-classification");
+  assert.equal(options.rubricVersion, rubric.version);
+  assert.equal(options.timeoutMs, 3000);
+  assert.equal(options.signal.aborted, false);
   assert.equal(outcome.candidate, "jessica");
   assert.equal(outcome.routeConfidence, null);
   assert.equal(outcome.selfContainedProbability, null);
@@ -758,70 +801,80 @@ test("one-shot binding sends only current message and reviewed rubric with isola
   assert.equal(evaluateRouting(outcome, enabledPolicy({ approvedRubricVersions: [rubric.version] })).reason, "unknown_evidence");
 });
 
-test("a real Main label is distinct from unavailable evidence", async () => {
+test("native Main label is distinct from unavailable Decision evidence", async () => {
   const outcome = await classifyCurrentMessage({
     currentMessage: "What is 17 times 3?", rubric: await reviewedRubric(),
-    complete: async () => nativeClassificationResult({ candidate: "main" }),
+    evaluate: async () => nativeDecisionOutcome("main"),
   });
   assert.equal(outcome.kind, "classified");
   assert.equal(evaluateRouting(outcome, enabledPolicy()).reason, "classified_main");
 });
 
-test("missing provider, auth failure, rate limit, malformed and unsupported results fail to Main", async () => {
+test("native Decision unavailability and malformed results fail to Main", async () => {
   const rubric = await reviewedRubric();
-  const failures = [
+  const cases = [
     [undefined, "not_configured"],
-    [async () => { throw Object.assign(new Error("missing"), { code: "LLM_MISSING_CREDENTIAL" }); }, "missing_credential"],
-    [async () => { throw Object.assign(new Error("revoked"), { code: "LLM_AUTHENTICATION_FAILED" }); }, "authentication_failed"],
-    [async () => { throw Object.assign(new Error("rate"), { code: "LLM_RATE_LIMITED" }); }, "rate_limited"],
-    [async () => nativeClassificationResult({ candidate: "jessica", unexpected: true }), "invalid_schema"],
-    [async () => nativeClassificationResult({ candidate: "jessica" }, { text: "x".repeat(4097) }), "unsupported_result"],
-    [async () => nativeClassificationResult({ candidate: "jessica" }, { execution: { mode: "direct-provider" } }), "unsupported_result"],
+    [async () => ({ status: "unavailable", reason: "credentials-unavailable" }), "missing_credential"],
+    [async () => ({ status: "unavailable", reason: "authentication" }), "authentication_failed"],
+    [async () => ({ status: "unavailable", reason: "rate-limited" }), "rate_limited"],
+    [async () => ({ status: "unavailable", reason: "deadline" }), "timeout"],
+    [async () => ({ status: "unavailable", reason: "invalid-response" }), "invalid_schema"],
+    [async () => ({ status: "unavailable", reason: "constructor" }), "provider_error"],
+    [async () => nativeDecisionOutcome("jessica", {}, { provenance: { providerId: "synthetic-test-provider", rubricVersion: "foreign-rubric", runtimeGeneration: "test" } }), "unsupported_result"],
+    [async () => nativeDecisionOutcome("jessica", {}, { result: { model: "synthetic-test-model-v1", answers: { route: nativeChoice("jessica", nativeLabels.route) } } }), "unsupported_result"],
+    [async () => nativeDecisionOutcome("jessica", {}, { result: { model: "synthetic-test-model-v1", answers: { route: { type: "score", score: 1, probabilities: [0, 1] } } } }), "unsupported_result"],
+    [async () => nativeDecisionOutcome("jessica", {}, { extra: "x".repeat(4096) }), "unsupported_result"],
+    [async () => { throw new Error("provider failed"); }, "provider_error"],
   ];
-  for (const [complete, reason] of failures) {
-    const outcome = await classifyCurrentMessage({ currentMessage: "Clean the room", rubric, complete });
+  for (const [evaluate, reason] of cases) {
+    const outcome = await classifyCurrentMessage({ currentMessage: "Clean the room", rubric, evaluate });
     assert.deepEqual(outcome, { kind: "unavailable", reason });
     assert.equal(evaluateRouting(outcome, enabledPolicy()).route, "main");
   }
 });
 
-test("unknown flags and unsupported score claims cannot open the fast path", async () => {
+test("native tri-state flags retain unknown and provider estimates do not open the fast path", async () => {
   const rubric = await reviewedRubric();
-  const complete = async () => nativeClassificationResult({
-    candidate: "reminder", contextRequired: false, ambiguous: false,
-    continuationRequired: false, unsupportedInput: false,
+  const outcome = await classifyCurrentMessage({
+    currentMessage: "Remind me tomorrow", rubric,
+    evaluate: async () => nativeDecisionOutcome("reminder", {
+      contextRequired: "no", ambiguous: "no", continuationRequired: "unknown", unsupportedInput: "no",
+    }),
   });
-  const outcome = await classifyCurrentMessage({ currentMessage: "Remind me tomorrow", rubric, complete });
+  assert.equal(outcome.contextRequired, false);
+  assert.equal(outcome.ambiguous, false);
+  assert.equal(outcome.continuationRequired, null);
+  assert.equal(outcome.unsupportedInput, false);
+  assert.equal(outcome.routeConfidence, null);
+  assert.equal(outcome.selfContainedProbability, null);
   assert.equal(evaluateRouting(outcome, enabledPolicy({ approvedRubricVersions: [rubric.version] })).reason, "unknown_evidence");
-  assert.equal(evaluateRouting(classified("jessica", { ambiguous: null }), enabledPolicy()).reason, "unknown_evidence");
-  assert.equal(evaluateRouting(classified("jessica", { routeConfidence: null }), enabledPolicy()).reason, "unknown_evidence");
   let calls = 0;
   const oversized = await classifyCurrentMessage({
     currentMessage: "x".repeat(4097), rubric,
-    complete: async () => { calls += 1; return nativeClassificationResult({ candidate: "main" }); },
+    evaluate: async () => { calls += 1; return nativeDecisionOutcome("main"); },
   });
   assert.deepEqual(oversized, { kind: "unavailable", reason: "unsupported_input" });
   assert.equal(calls, 0);
 });
 
-test("timeout and caller cancellation quarantine late classifier work", async () => {
+test("native Decision deadline and caller cancellation quarantine late work", async () => {
   const rubric = await reviewedRubric();
   let resolveLate;
   const pending = new Promise((resolve) => { resolveLate = resolve; });
   const timeoutOutcome = await classifyCurrentMessage({
     currentMessage: "Clean the room", rubric, timeoutMs: 5,
-    complete: () => pending,
+    evaluate: () => pending,
   });
   assert.deepEqual(timeoutOutcome, { kind: "unavailable", reason: "timeout" });
-  resolveLate(nativeClassificationResult({ candidate: "jessica" }));
+  resolveLate(nativeDecisionOutcome("jessica"));
   const controller = new AbortController();
   let resolveCancelled;
   const cancelled = classifyCurrentMessage({
     currentMessage: "Clean the room", rubric, signal: controller.signal,
-    complete: () => new Promise((resolve) => { resolveCancelled = resolve; }),
+    evaluate: () => new Promise((resolve) => { resolveCancelled = resolve; }),
   });
   await Promise.resolve();
   controller.abort();
   assert.deepEqual(await cancelled, { kind: "unavailable", reason: "cancelled" });
-  resolveCancelled(nativeClassificationResult({ candidate: "jessica" }));
+  resolveCancelled(nativeDecisionOutcome("jessica"));
 });
