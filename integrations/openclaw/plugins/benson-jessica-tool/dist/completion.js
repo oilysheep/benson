@@ -34,11 +34,40 @@ function latestExternalTurn(entries) {
   return inbound.at(-1)?.message.timestamp ?? null;
 }
 
-function matchingToolResult(entries) {
-  const results = entries.filter((entry) => entry.role === 'toolResult' &&
-    DOMAIN_TOOLS.has(entry.message?.toolName));
+function isDomainResult(entry) {
+  return entry.role === 'toolResult' && DOMAIN_TOOLS.has(entry.message?.toolName) ||
+    entry.role === 'custom' && entry.message?.customType === 'openclaw.nested-tool.v1' &&
+      DOMAIN_TOOLS.has(entry.message?.details?.toolName);
+}
+
+function matchingToolResult(entries, runId) {
+  const results = entries.filter(isDomainResult);
   if (!results.length) throw new Error('No deterministic Jessica tool result');
   const selected = results.at(-1);
+  if (selected.role === 'custom') {
+    const detail = selected.message.details;
+    const parentCall = entries.find((entry) => entry.seq < selected.seq &&
+      entry.entryId === detail.afterEntryId && entry.role === 'assistant' &&
+      entry.message?.content?.some?.((part) => part?.type === 'toolCall' &&
+        part.id === detail.parentToolCallId && part.name === 'exec'));
+    const outer = entries.find((entry) => entry.seq > selected.seq &&
+      entry.role === 'toolResult' && entry.message?.toolName === 'exec' &&
+      entry.message?.toolCallId === detail.parentToolCallId && entry.message?.isError !== true);
+    if (detail.runId !== runId || typeof detail.toolCallId !== 'string' || !detail.toolCallId ||
+        detail.isError !== false || !parentCall || !outer) {
+      throw new Error('Jessica nested tool provenance is incomplete');
+    }
+    const authoritative = parsed(textOf(detail.result));
+    const outerResult = parsed(textOf(outer.message));
+    if (!isDeepStrictEqual(authoritative, detail.result?.details) ||
+        outerResult.status !== 'completed' ||
+        !isDeepStrictEqual(outerResult.value, authoritative) ||
+        !(isDeepStrictEqual(outer.message.details, outerResult) ||
+          outer.message.details?.persistedDetailsTruncated === true)) {
+      throw new Error('Jessica nested tool result differs from native execution');
+    }
+    return { entry: outer, result: authoritative };
+  }
   const callId = selected.message.toolCallId;
   if (typeof callId !== 'string' || !callId || selected.message.isError === true) {
     throw new Error('Jessica tool result is incomplete');
@@ -55,7 +84,8 @@ function validateClarification(final, tool, entries, now) {
   validateResult(final, null, now);
   if (final.status !== 'clarification_required' || final.operation !== 'clean' ||
       tool.status !== 'success' || tool.operation !== 'rooms' ||
-      entries.some((entry) => entry.role === 'toolResult' && entry.message?.toolName === 'jessica_execute')) {
+      entries.some((entry) => isDomainResult(entry) &&
+        (entry.message?.toolName ?? entry.message?.details?.toolName) === 'jessica_execute')) {
     throw new Error('Clarification has no safe room evidence');
   }
   const rooms = new Map(tool.data.rooms.filter((room) => room.enabled)
@@ -83,7 +113,8 @@ function validateDisabledControl(final, tool, entries, now) {
         EXECUTE_OPERATIONS.includes(capability.name) && capability.support === 'verified') ||
       tool.data.capabilities.some((capability) =>
         capability.name.startsWith('clean_') && capability.support === 'verified') ||
-      entries.some((entry) => entry.role === 'toolResult' && entry.message?.toolName === 'jessica_execute')) {
+      entries.some((entry) => isDomainResult(entry) &&
+        (entry.message?.toolName ?? entry.message?.details?.toolName) === 'jessica_execute')) {
     throw new Error('Control refusal is not supported by current capability evidence');
   }
   return final;
@@ -107,7 +138,7 @@ export async function validateJessicaCompletion({ runId, parentSessionKey, runs,
   if (turn === null || task[0].createdAt < turn || task[0].endedAt < task[0].createdAt) {
     throw new Error('Jessica completion belongs to an earlier request');
   }
-  const { entry, result: authoritative } = matchingToolResult(child);
+  const { entry, result: authoritative } = matchingToolResult(child, runId);
   const last = child.at(-1);
   if (last?.role !== 'assistant' || last.seq <= entry.seq || last.message?.stopReason === 'toolUse') {
     throw new Error('Jessica final completion is missing');

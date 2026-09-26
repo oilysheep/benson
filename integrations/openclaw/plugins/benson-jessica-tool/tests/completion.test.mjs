@@ -118,3 +118,46 @@ test('a control refusal requires verified evidence that physical capabilities ar
     capabilities: [{ ...capabilities.data.capabilities[0], support: 'verified' }] } };
   await assert.rejects(validateJessicaCompletion(fixture({ childMessages: child(enabled, refusal) })), /not supported/);
 });
+
+function nestedChild(result = status, final = result) {
+  const outerCallId = 'outer-exec-call';
+  const outer = { status: 'completed', replaySafe: false, telemetry: { callCount: 1 },
+    output: [], value: result };
+  return [
+    { ...entry(1, { role: 'assistant', content: [{ type: 'toolCall', id: outerCallId,
+      name: 'exec', arguments: { code: 'return await jessica_read({operation:"status"});' } }] }),
+    entryId: 'outer-entry' },
+    entry(2, { role: 'custom', customType: 'openclaw.nested-tool.v1', details: {
+      runId, afterEntryId: 'outer-entry', parentToolCallId: outerCallId,
+      toolCallId: 'native-inner-call', toolName: 'jessica_read', input: { operation: 'status' },
+      result: { content: [{ type: 'text', text: JSON.stringify(result) }], details: result },
+      isError: false,
+    } }),
+    entry(3, { role: 'toolResult', toolName: 'exec', toolCallId: outerCallId,
+      isError: false, content: [{ type: 'text', text: JSON.stringify(outer) }], details: outer }),
+    entry(4, { role: 'assistant', stopReason: 'stop', content: [{ type: 'text', text: JSON.stringify(final) }] }),
+  ];
+}
+
+test('OpenClaw 2026.9.6 nested native result preserves deterministic Jessica provenance', async () => {
+  assert.deepEqual(await validateJessicaCompletion(fixture({ childMessages: nestedChild() })), status);
+  const truncatedDetails = nestedChild();
+  truncatedDetails[2].message.details = { persistedDetailsTruncated: true,
+    originalDetailKeys: ['status', 'replaySafe', 'telemetry', 'output', 'value'] };
+  assert.deepEqual(await validateJessicaCompletion(fixture({ childMessages: truncatedDetails })), status);
+  const broken = [
+    (child) => { child[1].message.details.runId = 'another-run'; },
+    (child) => { child[1].message.details.afterEntryId = 'another-entry'; },
+    (child) => { child[1].message.details.parentToolCallId = 'another-call'; },
+    (child) => { child[1].message.details.isError = true; },
+    (child) => { child[1].message.details.result.details = { ...status, verified: false }; },
+    (child) => { child[2].message.details.value = { ...status, verified: false }; },
+    (child) => { child[2].message.isError = true; },
+    (child) => { child[3].message.content[0].text = JSON.stringify({ ...status, verified: false }); },
+  ];
+  for (const alter of broken) {
+    const messages = nestedChild();
+    alter(messages);
+    await assert.rejects(validateJessicaCompletion(fixture({ childMessages: messages })));
+  }
+});
