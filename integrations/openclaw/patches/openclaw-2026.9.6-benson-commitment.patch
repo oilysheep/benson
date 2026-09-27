@@ -1,0 +1,105 @@
+--- a/dist/dispatch-from-config-Cu599NRF.mjs
++++ b/dist/dispatch-from-config-Cu599NRF.mjs
+@@ -1338,8 +1338,72 @@
+ }
+ //#endregion
+ //#region src/auto-reply/reply/dispatch-from-config.execute.ts
++// Benson S05 stays inactive until the plan enables production routing. The
++// existing native session entry is the sole durable commitment owner.
++const BENSON_ROUTING_PRODUCTION_ENABLED = false;
++async function resolveBensonStagedDecision() {
++	const root = "file:///home/oa/projects/benson/integrations/openclaw/benson-routing/";
++	const [classification, policy] = await Promise.all([
++		import(root + "classification.mjs"), import(root + "policy.mjs")
++	]);
++	return policy.evaluateRouting(classification.unavailableClassification("not_configured"));
++}
++async function commitBensonNativeOwner(state, decision) {
++	const admission = state.bensonRequestAdmission;
++	if (admission?.kind !== "candidate") return { status: "bypass" };
++	if (decision?.route !== "main" || decision?.eligible !== false) return { status: "direct_unavailable" };
++	if (state.isDispatchOperationAborted()) return { status: "cancelled" };
++	const session = state.operationSessionStoreEntry;
++	if (!session?.storePath || session.sessionKey !== admission.sessionKey ||
++		!session.entry?.sessionId) throw new Error("Benson commitment session binding unavailable");
++	const expectedSessionId = session.entry.sessionId;
++	const requestId = admission.requestId;
++	let created = false;
++	const stored = await patchSessionEntryCore({
++		sessionKey: admission.sessionKey,
++		storePath: session.storePath
++	}, (_snapshot, { existingEntry }) => {
++		if (!existingEntry || existingEntry.sessionId !== expectedSessionId)
++			throw new Error("Benson commitment session replaced");
++		const commitments = existingEntry.bensonDecisionCommitments ?? [];
++		if (!Array.isArray(commitments) || commitments.length > 1024 ||
++			commitments.some((item) => !item || typeof item !== "object" ||
++				typeof item.requestId !== "string" || typeof item.sessionId !== "string" ||
++				item.owner !== "main" || item.phase !== "committed"))
++			throw new Error("Benson commitment history invalid");
++		if (commitments.some((item) => item.requestId === requestId))
++			return;
++		if (commitments.length === 1024) throw new Error("Benson commitment capacity reached");
++		created = true;
++		return { bensonDecisionCommitments: [...commitments, {
++			requestId, sessionId: expectedSessionId, owner: "main", phase: "committed"
++		}] };
++	}, {
++		preserveActivity: true,
++		assertCommitAllowed: () => {
++			if (state.isDispatchOperationAborted()) throw new DispatchReplyOperationAbortedError();
++		}
++	});
++	const matching = stored?.bensonDecisionCommitments?.filter((item) =>
++		item.requestId === requestId);
++	if (matching?.length !== 1 || matching[0].owner !== "main" || matching[0].phase !== "committed")
++		throw new Error("Benson commitment persistence unverified");
++	return { status: created ? "committed" : "already_committed", owner: "main" };
++}
+ async function executeDispatch(state) {
+ 	const { cfg, commentaryPayloadsEnabled, ctx, deliveryChannel, deferFinalTtsText, dispatcher, failDispatchReplyOperation, flushPendingCommentaryProgress, getAgentRunTerminalOutcome, getDispatchAbortOperation, getDispatchAbortSignal, isDispatchOperationAborted, markInboundDedupeReplayUnsafe, markProgress, maybeApplyTtsWithFinalizationLease, normalizeReplyMediaPayload, notifySessionMetadataChanges, onToolResultFromReplyOptions, onReasoningStream, params, reasoningPayloadsEnabled, replyConfig, replyRoute, resolveToolDeliveryPayload, runWithDispatchLifecycleAdmission, sendPayloadAsync, sessionAgentId, sessionTtsAuto, shouldForwardProgressCallback, shouldRouteToOriginating, shouldSuppressDefaultToolProgressMessages, trackDispatchLifecycleWork, typing, waitForPendingDirectBlockReplyDelivery, wrapProgressCallback } = state;
++	if (BENSON_ROUTING_PRODUCTION_ENABLED && state.bensonRequestAdmission?.kind === "candidate") {
++		// The policy/model binding is unavailable. Only an explicit validated Main
++		// selection can enter this staged commitment path.
++		const commitment = await commitBensonNativeOwner(state, await resolveBensonStagedDecision());
++		if (commitment.status === "already_committed") {
++			const result = state.finishReplyOperationBusyDispatch();
++			state.completeDispatchReplyOperation();
++			return { status: "complete", result };
++		}
++		if (commitment.status === "direct_unavailable") throw new Error("Benson direct lifecycle unavailable");
++		if (commitment.status === "cancelled") throw new DispatchReplyOperationAbortedError();
++	}
+ 	const replyResolver = bindPreparedReplyDispatchRuntime(params.configOverride ? void 0 : state.preparedReplyDispatchRuntime, state.replyResolver);
+ 	let pendingContinuation = false;
+ 	let pendingContinuationSettlement;
+--- a/dist/session-accessor.sqlite-entry-store-DTntRuil.mjs
++++ b/dist/session-accessor.sqlite-entry-store-DTntRuil.mjs
+@@ -2434,6 +2434,27 @@
+ 	let normalizedEntry = normalizeSessionEntryTimestamp(entry);
+ 	if (!hasValidSessionEntryIdentity(normalizedEntry)) throw new Error("Refusing invalid SQLite session entry identity");
+ 	const canonicalPreviousEntry = options.canonicalPreviousEntry !== void 0 ? options.canonicalPreviousEntry ?? void 0 : options.allowStoredAliases && options.previousEntry !== void 0 ? options.previousEntry ?? void 0 : readExactSessionEntryRow(database, sessionKey)?.entry;
++	// Native session replacements retain every committed Benson admission. An
++	// appended record is immutable even when the session ID rolls over.
++	const previousBensonCommitments = canonicalPreviousEntry?.bensonDecisionCommitments;
++	const nextBensonCommitments = normalizedEntry.bensonDecisionCommitments;
++	const validBensonCommitments = (items) => Array.isArray(items) && items.length <= 1024 &&
++		items.every((item) => item && typeof item === "object" &&
++			Object.keys(item).length === 4 && typeof item.requestId === "string" &&
++			item.requestId.length > 0 && typeof item.sessionId === "string" &&
++			item.sessionId.length > 0 && item.owner === "main" && item.phase === "committed") &&
++		new Set(items.map((item) => item.requestId)).size === items.length;
++	if (previousBensonCommitments !== void 0 && !validBensonCommitments(previousBensonCommitments))
++		throw new Error("Benson native commitment history invalid");
++	if (nextBensonCommitments !== void 0 && !validBensonCommitments(nextBensonCommitments))
++		throw new Error("Benson native commitment write invalid");
++	if (previousBensonCommitments !== void 0) {
++		if (nextBensonCommitments === void 0) normalizedEntry.bensonDecisionCommitments = structuredClone(previousBensonCommitments);
++		else if (nextBensonCommitments.length < previousBensonCommitments.length ||
++			previousBensonCommitments.some((item, index) => !isDeepStrictEqual(item, nextBensonCommitments[index])))
++			throw new Error("Benson native commitment cannot be removed or rewritten");
++	}
++
+ 	if (!options.providerReviewMutation && !options.allowStoredAliases) normalizedEntry = {
+ 		...normalizedEntry,
+ 		providerReview: canonicalPreviousEntry?.sessionId === normalizedEntry.sessionId && canonicalPreviousEntry.lifecycleRevision === normalizedEntry.lifecycleRevision ? canonicalPreviousEntry.providerReview : void 0

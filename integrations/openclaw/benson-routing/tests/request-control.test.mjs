@@ -22,10 +22,12 @@ let patched;
 try {
   mkdirSync(join(tempRoot, "dist"));
   writeFileSync(join(tempRoot, "dist", bundleName), original);
-  const applied = spawnSync("patch", ["-p1", "-d", tempRoot], {
-    input: patchText, encoding: "utf8",
-  });
-  assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  if (!original.includes("function resolveBensonRequestAdmission(state)")) {
+    const applied = spawnSync("patch", ["-p1", "-d", tempRoot], {
+      input: patchText, encoding: "utf8",
+    });
+    assert.equal(applied.status, 0, applied.stderr || applied.stdout);
+  }
   const patchedPath = join(tempRoot, "dist", bundleName);
   const checked = spawnSync(process.execPath, ["--check", patchedPath], { encoding: "utf8" });
   assert.equal(checked.status, 0, checked.stderr);
@@ -63,8 +65,8 @@ function state(overrides = {}) {
 }
 function admission(value) { return JSON.parse(JSON.stringify(resolveNativeAdmission(value))); }
 
-test("version-bound native patch is limited to reply admission and remains unconsumed", () => {
-  assert.equal(original.includes("resolveBensonRequestAdmission"), false);
+test("version-bound native admission remains production-disabled", () => {
+  assert.equal(patched.includes("function resolveBensonRequestAdmission(state)"), true);
   assert.match(patched, /const bensonRequestAdmission = resolveBensonRequestAdmission\(state\);/u);
   assert.match(patched, /state: extendPreparedDispatchState\(state, \{\s*bensonRequestAdmission,/u);
   assert.equal((patched.match(/resolveBensonRequestAdmission\(state\)/gu) ?? []).length, 2);
@@ -72,7 +74,12 @@ test("version-bound native patch is limited to reply admission and remains uncon
   const injection = patched.indexOf("const bensonRequestAdmission = resolveBensonRequestAdmission(state)");
   const resolver = patched.indexOf("const replyResolver = params.replyResolver");
   assert.ok(takeover < injection && injection < resolver);
-  assert.doesNotMatch(patched, /bensonRequestAdmission\.(?:dispatch|run|commit)|bensonRequestAdmission\.kind === "candidate"/u);
+  assert.doesNotMatch(patched, /bensonRequestAdmission\.(?:dispatch|run|commit)/u);
+  if (patched.includes("commitBensonNativeOwner")) {
+    assert.match(patched, /const BENSON_ROUTING_PRODUCTION_ENABLED = false;/u);
+  } else {
+    assert.doesNotMatch(patched, /bensonRequestAdmission\.kind === "candidate"/u);
+  }
 });
 
 test("native source-turn identity keeps identical text in distinct turns", () => {
