@@ -56,8 +56,15 @@ remains reviewable stage by stage.
 - commit only files that belong to that stage; never absorb unrelated working
   tree changes;
 - after the stage passes its required validation and acceptance, push the branch
-  to `origin` and open a PR against `main`;
-- do not merge the PR automatically unless Oren explicitly requests it;
+  to `origin`;
+- prepare a complete PR title and description that records the stage purpose,
+  architectural change, preserved invariants, validation and acceptance evidence,
+  and rollback information;
+- present the proposed PR title and description to Oren and obtain explicit
+  approval before creating the PR;
+- after approval, create the PR against `main` and report its reference to Oren;
+- never merge the PR automatically; merging requires a separate explicit approval
+  from Oren after the PR has been created and reviewed;
 - start the next stage only after the previous stage PR is merged and local
   `main` is synchronized with `origin/main`;
 - PR workflow does not replace plan-required checkpoints, runtime validation,
