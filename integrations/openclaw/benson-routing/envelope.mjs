@@ -69,6 +69,11 @@ const RESULT_KEYS = ["schemaVersion", "domainSchemaVersion", "taskId", "status",
 const LEGACY_KEYS = ["status", "domain", "operation", "verified", "data", "warnings", "error", "pendingContext"];
 const ROUTE_KEYS = ["schemaVersion", "requestId", "executionOwner", "completionTarget", "callerRunId", "responsePolicy"];
 const RESPONSE_KEYS = ["schemaVersion", "requestId", "source", "status", "results", "pendingContext", "messageCandidate", "responsePolicy", "provenance"];
+const COMPLETION_ADMISSION_KEYS = ["schemaVersion", "requestId", "childRunId", "taskId", "destination", "callerRunId", "result"];
+const COMPLETION_BINDING_KEYS = ["schemaVersion", "requestId", "parentSessionKey", "parentSessionId", "parentRunId", "childRunId", "childSessionKey", "executionOwner", "completionTarget", "callerRunId"];
+const NATIVE_COMPLETION_KEYS = ["binding", "admission"];
+const PARENT_SESSION_KEYS = ["sessionKey", "sessionId"];
+const DOMAIN_AGENTS = Object.freeze({ "jessica-vacuum": "jessica-vacuum", reminder: "reminder-service" });
 const MODES = ["pass_through", "deterministic", "response_model", "main_continuation", "safe_failure"];
 
 function fail(code) { throw new TypeError(code); }
@@ -260,6 +265,101 @@ export function createResponseEnvelope(candidateInput, trusted) {
     schemaVersion: CONTROL_CONTRACT_VERSION,
     ...trusted,
     messageCandidate: candidateInput.messageCandidate,
+  });
+}
+
+function resultFromNativeCompletion(completion, requestId, parentSession, destination) {
+  exact(completion, NATIVE_COMPLETION_KEYS, "native_completion_shape");
+  exact(completion.binding, COMPLETION_BINDING_KEYS, "completion_binding_shape");
+  exact(completion.admission, COMPLETION_ADMISSION_KEYS, "completion_admission_shape");
+  const { binding, admission } = completion;
+  if (binding.schemaVersion !== CONTROL_CONTRACT_VERSION ||
+      binding.requestId !== requestId ||
+      binding.parentSessionKey !== parentSession.sessionKey ||
+      binding.parentSessionId !== parentSession.sessionId ||
+      !identifier(binding.parentRunId) || !identifier(binding.childRunId) ||
+      !identifier(binding.childSessionKey) || !identifier(binding.executionOwner) ||
+      !binding.childSessionKey.startsWith(`agent:${binding.executionOwner}:subagent:`) ||
+      binding.completionTarget !== destination ||
+      (destination === "CALLER" ? binding.callerRunId !== binding.parentRunId :
+        binding.callerRunId !== null)) fail("completion_binding_mismatch");
+  if (admission.schemaVersion !== CONTROL_CONTRACT_VERSION ||
+      admission.requestId !== requestId || admission.childRunId !== binding.childRunId ||
+      !identifier(admission.taskId) || admission.destination !== destination ||
+      admission.callerRunId !== binding.callerRunId) fail("completion_admission_mismatch");
+  const result = validateTaskResultEnvelope(admission.result);
+  if (result.taskId !== admission.taskId ||
+      DOMAIN_AGENTS[result.domain] !== binding.executionOwner) fail("completion_result_mismatch");
+  return result;
+}
+
+function factsFromCompletions(completions, requestId, parentSession, destination) {
+  if (!Array.isArray(completions) || completions.length > MAX_RESPONSE_RESULTS) {
+    fail("response_completions_count");
+  }
+  const seenRuns = new Set();
+  const results = completions.map((completion) => {
+    const result = resultFromNativeCompletion(completion, requestId, parentSession, destination);
+    if (seenRuns.has(completion.binding.childRunId)) fail("duplicate_completion_run");
+    seenRuns.add(completion.binding.childRunId);
+    return result;
+  });
+  if (new Set(results.map((result) => result.taskId)).size !== results.length) {
+    fail("duplicate_task_result");
+  }
+  const contexts = results.map((result) => result.pendingContext).filter(Boolean);
+  if (contexts.length > 1) fail("response_pending_ambiguous");
+  return { results, pendingContext: contexts[0] ?? null,
+    provenance: { executionVerified: results.length ? results.every((result) => result.verified) : "not_applicable",
+      completionCorrelated: results.length > 0 } };
+}
+
+// Only the native Main finalization owner supplies its current source run, the
+// owning session, S07 completion records, request and policy. Main supplies
+// candidate wording alone; earlier child caller runs may differ from this run.
+export function createMainResponseEnvelope(candidateInput, trusted) {
+  exact(trusted, ["requestId", "source", "parentSession", "completions", "noDomainStatus", "responsePolicy"],
+    "main_finalization_shape");
+  exact(trusted.source, ["type", "agentId", "runId"], "source_shape");
+  exact(trusted.parentSession, PARENT_SESSION_KEYS, "parent_session_shape");
+  if (!identifier(trusted.requestId) || trusted.source.type !== "main" ||
+      trusted.source.agentId !== "main" || !identifier(trusted.source.runId) ||
+      !identifier(trusted.parentSession.sessionKey) ||
+      !identifier(trusted.parentSession.sessionId)) fail("main_finalization_source");
+  const facts = factsFromCompletions(trusted.completions, trusted.requestId,
+    trusted.parentSession, "CALLER");
+  if (facts.results.length === 0 ? !["success", "failure"].includes(trusted.noDomainStatus) :
+      trusted.noDomainStatus !== null) fail("main_finalization_status");
+  return createResponseEnvelope(candidateInput, {
+    requestId: trusted.requestId, source: trusted.source,
+    status: facts.results.length ? deriveResponseStatus(facts.results) : trusted.noDomainStatus,
+    results: facts.results, pendingContext: facts.pendingContext,
+    responsePolicy: trusted.responsePolicy, provenance: facts.provenance,
+  });
+}
+
+// A direct completion becomes the same contract without a Main wrapper.
+// Native finalization retains the owning session outside the response payload.
+export function createDirectResponseEnvelope(completion, trusted) {
+  exact(trusted, ["requestId", "source", "parentSession", "responsePolicy"],
+    "direct_finalization_shape");
+  exact(trusted.source, ["type", "agentId", "runId"], "source_shape");
+  exact(trusted.parentSession, PARENT_SESSION_KEYS, "parent_session_shape");
+  if (!identifier(trusted.requestId) || trusted.source.type !== "direct" ||
+      !identifier(trusted.source.runId) ||
+      !identifier(trusted.parentSession.sessionKey) ||
+      !identifier(trusted.parentSession.sessionId)) fail("direct_finalization_source");
+  const facts = factsFromCompletions([completion], trusted.requestId,
+    trusted.parentSession, "RESPONSE_CONTROLLER");
+  if (trusted.source.runId !== completion.binding.childRunId ||
+      trusted.source.agentId !== completion.binding.executionOwner) {
+    fail("direct_finalization_source");
+  }
+  return createResponseEnvelope({ messageCandidate: facts.results[0].messageCandidate }, {
+    requestId: trusted.requestId, source: trusted.source,
+    status: facts.results[0].status, results: facts.results,
+    pendingContext: facts.pendingContext, responsePolicy: trusted.responsePolicy,
+    provenance: facts.provenance,
   });
 }
 
