@@ -44,6 +44,29 @@ status/evidence there. Do not change its stage structure, dependencies,
 acceptance strategy, or architectural decisions. If execution evidence requires
 such a change, stop and return that evidence for a planning/operator decision.
 
+## Stage branch and PR workflow
+
+For each meaningful stage of an approved canonical multi-stage implementation
+plan, use a dedicated Git branch and pull request so the implementation history
+remains reviewable stage by stage.
+
+- start the stage branch from the latest accepted `main`;
+- keep one canonical stage per branch and PR unless Oren explicitly approves
+  combining stages;
+- commit only files that belong to that stage; never absorb unrelated working
+  tree changes;
+- after the stage passes its required validation and acceptance, push the branch
+  to `origin` and open a PR against `main`;
+- do not merge the PR automatically unless Oren explicitly requests it;
+- start the next stage only after the previous stage PR is merged and local
+  `main` is synchronized with `origin/main`;
+- PR workflow does not replace plan-required checkpoints, runtime validation,
+  acceptance evidence, rollback requirements, or snapshots.
+
+If unrelated uncommitted changes are present, preserve them and keep them out of
+the stage commit. Stop rather than overwrite or accidentally include unrelated
+work.
+
 ## Architecture boundaries
 
 Follow `architecture/BENSON_SUBAGENT_ARCHITECTURE.md`.
