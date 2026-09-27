@@ -77,7 +77,7 @@ try {
   test("host patch uses only native session entry and stays disabled in production", () => {
     assert.match(patched, /async function commitBensonNativeOwner\(state, decision\)/u);
     assert.match(patched, /const BENSON_ROUTING_PRODUCTION_ENABLED = false;/u);
-    assert.match(patched, /if \(BENSON_ROUTING_PRODUCTION_ENABLED && state\.bensonRequestAdmission\?\.kind === "candidate"\)/u);
+    assert.match(patched, /if \(BENSON_ROUTING_PRODUCTION_ENABLED && \["candidate", "main_only"\]\.includes\(state\.bensonRequestAdmission\?\.kind\)\)/u);
     assert.match(patched, /await patchSessionEntryCore\(/u);
     assert.match(patched, /await resolveBensonStagedDecision\(\)/u);
     assert.match(nativeStoreSource, /previousBensonCommitments/gu);
@@ -154,8 +154,8 @@ try {
     sessionId = "s05-session-3";
     native.g(scope, { sessionId, updatedAt: Date.now() });
     assert.deepEqual(records(), before);
-    assert.equal((await createCommitter()(state("turn-1"), mainDecision)).status,
-      "already_committed");
+    await assert.rejects(createCommitter()(state("turn-1"), mainDecision),
+      /Benson commitment owner conflict/u);
     assert.throws(() => native.g(scope, {
       sessionId: "s05-session-4", updatedAt: Date.now(),
       bensonDecisionCommitments: [],
@@ -163,6 +163,22 @@ try {
     assert.deepEqual(records(), before);
   });
 
+  test("native commitment validator admits only canonical Direct owners and preserves immutability", async () => {
+    for (const owner of ["jessica-vacuum", "reminder-service"]) {
+      const row = { requestId: "direct-" + owner, sessionId, owner, phase: "committed" };
+      await nativePatch(scope, (entry) => ({
+        bensonDecisionCommitments: [...entry.bensonDecisionCommitments, row],
+      }), {});
+      assert.deepEqual(records().at(-1), row);
+    }
+    await assert.rejects(nativePatch(scope, (entry) => ({
+      bensonDecisionCommitments: [...entry.bensonDecisionCommitments,
+        { requestId: "foreign-owner", sessionId, owner: "foreign", phase: "committed" }],
+    }), {}), /Benson native commitment write invalid/u);
+    await assert.rejects(nativePatch(scope, (entry) => ({
+      bensonDecisionCommitments: entry.bensonDecisionCommitments.slice(0, -1),
+    }), {}), /cannot be removed or rewritten/u);
+  });
   test("direct candidate fails closed without native completion and response capability", async () => {
     const before = records().length;
     const result = await createCommitter()(state("direct"), { route: "jessica", eligible: true });

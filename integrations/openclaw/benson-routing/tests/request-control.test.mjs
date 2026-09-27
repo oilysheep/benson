@@ -143,7 +143,7 @@ test("native retry and non-external turns never reach classification", () => {
   }
 });
 
-test("unsupported or unidentifiable inputs keep the normal Main path", () => {
+test("unsupported inputs use Main-only admission; missing identity stays native", () => {
   const cases = [
     [state({ sourceTurnId: null }), "identity_unavailable"],
     [state({ sessionStoreEntry: { sessionKey: null }, sessionKey: null }), "identity_unavailable"],
@@ -154,10 +154,11 @@ test("unsupported or unidentifiable inputs keep the normal Main path", () => {
   ];
   for (const [input, reason] of cases) {
     const record = admission(input);
-    assert.equal(record.kind, "main_only", reason);
+    assert.equal(record.kind, reason === "identity_unavailable" ? "bypass" : "main_only", reason);
     assert.equal(record.reason, reason);
     assert.equal(record.request, null);
-    assert.equal(projectRequestAdmission(record).kind, "main_only");
+    assert.equal(projectRequestAdmission(record).kind,
+      reason === "identity_unavailable" ? "bypass" : "main_only");
   }
 });
 

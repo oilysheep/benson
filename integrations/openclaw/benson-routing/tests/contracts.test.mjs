@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { executeNormalizedReminderTool } from "../../plugins/benson-reminder-tool/dist/contracts.js";
 import {
-  CONTROL_CONTRACT_VERSION, MAX_RESPONSE_RESULTS, MAX_RENDERED_TEXT,
+  CONTROL_CONTRACT_VERSION, RESPONSE_CONTRACT_VERSION, MAX_RESPONSE_RESULTS, MAX_RENDERED_TEXT,
   assertPendingContextBinding, completionRoute, createExecutionRoute, createResponseEnvelope,
   deriveResponseStatus, normalizeLegacyTaskResult,
   validateRenderedOutput, validateResponseEnvelope, validateTaskResultEnvelope,
@@ -25,10 +25,11 @@ function result(raw, taskId = "task-1") {
 }
 function response(results, status = results.length ? deriveResponseStatus(results) : "success") {
   return {
-    schemaVersion: CONTROL_CONTRACT_VERSION, requestId: "native-request-1",
+    schemaVersion: RESPONSE_CONTRACT_VERSION, requestId: "native-request-1",
     source: { type: "main", agentId: "main", runId: "main-run-1" },
     status, results, pendingContext: results.find((item) => item.pendingContext)?.pendingContext ?? null,
     messageCandidate: null, responsePolicy: policy,
+    lifecycle: { domainExecution: results.length ? "attempted" : "none", failure: null },
     provenance: {
       executionVerified: results.length ? results.every((item) => item.verified) : "not_applicable",
       completionCorrelated: results.length > 0,
@@ -140,14 +141,14 @@ test("agent response input cannot supply trusted route, source, policy, or prove
       messageCandidate: null, [field]: "forged",
     }, control), /response_candidate_shape/);
   }
-  assert.throws(() => validateResponseEnvelope({ ...envelope, schemaVersion: 2 }), /response_invalid/);
+  assert.throws(() => validateResponseEnvelope({ ...envelope, schemaVersion: 1 }), /response_invalid/);
 });
 
 test("rendered output is bounded and rejects unversioned authority claims", () => {
-  assert.equal(validateRenderedOutput({ schemaVersion: 1, message: "Done." }).message, "Done.");
-  assert.throws(() => validateRenderedOutput({ schemaVersion: 2, message: "Done." }), /rendered_invalid/);
-  assert.throws(() => validateRenderedOutput({ schemaVersion: 1, message: "x".repeat(MAX_RENDERED_TEXT + 1) }), /rendered_invalid/);
-  assert.throws(() => validateRenderedOutput({ schemaVersion: 1, message: "Done.", verified: true }), /rendered_shape/);
+  assert.equal(validateRenderedOutput({ schemaVersion: 2, message: "Done." }).message, "Done.");
+  assert.throws(() => validateRenderedOutput({ schemaVersion: 1, message: "Done." }), /rendered_invalid/);
+  assert.throws(() => validateRenderedOutput({ schemaVersion: 2, message: "x".repeat(MAX_RENDERED_TEXT + 1) }), /rendered_invalid/);
+  assert.throws(() => validateRenderedOutput({ schemaVersion: 2, message: "Done.", verified: true }), /rendered_shape/);
 });
 
 

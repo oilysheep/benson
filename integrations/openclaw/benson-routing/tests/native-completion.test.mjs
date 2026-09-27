@@ -13,7 +13,7 @@ const installed = process.env.OPENCLAW_PACKAGE_ROOT ??
   resolve(homedir(), '.npm-global/lib/node_modules/openclaw');
 const scenario = process.argv[2];
 
-if (scenario === 'fixture' || scenario === 'restart') {
+if (scenario === 'fixture' || scenario === 'restart' || scenario?.startsWith('direct-')) {
   const root = process.env.OPENCLAW_S07_PACKAGE_ROOT + '/dist/';
   const [{ c: transaction }, { p: bindSubagent, s: readSubagent },
     { r: upsertSubagent }, { t: bindTask, v: upsertTask, d: readTask },
@@ -26,7 +26,77 @@ if (scenario === 'fixture' || scenario === 'restart') {
     import(root + 'subagent-run-liveness-9vTRtoqd.mjs'),
   ]);
   const kind = process.argv[3];
-  if (scenario === 'restart') {
+  if (scenario.startsWith('direct-')) {
+    const [{ ut: loadQueue }, { t: queueName }, { l: loadSession },
+      { l: resolveStorePath }, { r: getRuntimeConfig },
+      { B: prepareDirect }, { B: deliverFinal }, { B5: settleDirect }] = await Promise.all([
+      import(root + 'openclaw-state-db-read-connection-Beg0AZE7.mjs'),
+      import(root + 'session-delivery-queue.records-rYJIeHGW.mjs'),
+      import(root + 'session-accessor.sqlite-entry-UCl9kr-O.mjs'),
+      import(root + 'paths-CcMbq5NY.mjs'),
+      import(root + 'io.runtime-hPN4FOBi.mjs'),
+      import(root + 'subagent-completion-delivery-BlfHhlHm.mjs'),
+      import(root + 'dispatch-from-config.finalize-B25V5wMZ.mjs'),
+      import(root + 'subagent-completion-admission.store-Bw0OSK2O.mjs'),
+    ]);
+    const child = transaction((db) => readSubagent(db, 'child-run'));
+    const queueEntry = transaction((db) => loadQueue(db, queueName, child.delivery.queueId));
+    assert.equal(queueEntry.sourceType, 'direct');
+    const cfg = getRuntimeConfig();
+    const scope = { agentId: 'main', sessionKey: queueEntry.sessionKey,
+      sessionId: queueEntry.expectedSessionId,
+      storePath: resolveStorePath(cfg.session?.store, { agentId: 'main' }),
+      env: { ...process.env } };
+    assert.equal(loadSession(scope).sessionId, scope.sessionId);
+    if (scenario === 'direct-worker') {
+      const { t: deliverQueued } = await import(root + 'server-restart-sentinel-Bc_R9rEL.mjs');
+      const before = loadSession(scope).bensonPendingFinals?.[0];
+      await deliverQueued({ entry: queueEntry, queueContext: {
+        admission: { assertCurrent() {} }, environment: { ...process.env } } });
+      const persisted = loadSession(scope).bensonPendingFinals[0];
+      assert.equal(persisted.deliveries[0].state, 'delivered');
+      if (before) {
+        assert.equal(persisted.text, before.text);
+        assert.deepEqual(persisted.bensonFinal, before.bensonFinal);
+        assert.equal(loadSession(scope).bensonPendingFinals.length, 1);
+      }
+      assert.equal(persisted.bensonReceipt.kind, 'webchat');
+      const durable = transaction((db) => ({ child: readSubagent(db, 'child-run'),
+        task: readTask(db.db, 'task') }));
+      assert.equal(durable.child.delivery.status, 'delivered');
+      assert.equal(durable.task.deliveryStatus, 'delivered');
+    } else if (scenario === 'direct-prepare') {
+      const prepared = await prepareDirect({ queueEntry, scope, cfg });
+      assert.equal(prepared.replayed, false);
+      assert.equal(loadSession(scope).bensonPendingFinals[0].text, prepared.text);
+      assert.equal(child.delivery.status, 'in_progress');
+    } else if (scenario === 'direct-deliver') {
+      const delivered = await deliverFinal({ queueEntry, scope, cfg });
+      assert.equal(delivered.status, 'delivered');
+      assert.equal(delivered.receipt.kind, 'webchat');
+      assert.equal(transaction((db) => readSubagent(db, 'child-run')).delivery.status, 'in_progress');
+    } else if (scenario === 'direct-settle') {
+      const pending = loadSession(scope).bensonPendingFinals[0];
+      assert.equal(pending.deliveries[0].state, 'delivered');
+      assert.equal(settleDirect(queueEntry, pending.bensonReceipt), 'settled');
+      const durable = transaction((db) => ({ child: readSubagent(db, 'child-run'),
+        task: readTask(db.db, 'task') }));
+      assert.equal(durable.child.delivery.status, 'delivered');
+      assert.equal(durable.task.deliveryStatus, 'delivered');
+    } else if (scenario === 'direct-repeat') {
+      const original = loadSession(scope).bensonPendingFinals[0];
+      assert.equal((await prepareDirect({ queueEntry, scope, cfg })).replayed, true);
+      assert.equal((await deliverFinal({ queueEntry, scope, cfg })).status, 'delivered');
+      assert.equal(settleDirect(queueEntry, original.bensonReceipt), 'duplicate');
+      const settledOwner = transaction((db) => readSubagent(db, 'child-run'));
+      assert.equal(admitDirect({ runId: 'child-run', taskId: 'task',
+        binding: settledOwner.bensonCompletionBinding,
+        admission: settledOwner.bensonCompletionAdmission }).delivered, true);
+      assert.equal(loadSession(scope).bensonPendingFinals.length, 1);
+      assert.equal(loadSession(scope).bensonPendingFinals[0].text, original.text);
+    } else throw new Error('unknown Direct phase');
+    process.stdout.write(`${scenario} ${kind} PASS\n`);
+  } else if (scenario === 'restart') {
     const durable = transaction((db) => ({ child: readSubagent(db, 'child-run'),
       task: readTask(db.db, 'task') }));
     if (kind === 'malformed') {
@@ -47,7 +117,7 @@ if (scenario === 'fixture' || scenario === 'restart') {
     const commitment = { requestId: 'request', sessionId: 'parent-session',
       owner: direct ? 'jessica-vacuum' : 'main', phase: 'committed' };
     const binding = bindNativeCompletion({ commitment, sourceTurnId: 'request',
-      parentSessionKey: 'agent:main:test', parentSessionId: 'parent-session', parentRunId: 'parent-run',
+      parentSessionKey: 'agent:main:test', parentSessionId: 'parent-session', parentRunId: direct ? null : 'parent-run',
       childRunId: 'child-run', childSessionKey: 'agent:jessica-vacuum:subagent:test',
       executionOwner: 'jessica-vacuum',
       completionTarget: direct ? 'RESPONSE_CONTROLLER' : 'CALLER' });
@@ -69,13 +139,15 @@ if (scenario === 'fixture' || scenario === 'restart') {
           expiresAt: new Date(now + 60_000).toISOString() } };
     }
     const child = { runId: 'child-run', taskRunId: 'child-run', childSessionKey: binding.childSessionKey,
-      requesterSessionKey: binding.parentSessionKey, requesterTurnRunId: binding.parentRunId,
+      requesterSessionKey: binding.parentSessionKey, requesterTurnRunId: direct ? undefined : binding.parentRunId,
       agentId: 'jessica-vacuum', requesterAgentId: 'main', task: 'status', createdAt: now - 1000,
       cleanup: 'keep', expectsCompletionMessage: true, completionTarget: direct ? undefined : 'parent',
       execution: { status: 'terminal', startedAt: now - 900, endedAt: now - 500,
         outcome: { status: 'ok' } },
       completion: { required: true, resultText: '{broken', capturedAt: now - 500 },
-      delivery: { status: 'pending' }, bensonCompletionBinding: binding };
+      delivery: { status: 'pending' },
+      requesterOrigin: { channel: 'webchat', to: 'benson-direct-test' },
+      bensonCompletionBinding: binding };
     const task = { taskId: 'task', runtime: 'subagent', scopeKind: 'session',
       ownerKey: binding.parentSessionKey, requesterSessionKey: binding.parentSessionKey,
       childSessionKey: binding.childSessionKey, agentId: 'jessica-vacuum', requesterAgentId: 'main',
@@ -91,8 +163,54 @@ if (scenario === 'fixture' || scenario === 'restart') {
       const admission = validateNativeCompletion({ binding, commitment,
         parentSession: { sessionKey: binding.parentSessionKey, sessionId: binding.parentSessionId },
         child, task, result });
-      assert.equal(admitDirect({ runId: child.runId, taskId: task.taskId, binding, admission }), 'admitted');
-      assert.equal(admitDirect({ runId: child.runId, taskId: task.taskId, binding, admission }), 'duplicate');
+      const [{ ut: loadQueueBefore }, { t: queueNameBefore, B: prepareQueue }] = await Promise.all([
+        import(root + 'openclaw-state-db-read-connection-Beg0AZE7.mjs'),
+        import(root + 'session-delivery-queue.records-rYJIeHGW.mjs'),
+      ]);
+      const expectedQueue = prepareQueue({ sessionKey: binding.parentSessionKey,
+        sessionId: binding.parentSessionId, requestId: binding.requestId,
+        sourceType: 'direct', sourceRunId: child.runId, taskId: task.taskId,
+        deliveryContext: child.requesterOrigin });
+      assert.throws(() => admitDirect({ runId: child.runId, taskId: task.taskId,
+        binding, admission, testHooks: { afterMutation: () => { throw new Error('rollback probe'); } } }),
+      /rollback probe/);
+      const afterRollback = transaction((db) => ({ child: readSubagent(db, child.runId),
+        task: readTask(db.db, task.taskId),
+        queue: loadQueueBefore(db, queueNameBefore, expectedQueue.id) }));
+      assert.equal(afterRollback.queue, null);
+      assert.equal(afterRollback.child.bensonCompletionAdmission, undefined);
+      assert.equal(afterRollback.task.status, 'running');
+      const first = admitDirect({ runId: child.runId, taskId: task.taskId, binding, admission });
+      const duplicate = admitDirect({ runId: child.runId, taskId: task.taskId, binding, admission });
+      assert.equal(first.status, 'admitted');
+      assert.equal(duplicate.status, 'duplicate');
+      assert.equal(duplicate.queueId, first.queueId);
+      const durable = transaction((db) => ({ child: readSubagent(db, child.runId),
+        task: readTask(db.db, task.taskId) }));
+      assert.equal(durable.task.status, 'succeeded');
+      assert.equal(durable.task.deliveryStatus, 'session_queued');
+      assert.equal(durable.child.delivery.disposition, 'benson_response_handoff');
+      assert.equal(durable.child.delivery.deliveredAt, undefined);
+      const [{ ut: loadQueue }, { t: queueName }] = await Promise.all([
+        import(root + 'openclaw-state-db-read-connection-Beg0AZE7.mjs'),
+        import(root + 'session-delivery-queue.records-rYJIeHGW.mjs'),
+      ]);
+      const queued = transaction((db) => loadQueue(db, queueName, first.queueId));
+      assert.equal(queued.sourceRunId, child.runId);
+      assert.equal(queued.taskId, task.taskId);
+      assert.equal(queued.deliveryContext.to, 'benson-direct-test');
+      const [{ d: patchSession }, { l: resolveStorePath }, { r: getRuntimeConfig }] =
+        await Promise.all([
+          import(root + 'session-accessor.sqlite-entry-UCl9kr-O.mjs'),
+          import(root + 'paths-CcMbq5NY.mjs'),
+          import(root + 'io.runtime-hPN4FOBi.mjs'),
+        ]);
+      const storePath = resolveStorePath(getRuntimeConfig().session?.store, { agentId: 'main' });
+      await patchSession({ agentId: 'main', sessionKey: binding.parentSessionKey, storePath },
+        () => ({ sessionId: binding.parentSessionId, updatedAt: now,
+          bensonDecisionCommitments: [commitment] }),
+        { fallbackEntry: { sessionId: binding.parentSessionId, updatedAt: now } });
+
       assert.throws(() => admitDirect({ runId: child.runId, taskId: task.taskId, binding,
         admission: { ...admission, result: { ...admission.result, operation: 'rooms' } } }),
       /contradicts/);
@@ -217,11 +335,27 @@ if (scenario === 'fixture' || scenario === 'restart') {
     await assert.rejects(build('foreign-run'), /exact active parent/);
     await assert.rejects(build('parent-run', 'announce'), /private completion/);
   });
+  for (const [label, phases] of [
+    ['unprepared', ['fixture', 'direct-worker']],
+    ['prepared', ['fixture', 'direct-prepare', 'direct-worker']],
+    ['receipt', ['fixture', 'direct-prepare', 'direct-deliver', 'direct-worker']],
+  ]) {
+    test(`Direct native worker recovers ${label} final after process restart`, () => {
+      const state = mkdtempSync(join(tmpdir(), `benson-s09-direct-${label}-`));
+      states.push(state);
+      for (const mode of phases) {
+        const result = spawn(mode, 'direct', state);
+        assert.equal(result.status, 0, result.stderr || result.stdout);
+        assert.match(result.stdout, new RegExp(`\\b${mode} direct PASS`));
+      }
+    });
+  }
   for (const kind of ['caller', 'pending', 'malformed', 'direct']) {
     test(`native ${kind} admission, duplicate/recovery, and restart`, () => {
       const state = mkdtempSync(join(tmpdir(), `benson-s07-${kind}-`));
       states.push(state);
-      for (const mode of ['fixture', 'restart']) {
+      for (const mode of ['fixture', 'restart',
+        ...(kind === 'direct' ? ['direct-prepare', 'direct-deliver', 'direct-settle', 'direct-repeat'] : [])]) {
         const result = spawn(mode, kind, state);
         assert.equal(result.status, 0, result.stderr || result.stdout);
         assert.match(result.stdout, new RegExp(`${mode} ${kind} PASS`));

@@ -40,9 +40,13 @@ test('CALLER receives only its bound child as a structured result', () => {
 test('direct result stays in RESPONSE_CONTROLLER handoff without Main wrapper', () => {
   const directCommitment = { ...commitment, owner: 'jessica-vacuum' };
   const binding = bindNativeCompletion({ ...bindingInput, commitment: directCommitment,
-    completionTarget: 'RESPONSE_CONTROLLER' });
-  const admission = validateNativeCompletion(native(binding, { commitment: directCommitment }));
+    completionTarget: 'RESPONSE_CONTROLLER', parentRunId: null });
+  const admission = validateNativeCompletion(native(binding, { commitment: directCommitment,
+    child: { ...native(binding).child, requesterTurnRunId: null } }));
   assert.equal(admission.destination, 'RESPONSE_CONTROLLER');
+  assert.equal(binding.parentRunId, null);
+  assert.throws(() => bindNativeCompletion({ ...bindingInput, commitment: directCommitment,
+    completionTarget: 'RESPONSE_CONTROLLER' }), /binding_unavailable/);
   assert.equal(admission.callerRunId, null);
   assert.equal(admission.result.taskId, 'native-task');
 });

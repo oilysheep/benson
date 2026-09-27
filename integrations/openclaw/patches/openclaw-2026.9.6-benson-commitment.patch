@@ -87,7 +87,7 @@
 +		items.every((item) => item && typeof item === "object" &&
 +			Object.keys(item).length === 4 && typeof item.requestId === "string" &&
 +			item.requestId.length > 0 && typeof item.sessionId === "string" &&
-+			item.sessionId.length > 0 && item.owner === "main" && item.phase === "committed") &&
++			item.sessionId.length > 0 && ["main", "jessica-vacuum", "reminder-service"].includes(item.owner) && item.phase === "committed") &&
 +		new Set(items.map((item) => item.requestId)).size === items.length;
 +	if (previousBensonCommitments !== void 0 && !validBensonCommitments(previousBensonCommitments))
 +		throw new Error("Benson native commitment history invalid");
