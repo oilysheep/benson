@@ -60,7 +60,13 @@ remains reviewable stage by stage.
 - prepare a complete PR title and description that records the stage purpose,
   architectural change, preserved invariants, validation and acceptance evidence,
   and rollback information;
-- present the proposed PR title and description to Oren and obtain explicit
+- before the PR-creation approval gate, give Oren the required brief Hebrew
+  learning explanation for the completed stage: where it sits in the Benson
+  flow, the invariant/problem, responsible boundary, conceptual change, failure
+  class prevented, useful distributed-systems analogy, and concrete acceptance
+  evidence;
+- keep the PR title and description in English as persistent technical artifacts;
+- then present the proposed PR title and description to Oren and obtain explicit
   approval before creating the PR;
 - after approval, create the PR against `main` and report its reference to Oren;
 - never merge the PR automatically; merging requires a separate explicit approval
