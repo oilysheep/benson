@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createJessicaCompletionToolFactory, createNativeTranscriptReader,
-  validateJessicaCompletion } from '../dist/completion.js';
+  validateJessicaCompletion, normalizeJessicaCompletion } from '../dist/completion.js';
 
 const now = new Date('2026-09-20T00:00:00.000Z');
 const parentSessionKey = 'agent:main:whatsapp:direct:reviewer';
@@ -160,4 +160,22 @@ test('OpenClaw 2026.9.6 nested native result preserves deterministic Jessica pro
     alter(messages);
     await assert.rejects(validateJessicaCompletion(fixture({ childMessages: messages })));
   }
+});
+
+
+test('S06 Jessica adapter binds native truth, task id and candidate without promoting text', async () => {
+  const trusted = { taskId: 'native-task-1', pendingBinding: null, pendingExpiresAt: null };
+  const envelope = await normalizeJessicaCompletion(fixture(), trusted,
+    { text: 'The vacuum is docked.', language: 'en' });
+  assert.equal(envelope.taskId, trusted.taskId);
+  assert.equal(envelope.data.state, 'docked');
+  assert.equal(envelope.messageCandidate.text, 'The vacuum is docked.');
+  const forged = { ...status, data: { ...status.data, state: 'cleaning' } };
+  await assert.rejects(normalizeJessicaCompletion(fixture({ childMessages: child(status, forged) }),
+    trusted, { text: 'Cleaning started.', language: 'en' }), /differs/);
+  await assert.rejects(normalizeJessicaCompletion(fixture({ parentMessages: [] }), trusted),
+    /earlier request/);
+  await assert.rejects(normalizeJessicaCompletion({ ...fixture(),
+    parentSessionKey: 'agent:jessica-vacuum:direct:unbound' }, trusted),
+    /Native correlation/);
 });

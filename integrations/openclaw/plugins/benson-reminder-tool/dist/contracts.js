@@ -1,4 +1,5 @@
 import canonicalRecipients from "../../../../../agents/reminder-service/config/recipients.json" with { type: "json" };
+import { normalizeLegacyTaskResult } from "../../../benson-routing/envelope.mjs";
 
 const nonEmptyString = { type: "string", minLength: 1, pattern: "\\S" };
 
@@ -740,4 +741,64 @@ export async function executeReminderTool(
     { ...validation.value, operation: definition.operation },
     signal,
   );
+}
+
+// Staged S06 adapter. executeReminderTool is the existing authenticated tool
+// path; this wrapper derives task facts only from its deterministic service
+// result. It is not registered until native Completion Control is ready.
+export async function executeNormalizedReminderTool(
+  definition, params, signal, dependencies, trusted, messageCandidate = null,
+) {
+  if (typeof trusted?.taskId !== "string" || trusted.taskId.length < 1 ||
+      trusted.taskId.length > 512 || /[\u0000-\u001f\u007f]/u.test(trusted.taskId)) {
+    throw new Error("Trusted Reminder task identity is unavailable");
+  }
+  const operations = {
+    "create-intent": "create", "list-reminders": "list", "find-reminders": "find",
+    "update-reminder": "update", "pause-reminder": "pause",
+    "resume-reminder": "resume", "delete-reminder": "delete",
+  };
+  const operation = operations[definition?.operation];
+  if (!operation) throw new Error("Reminder operation has no canonical mapping");
+  const result = await executeReminderTool(definition, params, signal, dependencies);
+  if (!result || typeof result !== "object" || Array.isArray(result) ||
+      result.operation !== operation || !["success", "failure"].includes(result.status)) {
+    throw new Error("Reminder service result has no matching operation evidence");
+  }
+  const warnings = result.warnings ?? [];
+  if (!Array.isArray(warnings)) throw new Error("Reminder service warnings are invalid");
+  let verified = false;
+  let data;
+  if (result.status === "success") {
+    if (result.error != null || result.verified === false) {
+      throw new Error("Reminder success contradicts service verification");
+    }
+    if (operation === "list" || operation === "find") {
+      if (result.verified !== true || !Array.isArray(result.matches) ||
+          result.matchCount !== result.matches.length) {
+        throw new Error("Reminder discovery is incomplete");
+      }
+      data = Object.fromEntries(Object.entries(result).filter(([key]) =>
+        !["status", "operation", "verified", "warnings"].includes(key)));
+    } else {
+      if (result.transaction?.status !== "success" || result.transaction?.verified !== true ||
+          !result.data || typeof result.data !== "object" || Array.isArray(result.data) ||
+          !result.transport || !Array.isArray(result.transport.deliveries)) {
+        throw new Error("Reminder transaction is unverified or incomplete");
+      }
+      data = Object.fromEntries(Object.entries(result).filter(([key]) =>
+        !["status", "operation", "warnings", "error"].includes(key)));
+    }
+    verified = true;
+  } else {
+    if (!result.error || typeof result.error !== "object" || Array.isArray(result.error)) {
+      throw new Error("Reminder failure has no structured error");
+    }
+    data = result;
+  }
+  return normalizeLegacyTaskResult({
+    status: result.status, domain: "reminder", operation, verified, data,
+    warnings, error: result.status === "failure" ? result.error : null,
+    pendingContext: null,
+  }, trusted, messageCandidate);
 }

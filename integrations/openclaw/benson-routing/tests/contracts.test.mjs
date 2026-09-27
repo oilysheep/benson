@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
+import { executeNormalizedReminderTool } from "../../plugins/benson-reminder-tool/dist/contracts.js";
 import {
   CONTROL_CONTRACT_VERSION, MAX_RESPONSE_RESULTS, MAX_RENDERED_TEXT,
   assertPendingContextBinding, completionRoute, createExecutionRoute, createResponseEnvelope,
@@ -147,4 +148,72 @@ test("rendered output is bounded and rejects unversioned authority claims", () =
   assert.throws(() => validateRenderedOutput({ schemaVersion: 2, message: "Done." }), /rendered_invalid/);
   assert.throws(() => validateRenderedOutput({ schemaVersion: 1, message: "x".repeat(MAX_RENDERED_TEXT + 1) }), /rendered_invalid/);
   assert.throws(() => validateRenderedOutput({ schemaVersion: 1, message: "Done.", verified: true }), /rendered_shape/);
+});
+
+
+test("Reminder adapter retains the complete deterministic collection and keeps candidate text separate", async () => {
+  const matches = [{ reminderId: "a", content: "First", status: "active" },
+    { reminderId: "b", content: "Second", status: "paused" }];
+  const serviceResult = { status: "success", operation: "list", verified: true,
+    matchCount: matches.length, matches, warnings: [] };
+  const definition = { name: "benson_reminder_list", operation: "list-reminders", schema: {} };
+  const dependencies = { validateJsonSchemaValue: ({ value }) => ({ ok: true, value }),
+    runReminderService: async () => serviceResult };
+  const candidate = { text: "All done", language: "en" };
+  let invoked = false;
+  await assert.rejects(executeNormalizedReminderTool(definition, { requesterId: "oren" },
+    undefined, { ...dependencies, runReminderService: async () => { invoked = true; return serviceResult; } },
+    { ...trustedLegacy, taskId: "" }), /identity is unavailable/);
+  assert.equal(invoked, false);
+  const envelope = await executeNormalizedReminderTool(definition, { requesterId: "oren" },
+    undefined, dependencies, trustedLegacy, candidate);
+  assert.deepEqual(plain(envelope.data), { matchCount: 2, matches });
+  assert.deepEqual(plain(envelope.messageCandidate), candidate);
+  assert.equal(envelope.verified, true);
+  await assert.rejects(executeNormalizedReminderTool(definition, { requesterId: "oren" },
+    undefined, { ...dependencies, runReminderService: async () => ({ ...serviceResult, matchCount: 1 }) },
+    trustedLegacy, candidate), /incomplete/);
+  await assert.rejects(executeNormalizedReminderTool(definition, { requesterId: "oren" },
+    undefined, { ...dependencies, runReminderService: async () => ({ ...serviceResult, verified: false }) },
+    trustedLegacy, candidate), /contradicts service verification/);
+});
+
+test("Reminder adapter preserves transaction, Calendar, warnings and pending delivery truth", async () => {
+  const serviceResult = { status: "success", operation: "pause", reminderId: "r-1",
+    idempotent: false, transaction: { status: "success", verified: true },
+    data: { record: { reminderId: "r-1", status: "paused",
+      calendar: { requested: true, eventId: "calendar-1" } } },
+    transport: { deliveries: [{ kind: "reminder_lifecycle", status: "pending",
+      idempotencyKey: "delivery-1", onFailure: { status: "warning", stateChangePreserved: true } }],
+      deliveryFailurePolicy: { status: "warning", stateChangePreserved: true } },
+    warnings: [{ code: "DELIVERY_PENDING", message: "Pending native delivery" }] };
+  const definition = { name: "benson_reminder_pause", operation: "pause-reminder", schema: {} };
+  const dependencies = { validateJsonSchemaValue: ({ value }) => ({ ok: true, value }),
+    runReminderService: async () => serviceResult };
+  const envelope = await executeNormalizedReminderTool(definition,
+    { requesterId: "oren", reminderId: "r-1" }, undefined, dependencies, trustedLegacy);
+  assert.equal(envelope.status, "success");
+  assert.equal(envelope.data.transaction.verified, true);
+  assert.equal(envelope.data.transport.deliveries[0].status, "pending");
+  assert.deepEqual(plain(envelope.warnings), serviceResult.warnings);
+  assert.equal(envelope.data.data.record.calendar.eventId, "calendar-1");
+  await assert.rejects(executeNormalizedReminderTool(definition,
+    { requesterId: "oren", reminderId: "r-1" }, undefined,
+    { ...dependencies, runReminderService: async () => ({ ...serviceResult,
+      transaction: { status: "success", verified: false } }) }, trustedLegacy,
+    { text: "Paused", language: "en" }), /unverified/);
+});
+
+
+test("Reminder pending continuation keeps exact context and rejects foreign or expired binding", () => {
+  const raw = accepted.find((item) => item.id === "reminder-clarification-exact-context-en").result;
+  const normalized = result(raw);
+  assert.deepEqual(plain(normalized.pendingContext.value), raw.pendingContext);
+  assert.deepEqual(plain(assertPendingContextBinding(normalized.pendingContext,
+    trustedLegacy.pendingBinding, new Date("2026-09-25T18:00:00Z")).value), raw.pendingContext);
+  assert.throws(() => assertPendingContextBinding(normalized.pendingContext,
+    { requesterId: "maya", conversationId: trustedLegacy.pendingBinding.conversationId },
+    new Date("2026-09-25T18:00:00Z")), /pending_binding_or_expiry/);
+  assert.throws(() => assertPendingContextBinding(normalized.pendingContext,
+    trustedLegacy.pendingBinding, new Date("2026-09-25T20:00:00Z")), /pending_binding_or_expiry/);
 });

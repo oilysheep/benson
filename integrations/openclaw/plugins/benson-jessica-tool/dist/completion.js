@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.mjs';
 import { EXECUTE_OPERATIONS } from '../../../../../agents/jessica-vacuum/lib/schemas.mjs';
+import { normalizeLegacyTaskResult } from '../../../benson-routing/envelope.mjs';
 
 const CHILD = 'jessica-vacuum';
 const DOMAIN_TOOLS = new Set(['jessica_read', 'jessica_execute']);
@@ -156,6 +157,13 @@ export async function validateJessicaCompletion({ runId, parentSessionKey, runs,
     }
   }
   return structuredClone(derived ?? final);
+}
+
+// Staged S06 adapter: native run and transcript correlation supplies the result.
+// Task identity, pending binding and candidate text arrive separately.
+export async function normalizeJessicaCompletion(args, trusted, messageCandidate = null) {
+  const result = await validateJessicaCompletion(args);
+  return normalizeLegacyTaskResult(result, trusted, messageCandidate);
 }
 
 export function createNativeTranscriptReader({ getSessionEntry, readVisibleMessages }) {

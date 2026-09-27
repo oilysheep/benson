@@ -179,7 +179,7 @@ export function validateTaskResultEnvelope(raw) {
 
 // Legacy agent fields are exact. New trusted task identity and pending binding
 // arrive separately; no agent/model field can select a route or response policy.
-export function normalizeLegacyTaskResult(raw, trusted) {
+export function normalizeLegacyTaskResult(raw, trusted, messageCandidate = null) {
   if (!isPlainObject(raw)) fail("legacy_result_shape");
   const jessica = raw.domain === "jessica-vacuum";
   exact(raw, jessica ? ["schemaVersion", ...LEGACY_KEYS] : LEGACY_KEYS, "legacy_result_shape");
@@ -201,7 +201,7 @@ export function normalizeLegacyTaskResult(raw, trusted) {
       schemaVersion: CONTROL_CONTRACT_VERSION, value: raw.pendingContext,
       binding: trusted.pendingBinding, expiresAt: trusted.pendingExpiresAt,
     },
-    messageCandidate: null,
+    messageCandidate,
   });
 }
 
