@@ -122,21 +122,26 @@ function validateDisabledControl(final, tool, entries, now) {
 }
 
 export async function validateJessicaCompletion({ runId, parentSessionKey, runs, readMessages,
-  now = new Date() }) {
+  completedRun = null, now = new Date() }) {
   if (typeof runId !== 'string' || !runId || typeof parentSessionKey !== 'string' ||
       !parentSessionKey.startsWith('agent:main:')) throw new Error('Native correlation is unavailable');
   const task = runs.filter((item) => item.runId === runId && item.runtime === 'subagent' &&
-    item.agentId === CHILD && item.status === 'succeeded' &&
+    item.agentId === CHILD && (item.status === 'succeeded' ||
+      item.status === 'running' && completedRun?.runId === runId &&
+      completedRun.childSessionKey === item.childSessionKey &&
+      completedRun.execution?.status === 'terminal' &&
+      completedRun.execution?.outcome?.status === 'ok') &&
     typeof item.childSessionKey === 'string' &&
     item.childSessionKey.startsWith(`agent:${CHILD}:subagent:`));
+  const endedAt = task[0]?.status === 'running' ? completedRun?.execution?.endedAt : task[0]?.endedAt;
   if (task.length !== 1 || !Number.isSafeInteger(task[0].createdAt) ||
-      !Number.isSafeInteger(task[0].endedAt)) throw new Error('Correlated child completion is unavailable');
+      !Number.isSafeInteger(endedAt)) throw new Error('Correlated child completion is unavailable');
   const [parent, child] = await Promise.all([
     readMessages({ agentId: 'main', sessionKey: parentSessionKey }),
     readMessages({ agentId: CHILD, sessionKey: task[0].childSessionKey }),
   ]);
   const turn = latestExternalTurn(parent);
-  if (turn === null || task[0].createdAt < turn || task[0].endedAt < task[0].createdAt) {
+  if (turn === null || task[0].createdAt < turn || endedAt < task[0].createdAt) {
     throw new Error('Jessica completion belongs to an earlier request');
   }
   const { entry, result: authoritative } = matchingToolResult(child, runId);

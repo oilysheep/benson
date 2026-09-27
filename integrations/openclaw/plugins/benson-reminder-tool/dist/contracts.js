@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from 'node:util';
 import canonicalRecipients from "../../../../../agents/reminder-service/config/recipients.json" with { type: "json" };
 import { normalizeLegacyTaskResult } from "../../../benson-routing/envelope.mjs";
 
@@ -753,6 +754,13 @@ export async function executeNormalizedReminderTool(
       trusted.taskId.length > 512 || /[\u0000-\u001f\u007f]/u.test(trusted.taskId)) {
     throw new Error("Trusted Reminder task identity is unavailable");
   }
+  const result = await executeReminderTool(definition, params, signal, dependencies);
+  return normalizeReminderServiceResult(definition, result, trusted, messageCandidate);
+}
+
+// Pure projection of the actual service result. Native Completion Control uses
+// this same contract after checking the native tool call and child transcript.
+export function normalizeReminderServiceResult(definition, result, trusted, messageCandidate = null) {
   const operations = {
     "create-intent": "create", "list-reminders": "list", "find-reminders": "find",
     "update-reminder": "update", "pause-reminder": "pause",
@@ -760,7 +768,10 @@ export async function executeNormalizedReminderTool(
   };
   const operation = operations[definition?.operation];
   if (!operation) throw new Error("Reminder operation has no canonical mapping");
-  const result = await executeReminderTool(definition, params, signal, dependencies);
+  if (typeof trusted?.taskId !== "string" || trusted.taskId.length < 1 ||
+      trusted.taskId.length > 512 || /[\u0000-\u001f\u007f]/u.test(trusted.taskId)) {
+    throw new Error("Trusted Reminder task identity is unavailable");
+  }
   if (!result || typeof result !== "object" || Array.isArray(result) ||
       result.operation !== operation || !["success", "failure"].includes(result.status)) {
     throw new Error("Reminder service result has no matching operation evidence");
@@ -801,4 +812,89 @@ export async function executeNormalizedReminderTool(
     warnings, error: result.status === "failure" ? result.error : null,
     pendingContext: null,
   }, trusted, messageCandidate);
+}
+
+
+function completionText(message, allowThinking = false) {
+  if (!Array.isArray(message?.content) || !message.content.every((part) =>
+    part?.type === "text" && typeof part.text === "string" ||
+    allowThinking && part?.type === "thinking")) return null;
+  const text = message.content.filter((part) => part.type === "text");
+  return text.length === 1 ? text[0].text : null;
+}
+function completionJson(message, allowThinking = false) {
+  const text = completionText(message, allowThinking);
+  if (typeof text !== "string" || text.length > 64_000) {
+    throw new Error("Reminder completion text is unavailable or oversized");
+  }
+  const value = JSON.parse(text);
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Reminder completion is not an object");
+  }
+  return value;
+}
+
+// The active service tool remains the only operation owner. This validator
+// reads native transcript facts; it never re-executes the Reminder mutation.
+export async function normalizeReminderCompletion({ runId, parentSessionKey, runs, readMessages,
+  completedRun = null, now = new Date() }, trusted, messageCandidate = null) {
+  if (typeof runId !== "string" || !runId ||
+      typeof parentSessionKey !== "string" || !parentSessionKey.startsWith("agent:main:")) {
+    throw new Error("Native Reminder correlation is unavailable");
+  }
+  const matches = runs.filter((task) => task.runId === runId && task.runtime === "subagent" &&
+    task.agentId === "reminder-service" && (task.status === "succeeded" ||
+      task.status === "running" && completedRun?.runId === runId &&
+      completedRun.childSessionKey === task.childSessionKey &&
+      completedRun.execution?.status === "terminal" &&
+      completedRun.execution?.outcome?.status === "ok") &&
+    typeof task.childSessionKey === "string" &&
+    task.childSessionKey.startsWith("agent:reminder-service:subagent:") &&
+    Number.isSafeInteger(task.createdAt));
+  const endedAt = matches[0]?.status === "running" ? completedRun?.execution?.endedAt : matches[0]?.endedAt;
+  if (!Number.isSafeInteger(endedAt) || matches.length !== 1) throw new Error("Correlated Reminder task is unavailable");
+  const [parent, child] = await Promise.all([
+    readMessages({ agentId: "main", sessionKey: parentSessionKey }),
+    readMessages({ agentId: "reminder-service", sessionKey: matches[0].childSessionKey }),
+  ]);
+  const inbound = parent.filter((entry) => entry.role === "user" &&
+    (entry.message?.__openclaw?.senderIdentity || entry.message?.__openclaw?.senderId ||
+      entry.message?.__openclaw?.transport) && Number.isSafeInteger(entry.message?.timestamp));
+  const latest = inbound.at(-1)?.message.timestamp;
+  if (!Number.isSafeInteger(latest) || matches[0].createdAt < latest ||
+      endedAt < matches[0].createdAt || endedAt > now.getTime() + 30_000) {
+    throw new Error("Reminder completion belongs to an earlier request");
+  }
+  const allowed = new Map(REMINDER_TOOL_DEFINITIONS.map((definition) => [definition.name, definition]));
+  const results = child.filter((entry) => entry.role === "toolResult" &&
+    allowed.has(entry.message?.toolName));
+  if (results.length !== 1) throw new Error("Reminder completion requires one deterministic tool result");
+  const tool = results[0];
+  const callId = tool.message.toolCallId;
+  const calls = child.flatMap((entry) => entry.role === "assistant" ?
+    (entry.message?.content ?? []).filter((part) => part?.type === "toolCall" &&
+      allowed.has(part.name)).map((part) => ({ entry, part })) : []);
+  if (calls.length !== 1 || calls[0].entry.seq >= tool.seq ||
+      calls[0].part.id !== callId || calls[0].part.name !== tool.message.toolName ||
+      tool.message.isError === true || typeof callId !== "string" || !callId) {
+    throw new Error("Reminder native tool provenance is incomplete");
+  }
+  const service = completionJson(tool.message);
+  if (tool.message.details && !isDeepStrictEqual(tool.message.details, service) &&
+      tool.message.details.persistedDetailsTruncated !== true) {
+    throw new Error("Reminder tool details differ from native result");
+  }
+  const finalEntry = child.at(-1);
+  if (finalEntry?.role !== "assistant" || finalEntry.seq <= tool.seq ||
+      finalEntry.message?.stopReason === "toolUse") {
+    throw new Error("Reminder final completion is missing");
+  }
+  const final = completionJson(finalEntry.message, true);
+  const authoritative = normalizeReminderServiceResult(allowed.get(tool.message.toolName),
+    service, trusted, messageCandidate);
+  const claimed = normalizeLegacyTaskResult(final, trusted, messageCandidate);
+  if (!isDeepStrictEqual(claimed, authoritative)) {
+    throw new Error("Reminder child completion differs from service truth");
+  }
+  return authoritative;
 }
