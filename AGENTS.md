@@ -1,230 +1,230 @@
 # Benson Engineering Contract
 
-These instructions govern work under `/home/oa/projects/benson`.
-The global Codex engineering policy applies; this file contains only
-Benson-specific rules.
+These instructions govern engineering work under `/home/oa/projects/benson`.
+The global Codex engineering policy also applies. Keep this file limited to
+Benson-wide engineering rules; scope-specific runtime behavior belongs in the
+applicable nested `AGENTS.md`.
 
-## Sources of truth
+## Sources of truth and ownership
 
-Use `architecture/BENSON_SUBAGENT_ARCHITECTURE.md` for intended architecture
-and responsibility boundaries.
+Use `architecture/BENSON_SUBAGENT_ARCHITECTURE.md` as the canonical source for
+intended architecture and responsibility boundaries. Do not duplicate its
+detailed design here.
 
-Current runtime precedence:
-1. focused current read-only output;
+For current runtime state use this precedence:
+
+1. focused current read-only command output;
 2. latest valid `benson-context-*.md` snapshot;
-3. canonical implementation/configuration;
-4. older snapshots or historical context.
+3. canonical implementation and configuration;
+4. older snapshots and historical context.
 
-Check snapshot generation time before treating it as current. If verified
-runtime differs from intended architecture, identify implementation drift.
+Always check snapshot generation time before treating it as current. If verified
+runtime differs from intended architecture, explicitly identify implementation
+drift.
 
-Nested `AGENTS.md` files own runtime behavior for their agents; do not duplicate
-those responsibilities here.
+Nested `AGENTS.md` files own scope-specific runtime behavior. Do not duplicate
+their instructions here or create parallel behavioral sources of truth.
 
-Use `PLANS.md` only for structural, cross-owner, migration, architecture-
-significant, multi-stage, or otherwise durable planned work.
+Use `PLANS.md` only for structural, cross-owner, migration,
+architecture-significant, multi-stage, or otherwise durable planned work.
 
-## Workflow and plan ownership
+Before creating a script, skill, tool, policy, config entry, workflow, document,
+or abstraction, locate the canonical existing owner and decide whether to repair,
+extend, or cleanly replace it. Avoid duplicate implementations and parallel
+sources of truth.
+
+## Engineering workflow
 
 Use:
 
 Inspect → Decide → Backup → Patch/Rewrite → Validate → Acceptance → Snapshot
 
-Work on one measurable objective or bounded substage at a time.
+Work on one measurable objective or bounded stage at a time.
 
-Before changing anything, inspect the smallest sufficient current state, locate
-the canonical owner, choose repair/extension/replacement, and identify the
-minimum sufficient acceptance evidence.
+Start with the smallest sufficient read-only inspection. Establish the current
+state, canonical owner, relevant invariant, minimum sufficient acceptance
+evidence, and appropriate rollback point before changing state.
 
-Prefer the smallest correct reusable change. Do not create duplicate
-implementations or parallel sources of truth.
+Prefer the smallest correct reusable change. Patch when the canonical owner is
+clean and the change is local. If it has accumulated drift, duplication, stale
+behavior, or layered patches, prefer a clean canonical rewrite based on intended
+architecture and verified current requirements.
 
-When executing an approved canonical plan, implement it and record
-status/evidence there. Do not change its stage structure, dependencies,
-acceptance strategy, or architectural decisions. If execution evidence requires
-such a change, stop and return that evidence for a planning/operator decision.
+When executing an approved canonical plan, implement it rather than redesigning
+it. Do not change stage structure, dependencies, acceptance strategy, or
+architectural decisions without presenting the evidence and obtaining Oren's
+approval.
 
-## Stage branch and PR workflow
+Work autonomously through routine implementation and validation. Stop for a
+genuine architecture decision, operator approval gate, physical E2E action,
+security concern, or blocker; do not stop merely to narrate routine progress.
 
-For each meaningful stage of an approved canonical multi-stage implementation
-plan, use a dedicated Git branch and pull request so the implementation history
-remains reviewable stage by stage.
+## Stage branch, plan closure, and PR workflow
 
-- start the stage branch from the latest accepted `main`;
+For each meaningful stage of an approved canonical multi-stage plan:
+
+- start a dedicated branch from the latest accepted and synchronized `main`;
 - keep one canonical stage per branch and PR unless Oren explicitly approves
   combining stages;
-- commit only files that belong to that stage; never absorb unrelated working
-  tree changes;
-- after the stage passes its required validation and acceptance, push the branch
-  to `origin`;
-- prepare a complete PR title and description that records the stage purpose,
-  architectural change, preserved invariants, validation and acceptance evidence,
-  and rollback information;
-- before the PR-creation approval gate, give Oren the required brief Hebrew
-  learning explanation for the completed stage: where it sits in the Benson
-  flow, the invariant/problem, responsible boundary, conceptual change, failure
-  class prevented, useful distributed-systems analogy, and concrete acceptance
-  evidence;
-- keep the PR title and description in English as persistent technical artifacts;
-- then present the proposed PR title and description to Oren and obtain explicit
-  approval before creating the PR;
-- after approval, create the PR against `main` and report its reference to Oren;
-- never merge the PR automatically; merging requires a separate explicit approval
-  from Oren after the PR has been created and reviewed;
-- start the next stage only after the previous stage PR is merged and local
-  `main` is synchronized with `origin/main`;
-- PR workflow does not replace plan-required checkpoints, runtime validation,
-  acceptance evidence, rollback requirements, or snapshots.
+- preserve unrelated working-tree changes; never include, revert, overwrite, or
+  clean them as part of the stage;
+- commit only files owned by the stage;
+- complete required validation and acceptance before proposing the PR;
+- after acceptance, update the canonical implementation plan with a short factual
+  closure record containing acceptance status, implemented delta, validation and
+  acceptance evidence, meaningful design deviations, and known limitations or
+  explicitly deferred follow-up;
+- never mark a stage accepted before the required evidence has been observed;
+- push the accepted stage branch to `origin`;
+- give Oren the required end-of-stage Hebrew learning explanation defined below;
+- prepare an English PR title and description covering purpose, architectural
+  change, preserved invariants, validation/acceptance evidence, and rollback;
+- obtain Oren's explicit approval before creating the PR;
+- after approval, create the PR against `main` and report its reference;
+- never merge automatically; merging requires separate explicit Oren approval
+  after the PR has been created and reviewed;
+- start the next stage only after the previous PR is merged and local `main` is
+  synchronized with `origin/main`.
 
-If unrelated uncommitted changes are present, preserve them and keep them out of
-the stage commit. Stop rather than overwrite or accidentally include unrelated
-work.
+The closure record belongs in the same PR as the stage implementation and is not
+a work log or transcript. PR workflow does not replace required rollback points,
+runtime checkpoints, validation, acceptance, recovery, or snapshots.
 
-## Architecture boundaries
+## Architecture guardrails
 
-Follow `architecture/BENSON_SUBAGENT_ARCHITECTURE.md`.
+Follow the canonical architecture rather than restating it here.
 
-Required boundaries:
-- Benson Main is the central cognitive orchestrator;
-- deterministic Request, Completion, and Response control owns the respective
-  boundaries, with Response Controller as the interactive outbound boundary
-  before native delivery;
-- domain sub-agents own domain reasoning and approved tool selection;
-- sub-agent runs are fresh/isolated unless explicitly approved otherwise;
-- persistent behavior must not depend on hidden LLM session state;
-- domain sub-agents have zero runtime skills by default unless approved;
-- use least privilege and explicit allowlists;
-- stateful, permission-sensitive, safety-sensitive, and externally observable
-  operations belong in deterministic tools;
-- keep authorization, validation, guardrails, verification, idempotency, and
-  reconciliation close to state-changing operations;
-- fail closed when outcome cannot be verified.
+- Prefer deterministic code and tools for mechanical, repeatable, stateful,
+  permission-sensitive, safety-sensitive, and externally observable operations.
+- Keep authorization, validation, guardrails, verification, idempotency, and
+  reconciliation close to state-changing deterministic operations.
+- Fail closed when an outcome, identity, ownership relationship, or state change
+  cannot be verified.
+- Before retrying a state-changing operation, inspect whether the previous
+  attempt already produced side effects.
+- Repair the canonical owner or violated invariant. Prefer parameterized schemas,
+  interfaces, tools, and validators over value-specific exceptions or
+  compensating prompt logic.
+- Do not substitute text matching, timing guesses, or run-specific values for
+  identity, correlation, provenance, ownership, or deterministic validation.
+- Prefer native OpenClaw orchestration and primitives. Do not add MCP, A2A,
+  another agent framework, custom orchestration, transport, store, service, or
+  infrastructure boundary without a concrete architectural benefit and Oren's
+  explicit approval.
 
-Prefer native OpenClaw orchestration. Do not add MCP, A2A, another agent
-framework, custom orchestration, or a new infrastructure boundary without a
-concrete benefit and explicit approval.
-
-If a repair changes an architectural boundary, stop after Decide, compare viable
-designs, and obtain Oren's approval.
+If a proposed repair changes an architectural boundary, stop after Decide,
+compare viable canonical designs, and obtain Oren's approval before implementation.
 
 ## Oren learning and explanations
 
-A primary goal of the Benson project is for Oren to deeply understand the
-system and develop practical Agentic Systems / Harness Architecture expertise.
+A primary goal of Benson engineering is for Oren to develop practical Agentic
+Systems / Harness Architecture expertise.
 
-At each meaningful implementation stage, blocker, design decision, or runtime
-change, give Oren a brief, coherent explanation in clear Hebrew covering:
+Every meaningful implementation stage has two Hebrew learning gates. Use concise,
+concrete bullet points and a small Benson flow/example rather than abstract prose.
 
-- where the work sits in the overall Benson flow and why it is needed now;
-- the concrete problem or invariant being addressed and what can fail without it;
-- which component, owner, or architectural boundary is responsible and why;
-- what is being inspected or changed and how the solution works conceptually;
-- what class of failures the solution prevents;
-- what concrete evidence will prove the stage or change is complete;
-- when useful, relate it to familiar distributed-systems concepts such as
-  ownership, durable state, correlation, retries, idempotency, concurrency,
-  async execution, consistency, or service boundaries.
+### Stage-start learning gate
 
-Keep explanations concise, accessible, and coherent. Prefer plain language over
-raw implementation detail, and define unfamiliar agentic/OpenClaw terminology
-when needed.
+After only the minimum read-only inspection needed to ground the explanation,
+and before implementation or state-changing work, explain:
 
-Do not repeat plan content or history unnecessarily. Explain at meaningful
-transitions and then continue autonomously; do not stop work merely to narrate
-progress.
+- where the stage sits in the Benson flow and what surrounds the boundary;
+- the concrete problem/invariant, failure risk, and responsible owner;
+- the canonical files/components expected to be inspected or changed;
+- the intended architecture/data/control flow and a concrete example when useful;
+- the completion evidence and relevant distributed-systems analogy when useful.
 
-## Efficient Benson execution
+This describes intent and planned architecture, not claimed results.
 
-Batch related safe work into meaningful units.
+### End-of-stage learning gate
 
-For a meaningful Git-managed source/docs/tests/repository-config batch:
-- require a verified pre-change Git commit/branch as the source rollback point;
-- use Git diff/history/commits for source evidence and rollback; do not duplicate
-  Git-managed source into Benson checkpoints.
+After implementation, validation, acceptance, and the plan closure record, and
+before presenting the PR proposal, explain:
 
-For a meaningful runtime/config/state/package batch:
-- create one verified restorable Benson checkpoint before the batch for artifacts
-  that Git cannot safely restore;
-- use targeted tests while editing;
-- run broader affected validation once when the batch is ready;
-- validate OpenClaw config before runtime exposure when relevant;
-- minimize gateway reload/restart cycles, normally one per ready batch;
-- use representative production E2E only where external behavior must be proven;
-- run `bensonsnap` after meaningful validated acceptance, or when a validated
-  runtime/config state must be preserved for safe continuation or rollback.
+- what was actually implemented and where it sits in the Benson flow;
+- the enforced invariant and failure class prevented;
+- meaningful differences from the plan and why the chosen boundary owns them;
+- concrete validation/acceptance evidence and any remaining limitation or deferral;
+- the relevant distributed-systems analogy when useful.
 
-Do not create checkpoints, snapshots, reloads, or full-suite runs for trivial
-intermediate preparation unless recovery/evidence specifically requires them.
+This describes the implemented and proven result, not the original plan.
 
-Prefer parameterized deterministic tools, executors, validators, and checkers
-when capability instances share semantics and verification. Do not create
-room/value/canary-specific mechanisms when safe parameters suffice.
+For a meaningful blocker, architectural discovery, design decision, or runtime
+change inside a stage, also give a brief Hebrew explanation when it materially
+affects Oren's understanding or requires an operator decision.
+
+Keep explanations concise and accessible. Define unfamiliar agentic/OpenClaw
+terminology when needed.
+
+## Validation, rollback, recovery, and snapshots
+
+Never claim success without observed validation.
+
+For Git-managed source, documentation, tests, and repository configuration, use
+the verified pre-change Git commit/branch as the rollback point. Use Git
+diff/history/commits for evidence and rollback; do not duplicate Git-managed
+source into Benson checkpoints.
+
+For active runtime configuration, runtime state, databases, packages, installed
+runtime artifacts, or anything Git cannot safely restore, create one verified
+restorable Benson checkpoint outside active canonical directories before the
+bounded change. Never remove the last known-good recoverable copy.
+
+Use targeted tests while editing, then run broader affected validation once the
+bounded change is ready. Do not rerun unrelated already-passing suites unless the
+changed surface could invalidate them.
 
 Use bounded equivalence classes for representative acceptance, but independently
-verify identities, mappings, permissions, or semantics that cannot be inferred.
+verify identities, mappings, permissions, and semantics that cannot be inferred.
+Use deterministic bounded waits, polls, and state checks for mechanical
+observation; do not spend LLM turns polling runtime or device state.
 
-Use deterministic bounded waits/polls/state checks; do not spend LLM turns
-polling runtime or device state.
+Validate OpenClaw configuration before runtime exposure when relevant. Minimize
+gateway reload/restart cycles, normally to one per ready bounded batch.
 
-Work autonomously until a genuine Oren gate, architectural decision, physical
-E2E, or blocker. Do not stop only for routine progress narration.
+Meaningful user-facing changes require representative E2E. Prefer Oren performing
+the real production interaction followed by deterministic backend verification
+when a physical or user-channel action is required.
 
-## Backup, failure, and rollback
+If validation or E2E fails, identify the failing layer and violated invariant,
+distinguish a local defect from a structural contract/design weakness, and apply
+the Architecture guardrails above. Never replay a domain mutation merely to
+repair malformed or ambiguous completion evidence.
 
-Before destructive, state-changing, config-changing, or structurally significant
-work, establish a verified rollback point. For Git-managed source, docs, tests,
-and repository configuration, use the verified pre-change Git commit/branch.
-For active runtime configuration, runtime state, databases, packages, installed
-runtime artifacts, or anything Git cannot safely restore, create the verified
-Benson checkpoint required by the bounded batch outside active canonical
-directories. Never remove the last known-good recoverable copy.
-
-Before retrying a mutation, inspect prior side effects.
-
-For Benson failures, identify the failing layer and invariant, distinguish local
-defect from structural weakness, repair the canonical owner, and preserve
-fail-closed behavior.
-
-Never repair malformed completion by replaying a domain mutation. Never use
-text matching, timing guesses, or run-specific values instead of proper
-identity, correlation, provenance, or ownership.
-
-Rollback Git-managed source through Git. For already-pushed shared source
-history, prefer a new revert commit over rewriting history. Restore only affected
-compatible runtime/config/state/package artifacts from the applicable verified
-Benson checkpoint, and preserve durable operation/idempotency history.
-
-## Validation and production acceptance
-
-Never claim success without observed validation. Do not rerun unrelated
-already-passing tests or acceptance scenarios unless the changed surface could
-invalidate them.
-
-Meaningful user-facing changes require representative E2E. Prefer Oren
-performing the real production interaction followed by deterministic backend
-verification.
-
-If E2E fails, inspect durable state and side effects first; do not blindly retry.
-
-## OpenClaw, snapshots, security, language
-
-After a meaningful OpenClaw upgrade or harness/runtime change, reverify only the
-Benson assumptions that depend on changed native behavior. Prefer current
-installed behavior and authoritative current OpenClaw documentation over
-historical assumptions.
+Rollback Git-managed shared history with a new revert commit rather than rewriting
+history. Restore only affected compatible runtime/config/state/package artifacts
+from the applicable verified checkpoint, preserving durable operation and
+idempotency history.
 
 A snapshot records an accepted or intentionally preserved runtime/config state;
-it is not a progress marker. Do not run `bensonsnap` for preparation-only or
-trivial intermediate states.
+it is not a progress marker. Do not create checkpoints, snapshots, reloads, or
+full-suite runs for trivial preparation unless recovery or evidence requires them.
 
-After meaningful validated changes to OpenClaw config, agents, workspaces,
+After meaningful validated changes to OpenClaw configuration, agents, workspaces,
 `AGENTS.md`, deterministic tools/scripts, models, delegation, permissions,
 scheduling, domain state, or canonical architecture, produce and verify a fresh
-snapshot.
+`bensonsnap`.
 
-Never request or expose passwords, API/OAuth tokens, private keys, certificates,
-secret environment files, or raw authentication files. Do not manually edit
-authentication or secret stores.
+## OpenClaw maintenance
 
-Communicate with Oren in Hebrew. All persistent Benson technical artifacts must
-be English only.
+After a meaningful OpenClaw upgrade or harness/runtime change, reverify only the
+Benson assumptions affected by changed native behavior.
+
+Before concluding that a native OpenClaw mechanism is defective or unsuitable,
+verify the current documented contract, reproduce the behavior in the smallest
+useful scope, inspect focused runtime evidence and installed implementation when
+necessary, and distinguish the primitive from adjacent transport, persistence,
+channel, or observability failures.
+
+Prefer focused current runtime evidence and authoritative current OpenClaw
+documentation over historical assumptions.
+
+## Security and language
+
+Never request, expose, print, log, snapshot, or embed passwords, API/OAuth
+tokens, credentials, private keys, certificates, secret environment files, or
+raw authentication files. Do not manually edit authentication or secret stores.
+
+Communicate with Oren in Hebrew. All persistent Benson technical artifacts,
+including plans, architecture, `AGENTS.md`, prompts, policies, maintenance
+instructions, commit messages, and PR titles/descriptions, must be English.
