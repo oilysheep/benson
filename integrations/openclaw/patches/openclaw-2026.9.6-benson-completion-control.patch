@@ -1,0 +1,435 @@
+--- a/dist/sessions-spawn-tool-AW-VALLJ.mjs
++++ b/dist/sessions-spawn-tool-AW-VALLJ.mjs
+@@ -114,6 +114,7 @@
+ import { _ as withParentExecutionIdentity, c as prepareSpawnThreadBinding, d as resolveSpawnMode, f as resolveSpawnSandboxError, g as readParentExecutionIdentity, h as summarizeSpawnError, i as splitModelRef, l as resolveSpawnAdmission, m as runSpawnPipeline, n as resolveConfiguredSubagentRunTimeoutSeconds, o as resolveRequesterOriginForChild, p as reserveChildAdmissionSlot, r as resolveSubagentModelAndThinkingPlan, s as mintSpawnSessionKey, t as resolveSubagentSpawnOwnership, y as resolveSubagentTargetPolicy } from "./subagent-spawn-ownership-Bn-k4g7t.mjs";
+ import { o as SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION } from "./subagent-completion-delivery-BlfHhlHm.mjs";
+ import { o as loadSessionEntryByKey } from "./subagent-announce-delivery-BsKmbPwO.mjs";
++import { h as replyRunRegistry } from "./reply-run-registry.registry-BoHW1D6q.mjs";
+ import { t as deliveryContextFromConversation } from "./route-projection-pmcojt9B.mjs";
+ import { t as stripFormattedReasoningMessage } from "./formatted-reasoning-message-CyXwargt.mjs";
+ import { n as PortalOutputSchema, r as PortalToolSchema, t as PORTAL_TOOL_DESCRIPTION } from "./portal-tool-contract-B1EX82ns.mjs";
+@@ -2737,6 +2738,30 @@
+ *
+ * Validates spawn requests, prepares child sessions, stages attachments, binds delivery context, and registers runs.
+ */
++// S07 remains inactive until the canonical production routing gate enables it.
++const BENSON_COMPLETION_PRODUCTION_ENABLED = false;
++async function resolveBensonSpawnBinding(params, ctx, requesterAgentId, targetAgentId) {
++	if (!BENSON_COMPLETION_PRODUCTION_ENABLED || requesterAgentId !== "main" ||
++		!['jessica-vacuum', 'reminder-service'].includes(targetAgentId)) return;
++	const sourceTurnId = replyRunRegistry.getSourceTurnId(ctx.agentSessionKey);
++	if (!sourceTurnId) return;
++	const parent = loadSessionEntryByKey(ctx.agentSessionKey, requesterAgentId);
++	const committed = parent?.bensonDecisionCommitments?.filter((item) => item.requestId === sourceTurnId);
++	if (!committed?.length) return;
++	const active = replyRunRegistry.resolveCurrentMessageInjectionTarget(ctx.agentSessionKey);
++	if (committed.length !== 1 || active?.runId !== ctx.requesterTurnRunId ||
++		parent.sessionId !== committed[0].sessionId || committed[0].owner !== "main" ||
++		params.completionTarget !== "parent" || params.expectsCompletionMessage === false) {
++		throw new Error("Benson committed child requires exact active parent and private completion");
++	}
++	const { bindNativeCompletion } = await import("file:///home/oa/projects/benson/integrations/openclaw/benson-routing/completion-control.mjs");
++	return (childRunId, childSessionKey) => bindNativeCompletion({
++		commitment: committed[0], sourceTurnId, parentSessionKey: ctx.agentSessionKey,
++		parentSessionId: parent.sessionId, parentRunId: ctx.requesterTurnRunId,
++		childRunId, childSessionKey, executionOwner: targetAgentId,
++		completionTarget: "CALLER"
++	});
++}
+ async function spawnSubagentDirect(params, ctx) {
+ 	const assertActive = ctx.assertActive;
+ 	const promptedAt = Date.now();
+@@ -2752,6 +2777,7 @@
+ 	const requestResolution = resolveSubagentSpawnRequest(params, ctx);
+ 	if (!requestResolution.ok) return requestResolution.result;
+ 	const { request: { taskName, spawnMode, cleanup, expectsCompletionMessage, completionRequesterSessionId }, runtime: { hookRunner, cfg, runTimeoutSeconds, contextMode, requesterInternalKey, ownership, requesterAgentId, targetAgentId }, swarm: { config: swarmConfig, groupId: swarmGroupId, schedulerGroupKey: swarmSchedulerGroupKey, launchReplayKey: swarmLaunchReplayKey, soleImplicitMember, reservationPending }, admission: { resolve: resolveAdmission, initial: admission, reservation: admissionReservation, childDepth, maxSpawnDepth }, childIdem } = requestResolution.resolved;
++	const bensonCompletionBinding = await resolveBensonSpawnBinding(params, ctx, requesterAgentId, targetAgentId);
+ 	let threadBindingReady = false;
+ 	let hasBoundThreadDeliveryOrigin = false;
+ 	let childRunId = childIdem;
+@@ -3125,6 +3151,7 @@
+ 					runTimeoutSeconds,
+ 					expectsCompletionMessage: completionMode === "announce",
+ 					completionTarget: params.completionTarget,
++					...bensonCompletionBinding ? { bensonCompletionBinding: bensonCompletionBinding(runId, childSessionKey) } : {},
+ 					completionRequesterSessionId,
+ 					spawnMode,
+ 					collect: params.collect === true,
+--- a/dist/subagent-announce-D1daXz8n.mjs
++++ b/dist/subagent-announce-D1daXz8n.mjs
+@@ -172,6 +172,23 @@
+ 	let childSessionId;
+ 	let childSessionLifecycleRevision;
+ 	try {
++		if (params.bensonCompletionBinding) {
++			const { prepareBensonNativeCompletion } = await import("./subagent-completion-delivery-BlfHhlHm.mjs");
++			const prepared = await prepareBensonNativeCompletion(params);
++			if (prepared.blocked) {
++				shouldDeleteChildSession = false;
++				return "permanent_failure";
++			}
++			if (prepared.admission.destination === "RESPONSE_CONTROLLER") {
++				params.onDeliveryResult?.({ delivered: true, path: "benson_direct_result", disposition: "delivered" });
++				return "delivered";
++			}
++			params.bensonCompletionAdmission = prepared.admission;
++			const validatedText = JSON.stringify(prepared.admission.result);
++			params.roundOneReply = validatedText;
++			params.terminalReply = { disposition: "visible", text: validatedText };
++			params.fallbackReply = void 0;
++		}
+ 		let targetRequesterSessionKey = params.requesterSessionKey;
+ 		let targetRequesterAgentId = params.requesterAgentId;
+ 		let targetRequesterOrigin = normalizeDeliveryContext(params.requesterOrigin);
+@@ -262,7 +279,7 @@
+ 		const hasVisibleFallback = Boolean(fallbackReply) && !(isAnnounceSkip(fallbackReply) || isSilentReplyText(fallbackReply, "NO_REPLY"));
+ 		const cleanedFallbackReply = hasVisibleFallback ? stripAndClassifyReply(fallbackReply ?? "") ?? void 0 : void 0;
+ 		const childRun = getLatestSubagentRunByChildSessionKey(params.childSessionKey);
+-		if (childSessionEffectsAllowed() && childRun?.runId === params.childRunId) {
++		if (!params.bensonCompletionAdmission && childSessionEffectsAllowed() && childRun?.runId === params.childRunId) {
+ 			const prepared = await readSubagentRunAnnounceResult(childRun);
+ 			reply = prepared.text;
+ 			isOwnResultCurrent = prepared.isCurrent;
+@@ -317,7 +334,7 @@
+ 		const statusLabel = outcome.status === "ok" ? "completed; ready for parent review" : outcome.status === "timeout" ? outcome.error ? `timed out: ${outcome.error}` : "timed out" : outcome.status === "error" ? `failed: ${outcome.error || "unknown error"}` : "finished with unknown status";
+ 		const taskLabel = params.label || params.task || "task";
+ 		const announceSessionId = childSessionEffectsAllowed() ? childSessionId || "unknown" : "unknown";
+-		const childResultText = reply;
++		const childResultText = params.bensonCompletionAdmission ? JSON.stringify(params.bensonCompletionAdmission.result) : reply;
+ 		const findings = childResultText || "(no output)";
+ 		let requesterIsSubagent = requesterIsInternalSession();
+ 		if (requesterIsSubagent) {
+@@ -415,6 +432,7 @@
+ 			requesterIsSubagent,
+ 			expectsCompletionMessage,
+ 			completionTarget: params.completionTarget,
++			...params.bensonCompletionAdmission ? { bensonCompletionAdmission: params.bensonCompletionAdmission } : {},
+ 			completionRequesterSessionId: params.completionRequesterSessionId,
+ 			bestEffortDeliver: params.bestEffortDeliver,
+ 			directIdempotencyKey,
+--- a/dist/subagent-announce-delivery-BsKmbPwO.mjs
++++ b/dist/subagent-announce-delivery-BsKmbPwO.mjs
+@@ -1476,6 +1476,7 @@
+ 		const queueContext = captureOpenClawStateWorkerContext();
+ 		const queued = params.sourceRunId ? admitCorrelatedSubagentSessionDelivery({
+ 			runId: params.sourceRunId,
++			...params.bensonCompletionAdmission ? { bensonCompletionAdmission: params.bensonCompletionAdmission } : {},
+ 			payload: queuePayload
+ 		}) : await enqueueClaimedSessionDelivery(queuePayload, resolveSubagentAnnounceTimeoutMs(cfg), queueContext);
+ 		if (queued.status === "failed") return {
+--- a/dist/subagent-completion-admission.store-Bw0OSK2O.mjs
++++ b/dist/subagent-completion-admission.store-Bw0OSK2O.mjs
+@@ -1046,6 +1046,25 @@
+ 	const boundTask = bindTaskRecord(params.task);
+ 	invokeSynchronousHook(params.testHooks?.afterBind);
+ 	return runOpenClawStateWriteTransaction((database) => {
++		if (params.subagent.bensonCompletionAdmission) {
++			const admission = params.subagent.bensonCompletionAdmission;
++			const current = readSubagentRun(database, params.subagent.runId);
++			const task = readTaskRecord(database.db, params.task.taskId);
++			if (!current || !task || current.execution?.status !== "terminal" ||
++				current.execution.outcome?.status !== "ok" ||
++				JSON.stringify(current.bensonCompletionBinding) !== JSON.stringify(params.subagent.bensonCompletionBinding) ||
++				admission.destination !== "CALLER" || admission.childRunId !== current.runId ||
++				admission.taskId !== task.taskId || admission.requestId !== current.bensonCompletionBinding?.requestId) {
++				throw new Error("Benson completion admission owner changed");
++			}
++			if (current.bensonCompletionAdmission) {
++				if (JSON.stringify(current.bensonCompletionAdmission) !== JSON.stringify(admission))
++					throw new Error("Benson completion admission contradicts durable result");
++				return { claimed: false, reused: true, status: current.delivery?.status === "delivered" ? "completed" : "pending" };
++			}
++			if (task.status !== "running" || current.delivery?.status !== "pending")
++				throw new Error("Benson completion is no longer pending");
++		}
+ 		const claimed = upsertBoundDeliveryQueueEntryInDatabase(boundQueue, database);
+ 		invokeSynchronousHook(() => params.testHooks?.afterMutation?.("queue", database));
+ 		if (!claimed) {
+@@ -1063,6 +1082,75 @@
+ 			status: getDeliveryQueueEntryOwnersInDatabase(database, ["session"], params.queueEntry.id).get("session")?.status ?? "pending"
+ 		};
+ 	}, params.databaseOptions, { operationLabel: "subagent completion delivery admission" });
++}
++// Direct results remain private durable native state until Response Controller
++// consumes them in the later stage. No agent turn or external send is created.
++function admitBensonDirectCompletion(params) {
++	return runOpenClawStateWriteTransaction((database) => {
++		const subagent = readSubagentRun(database, params.runId);
++		const task = readTaskRecord(database.db, params.taskId);
++		const admission = params.admission;
++		if (!subagent || !task || !subagent.bensonCompletionBinding ||
++			JSON.stringify(subagent.bensonCompletionBinding) !== JSON.stringify(params.binding) ||
++			subagent.execution?.status !== "terminal" || subagent.execution.outcome?.status !== "ok" ||
++			(subagent.taskRunId ?? subagent.runId) !== task.runId ||
++			admission?.destination !== "RESPONSE_CONTROLLER" || admission.childRunId !== subagent.runId ||
++			admission.taskId !== task.taskId || admission.requestId !== params.binding.requestId)
++			throw new Error("Benson direct completion owner changed");
++		if (subagent.bensonCompletionAdmission) {
++			if (JSON.stringify(subagent.bensonCompletionAdmission) !== JSON.stringify(admission))
++				throw new Error("Benson direct completion contradicts durable result");
++			return "duplicate";
++		}
++		if (task.status !== "running" || subagent.delivery?.status !== "pending")
++			throw new Error("Benson direct completion is no longer pending");
++		const now = Date.now();
++		subagent.bensonCompletionAdmission = structuredClone(admission);
++		Object.assign(ensureDeliveryState(subagent), {
++			status: "delivered", disposition: "benson_direct_result", deliveredAt: now,
++			announcedAt: now, nextAttemptAt: void 0, queueId: void 0
++		});
++		Object.assign(task, {
++			status: "succeeded", terminalOutcome: "succeeded", deliveryStatus: "delivered",
++			endedAt: subagent.execution.endedAt, lastEventAt: now,
++			progressSummary: "Validated Benson result", terminalSummary: null, error: void 0
++		});
++		upsertSubagentRunRowInDatabase(database, bindSubagentRunRecord(subagent));
++		upsertTaskRunRowInDatabase(database, bindTaskRecord(task));
++		deferSqlitePostCommitPublication(database.db, () => publishCommittedRecords(subagent, task));
++		return "admitted";
++	}, params.databaseOptions, { operationLabel: "Benson direct completion admission" });
++}
++function rejectBensonCompletion(params) {
++	return runOpenClawStateWriteTransaction((database) => {
++		const subagent = readSubagentRun(database, params.runId);
++		const task = readTaskRecord(database.db, params.taskId);
++		if (!subagent || !task || !subagent.bensonCompletionBinding ||
++			JSON.stringify(subagent.bensonCompletionBinding) !== JSON.stringify(params.binding) ||
++			(subagent.taskRunId ?? subagent.runId) !== task.runId) return false;
++		if (subagent.bensonCompletionAdmission) return false;
++		if (task.status === "failed" && subagent.delivery?.status === "suspended") return true;
++		if (task.status !== "running" || subagent.delivery?.status !== "pending") return false;
++		const now = Date.now();
++		Object.assign(ensureDeliveryState(subagent), {
++			status: "suspended", disposition: "permanent_failure",
++			suspendedAt: now, suspendedReason: "permanent_failure",
++			lastError: "Benson completion unverified; preserve operation history for recovery",
++			nextAttemptAt: void 0, queueId: void 0
++		});
++		subagent.suppressCompletionDelivery = true;
++		Object.assign(task, {
++			status: "failed", terminalOutcome: void 0, deliveryStatus: "failed",
++			endedAt: subagent.execution.endedAt ?? now, lastEventAt: now,
++			error: "Benson completion unverified; manual recovery required",
++			progressSummary: null, terminalSummary: null,
++			cleanupAfter: Math.max(task.cleanupAfter ?? 0, now + SUSPENDED_RETENTION_MS)
++		});
++		upsertSubagentRunRowInDatabase(database, bindSubagentRunRecord(subagent));
++		upsertTaskRunRowInDatabase(database, bindTaskRecord(task));
++		deferSqlitePostCommitPublication(database.db, () => publishCommittedRecords(subagent, task));
++		return true;
++	}, params.databaseOptions, { operationLabel: "Benson completion rejection" });
+ }
+ /** Atomically consumes a correlated queue settlement into registry and task projections. */
+ function settleSubagentCompletionDelivery(params) {
+@@ -1300,4 +1388,4 @@
+ 	}, params.databaseOptions, { operationLabel: "requester completion batch settlement" });
+ }
+ //#endregion
+-export { safeRemoveAttachmentsDir as A, recoverPendingSessionDeliveries as B, ANNOUNCE_COMPLETION_HARD_EXPIRY_MS as C, logAnnounceGiveUp as D, PROVISIONAL_KILL_RECONCILIATION_MS as E, buildAnnounceIdempotencyKey as F, resolveLifecycleOutcomeFromRunOutcome as G, emitSubagentProgressEndedHook as H, schedulePendingSessionDeliveries as I, scheduleSessionDelivery as L, cleanupMaterializedSubagentAttachments as M, removeSubagentAttachmentTree as N, persistSubagentSessionTiming as O, buildAnnounceIdFromChildRun as P, startSessionDeliveryRuntime as R, safeSetSubagentTaskDeliveryStatus as S, MIN_ANNOUNCE_RETRY_DELAY_MS as T, resolveFinalizedSubagentTaskState as U, emitSubagentEndedHookOnce as V, resolveKilledSubagentTaskEndedAt as W, markRequesterSettleWakePending as _, reconcileRetiredSubagentCancellation as a, refreshFrozenResultFromSession as b, buildSafeLifecycleErrorMeta as c, finalizeSubagentTaskRun as d, formatAnnounceDeliveryError as f, markPendingFinalDelivery as g, loadPendingFinalDeliveryPayload as h, publishCommittedRecords as i, updateSubagentArchiveAtMs as j, resolveAnnounceRetryDelayMs as k, clearSubagentPendingDelivery as l, hasPriorRequesterDeliveryMirror as m, admitSubagentCompletionDelivery as n, settleRequesterCompletionBatch as o, freezeRunResultAtCompletion as p, blockSubagentCompletionDelivery as r, settleSubagentCompletionDelivery as s, SUSPENDED_RETENTION_MS as t, emitCompletionEndedHookIfNeeded as u, maskLifecycleIdentifier as v, ANNOUNCE_EXPIRY_MS as w, refreshPendingFinalDeliveryPayload as x, recordAnnounceDeliveryResult as y, drainPendingSessionDelivery as z };
++export { admitBensonDirectCompletion as B2, rejectBensonCompletion as B3, safeRemoveAttachmentsDir as A, recoverPendingSessionDeliveries as B, ANNOUNCE_COMPLETION_HARD_EXPIRY_MS as C, logAnnounceGiveUp as D, PROVISIONAL_KILL_RECONCILIATION_MS as E, buildAnnounceIdempotencyKey as F, resolveLifecycleOutcomeFromRunOutcome as G, emitSubagentProgressEndedHook as H, schedulePendingSessionDeliveries as I, scheduleSessionDelivery as L, cleanupMaterializedSubagentAttachments as M, removeSubagentAttachmentTree as N, persistSubagentSessionTiming as O, buildAnnounceIdFromChildRun as P, startSessionDeliveryRuntime as R, safeSetSubagentTaskDeliveryStatus as S, MIN_ANNOUNCE_RETRY_DELAY_MS as T, resolveFinalizedSubagentTaskState as U, emitSubagentEndedHookOnce as V, resolveKilledSubagentTaskEndedAt as W, markRequesterSettleWakePending as _, reconcileRetiredSubagentCancellation as a, refreshFrozenResultFromSession as b, buildSafeLifecycleErrorMeta as c, finalizeSubagentTaskRun as d, formatAnnounceDeliveryError as f, markPendingFinalDelivery as g, loadPendingFinalDeliveryPayload as h, publishCommittedRecords as i, updateSubagentArchiveAtMs as j, resolveAnnounceRetryDelayMs as k, clearSubagentPendingDelivery as l, hasPriorRequesterDeliveryMirror as m, admitSubagentCompletionDelivery as n, settleRequesterCompletionBatch as o, freezeRunResultAtCompletion as p, blockSubagentCompletionDelivery as r, settleSubagentCompletionDelivery as s, SUSPENDED_RETENTION_MS as t, emitCompletionEndedHookIfNeeded as u, maskLifecycleIdentifier as v, ANNOUNCE_EXPIRY_MS as w, refreshPendingFinalDeliveryPayload as x, recordAnnounceDeliveryResult as y, drainPendingSessionDelivery as z };
+--- a/dist/subagent-completion-delivery-BlfHhlHm.mjs
++++ b/dist/subagent-completion-delivery-BlfHhlHm.mjs
+@@ -6,7 +6,11 @@
+ import "./runtime-internal-BlTJ6Kwo.mjs";
+ import { t as captureOperatorToolGatewayContinuationContext } from "./server-plugin-in-process-dispatch-DeqbsaqC.mjs";
+ import { t as resolveSubagentCompletionResultText } from "./subagent-completion-result-DdiIlFMt.mjs";
+-import { A as safeRemoveAttachmentsDir, C as ANNOUNCE_COMPLETION_HARD_EXPIRY_MS, L as scheduleSessionDelivery, h as loadPendingFinalDeliveryPayload, i as publishCommittedRecords, n as admitSubagentCompletionDelivery, r as blockSubagentCompletionDelivery, s as settleSubagentCompletionDelivery, t as SUSPENDED_RETENTION_MS } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
++import { A as safeRemoveAttachmentsDir, B2 as admitBensonDirectCompletion, B3 as rejectBensonCompletion, C as ANNOUNCE_COMPLETION_HARD_EXPIRY_MS, L as scheduleSessionDelivery, h as loadPendingFinalDeliveryPayload, i as publishCommittedRecords, n as admitSubagentCompletionDelivery, r as blockSubagentCompletionDelivery, s as settleSubagentCompletionDelivery, t as SUSPENDED_RETENTION_MS } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
++import { l as resolveSessionStorePathCore } from "./paths-CcMbq5NY.mjs";
++import { l as loadSessionEntryReadOnly } from "./session-accessor.sqlite-entry-UCl9kr-O.mjs";
++import { r as getRuntimeConfig } from "./io.runtime-hPN4FOBi.mjs";
++import { d as readVisibleSessionTranscriptMessageEntries } from "./session-transcript-runtime-CePvNE-m.mjs";
+ import { a as SessionDeliveryDeferredError, c as prepareClaimedSessionDelivery, i as SessionDeliveryDeadLetteredError } from "./session-delivery-queue.records-rYJIeHGW.mjs";
+ import { p as releaseSessionDeliveryClaim } from "./session-delivery-queue-storage-DSTuGS2l.mjs";
+ //#region src/agents/subagents/completion/subagent-completion-instructions.ts
+@@ -17,6 +21,92 @@
+ const CLAIM_LEASE_MS = 125e3;
+ const MAX_DELIVERY_GENERATION = 10;
+ const CANONICAL_RESULT_PROMPT = `A completed subagent task is ready for parent review. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} The canonical result follows.`;
++function loadBensonParentSession(binding) {
++	const cfg = getRuntimeConfig();
++	const storePath = resolveSessionStorePathCore(cfg.session?.store, { agentId: "main" });
++	const entry = loadSessionEntryReadOnly({
++		storePath, sessionKey: binding.parentSessionKey, agentId: "main", clone: false
++	});
++	return entry ? { ...entry, sessionKey: binding.parentSessionKey } : void 0;
++}
++/** Validate native facts before either native private continuation or direct result admission. */
++async function prepareBensonNativeCompletion(params) {
++	const entry = subagentRuns.get(params.childRunId);
++	const binding = params.bensonCompletionBinding;
++	const task = entry ? findTaskByRunId(entry.taskRunId ?? entry.runId) : void 0;
++	if (!entry || !task || !binding ||
++		JSON.stringify(entry.bensonCompletionBinding) !== JSON.stringify(binding))
++		throw new Error("Benson completion owner unavailable");
++	const parentSession = loadBensonParentSession(binding);
++	const commitments = parentSession?.bensonDecisionCommitments?.filter((item) => item.requestId === binding.requestId);
++	const commitment = commitments?.length === 1 ? commitments[0] : void 0;
++	let admission;
++	try {
++		const { validateNativeCompletion } = await import("file:///home/oa/projects/benson/integrations/openclaw/benson-routing/completion-control.mjs");
++		let result = entry.bensonCompletionAdmission?.result;
++		if (!result) {
++			const seen = new Map();
++			const readMessages = async ({ agentId, sessionKey }) => {
++				const scope = `${agentId}:${sessionKey}`;
++				if (seen.has(scope)) return seen.get(scope);
++				const sessionId = agentId === "main" ? parentSession?.sessionId :
++					(await import("./subagent-announce-delivery-BsKmbPwO.mjs")).o(sessionKey, agentId)?.sessionId;
++				if (!sessionId) throw new Error("Benson native transcript unavailable");
++				const messages = await readVisibleSessionTranscriptMessageEntries({ agentId, sessionKey, sessionId });
++				if (!Array.isArray(messages) || messages.length > 1024 ||
++					Buffer.byteLength(JSON.stringify(messages), "utf8") > 262144)
++					throw new Error("Benson native transcript exceeds bounded read");
++				seen.set(scope, messages);
++				return messages;
++			};
++			const trusted = { taskId: task.taskId, pendingBinding: null, pendingExpiresAt: null };
++			const args = { runId: entry.runId, parentSessionKey: binding.parentSessionKey,
++				runs: [task], completedRun: entry, readMessages };
++			if (binding.executionOwner === "jessica-vacuum") {
++				const domain = await import("file:///home/oa/projects/benson/integrations/openclaw/plugins/benson-jessica-tool/dist/completion.js");
++				const raw = await domain.validateJessicaCompletion(args);
++				if (raw.pendingContext !== null) {
++					const parent = await readMessages({ agentId: "main", sessionKey: binding.parentSessionKey });
++					const inbound = parent.filter((item) => item.role === "user" &&
++						(item.message?.__openclaw?.senderId || item.message?.__openclaw?.senderIdentity?.id) &&
++						Number.isSafeInteger(item.message?.timestamp));
++					const sender = inbound.at(-1)?.message?.__openclaw;
++					const requesterId = sender?.senderId ?? sender?.senderIdentity?.id;
++					if (!requesterId || sender?.senderIdentity?.id && sender.senderIdentity.id !== requesterId)
++						throw new Error("Benson pending requester identity unavailable");
++					trusted.pendingBinding = { requesterId, conversationId: binding.parentSessionKey };
++					trusted.pendingExpiresAt = raw.pendingContext.expiresAt;
++				}
++				const { normalizeLegacyTaskResult } = await import("file:///home/oa/projects/benson/integrations/openclaw/benson-routing/envelope.mjs");
++				result = normalizeLegacyTaskResult(raw, trusted);
++			} else if (binding.executionOwner === "reminder-service") {
++				const domain = await import("file:///home/oa/projects/benson/integrations/openclaw/plugins/benson-reminder-tool/dist/contracts.js");
++				result = await domain.normalizeReminderCompletion(args, trusted);
++			} else throw new Error("Benson completion domain unavailable");
++		}
++		admission = validateNativeCompletion({ binding, commitment, parentSession: {
++			sessionKey: binding.parentSessionKey, sessionId: parentSession?.sessionId
++		}, child: entry, task, result });
++		if (entry.bensonCompletionAdmission &&
++			JSON.stringify(entry.bensonCompletionAdmission) !== JSON.stringify(admission))
++			throw new Error("Benson durable completion contradicts native evidence");
++	} catch (error) {
++		if (entry.bensonCompletionAdmission) throw error;
++		const rejected = task.status === "running" ? rejectBensonCompletion({
++			runId: entry.runId, taskId: task.taskId, binding
++		}) : task.status === "succeeded" ? blockSubagentCompletionDelivery({
++			subagent: entry, taskId: task.taskId,
++			reason: "Benson completion unverified; preserve operation history for recovery",
++			suspendedReason: "permanent_failure"
++		}) : task.status === "failed";
++		if (!rejected) throw error;
++		return { blocked: true };
++	}
++	if (admission.destination === "RESPONSE_CONTROLLER") admitBensonDirectCompletion({
++		runId: entry.runId, taskId: task.taskId, binding, admission
++	});
++	return { admission };
++}
+ function findSubagentForTask(task) {
+ 	for (const entry of subagentRuns.values()) if ((entry.taskRunId ?? entry.runId) === task.runId) return entry;
+ }
+@@ -27,7 +117,9 @@
+ 		deliveryStatus,
+ 		terminalOutcome: "succeeded",
+ 		lastEventAt: now,
+-		progressSummary: resolveSubagentCompletionResultText(subagent) ?? task.progressSummary,
++		...subagent.bensonCompletionBinding ? { endedAt: subagent.execution.endedAt } : {},
++		progressSummary: subagent.bensonCompletionAdmission ? "Validated Benson result" :
++			resolveSubagentCompletionResultText(subagent) ?? task.progressSummary,
+ 		error: void 0,
+ 		terminalSummary: void 0,
+ 		cleanupAfter: void 0
+@@ -41,6 +133,16 @@
+ 	if (!task || task.runtime !== "subagent") throw new Error(`subagent completion task not found: ${params.runId}`);
+ 	const now = Date.now();
+ 	const subagent = structuredClone(current);
++	if (current.bensonCompletionBinding) {
++		const admission = params.bensonCompletionAdmission;
++		if (!admission || admission.destination !== "CALLER" ||
++			admission.requestId !== current.bensonCompletionBinding.requestId ||
++			admission.childRunId !== current.runId || admission.taskId !== task.taskId ||
++			JSON.stringify(current.bensonCompletionAdmission) !== JSON.stringify(admission) &&
++			current.bensonCompletionAdmission !== void 0)
++			throw new Error("Benson caller completion has no validated admission");
++		subagent.bensonCompletionAdmission = structuredClone(admission);
++	}
+ 	const delivery = ensureDeliveryState(subagent);
+ 	const generation = delivery.generation ?? 1;
+ 	const windowStartedAt = delivery.windowStartedAt ?? subagent.execution.endedAt ?? now;
+@@ -77,7 +179,7 @@
+ 		subagent,
+ 		task: projectedTask
+ 	});
+-	publishCommittedRecords(subagent, projectedTask);
++	if (!admission.reused) publishCommittedRecords(subagent, projectedTask);
+ 	return {
+ 		id: queueEntry.id,
+ 		...admission
+@@ -88,7 +190,17 @@
+ 	if (Date.now() >= queued.owner.deadlineAt) throw new SessionDeliveryDeadLetteredError("correlated subagent completion delivery deadline expired");
+ 	const entry = subagentRuns.get(queued.owner.runId);
+ 	if (!entry || entry.delivery?.queueId !== queued.id || entry.delivery.generation !== queued.owner.generation || entry.delivery.deadlineAt !== queued.owner.deadlineAt) throw new SessionDeliveryDeferredError("correlated subagent delivery owner mismatch");
+-	const result = resolveSubagentCompletionResultText(entry) ?? "(no output)";
++	let result = resolveSubagentCompletionResultText(entry) ?? "(no output)";
++	if (entry.bensonCompletionBinding) {
++		const admission = entry.bensonCompletionAdmission;
++		const parent = loadBensonParentSession(entry.bensonCompletionBinding);
++		if (!admission || admission.destination !== "CALLER" ||
++			admission.requestId !== entry.bensonCompletionBinding.requestId ||
++			admission.childRunId !== entry.runId ||
++			parent?.sessionId !== entry.bensonCompletionBinding.parentSessionId)
++			throw new SessionDeliveryDeferredError("Benson validated completion owner unavailable");
++		result = JSON.stringify(admission.result);
++	}
+ 	return {
+ 		...queued,
+ 		message: `${CANONICAL_RESULT_PROMPT}\n\n${result}`,
+@@ -242,4 +354,4 @@
+ 	};
+ }
+ //#endregion
+-export { settleCorrelatedSubagentDelivery as a, retrySubagentCompletionDelivery as i, dismissSubagentCompletionDelivery as n, SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION as o, resolveCorrelatedSubagentDelivery as r, SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION as s, admitCorrelatedSubagentSessionDelivery as t };
++export { prepareBensonNativeCompletion, settleCorrelatedSubagentDelivery as a, retrySubagentCompletionDelivery as i, dismissSubagentCompletionDelivery as n, SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION as o, resolveCorrelatedSubagentDelivery as r, SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION as s, admitCorrelatedSubagentSessionDelivery as t };
+--- a/dist/subagent-registry-WYOlOdN5.mjs
++++ b/dist/subagent-registry-WYOlOdN5.mjs
+@@ -1816,6 +1816,7 @@
+ 		spawnMode: pendingPayload.spawnMode,
+ 		expectsCompletionMessage: pendingPayload.expectsCompletionMessage,
+ 		completionTarget: pendingPayload.completionTarget,
++		...entry.bensonCompletionBinding ? { bensonCompletionBinding: entry.bensonCompletionBinding } : {},
+ 		completionRequesterSessionId: pendingPayload.completionRequesterSessionId,
+ 		wakeOnDescendantSettle: pendingPayload.wakeOnDescendantSettle === true,
+ 		suppressChildSessionEffects: suppressSessionEffects,
+@@ -2384,7 +2385,7 @@
+ 				restoreEntrySnapshot(entrySnapshot);
+ 				throw error;
+ 			}
+-			if (!suppressTaskFinalization) finalizeSubagentTaskRun(params, {
++			if (!suppressTaskFinalization && !(entry.bensonCompletionBinding && executionOutcome.status === "ok")) finalizeSubagentTaskRun(params, {
+ 				entry,
+ 				outcome: executionOutcome
+ 			});
+@@ -3416,6 +3417,7 @@
+ 		cleanup: registerParams.cleanup,
+ 		expectsCompletionMessage: registerParams.expectsCompletionMessage,
+ 		completionTarget: registerParams.completionTarget,
++		...registerParams.bensonCompletionBinding ? { bensonCompletionBinding: registerParams.bensonCompletionBinding } : {},
+ 		completionRequesterSessionId: registerParams.completionRequesterSessionId,
+ 		spawnMode,
+ 		label: registerParams.label,
+@@ -6153,7 +6155,7 @@
+ 			scheduleSubagentRegistrySweep();
+ 			return;
+ 		}
+-		if (entry.execution.outcome && entry.suppressAnnounceReason !== "steer-restart") finalizeSubagentTaskRun(subagentLifecycleController.options, {
++		if (entry.execution.outcome && !entry.bensonCompletionBinding && entry.suppressAnnounceReason !== "steer-restart") finalizeSubagentTaskRun(subagentLifecycleController.options, {
+ 			entry,
+ 			outcome: entry.execution.outcome
+ 		});
