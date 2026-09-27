@@ -71,6 +71,32 @@ concrete benefit and explicit approval.
 If a repair changes an architectural boundary, stop after Decide, compare viable
 designs, and obtain Oren's approval.
 
+## Oren learning and explanations
+
+A primary goal of the Benson project is for Oren to deeply understand the
+system and develop practical Agentic Systems / Harness Architecture expertise.
+
+At each meaningful implementation stage, blocker, design decision, or runtime
+change, give Oren a brief, coherent explanation in clear Hebrew covering:
+
+- where the work sits in the overall Benson flow and why it is needed now;
+- the concrete problem or invariant being addressed and what can fail without it;
+- which component, owner, or architectural boundary is responsible and why;
+- what is being inspected or changed and how the solution works conceptually;
+- what class of failures the solution prevents;
+- what concrete evidence will prove the stage or change is complete;
+- when useful, relate it to familiar distributed-systems concepts such as
+  ownership, durable state, correlation, retries, idempotency, concurrency,
+  async execution, consistency, or service boundaries.
+
+Keep explanations concise, accessible, and coherent. Prefer plain language over
+raw implementation detail, and define unfamiliar agentic/OpenClaw terminology
+when needed.
+
+Do not repeat plan content or history unnecessarily. Explain at meaningful
+transitions and then continue autonomously; do not stop work merely to narrate
+progress.
+
 ## Efficient Benson execution
 
 Batch related safe work into meaningful units.
