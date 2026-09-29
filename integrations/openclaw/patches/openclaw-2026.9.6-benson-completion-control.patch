@@ -440,7 +440,7 @@
 @@ -0,0 +1,2 @@
 +import { finalizeNativeAgentCompletion } from "file:///home/oa/projects/benson/integrations/openclaw/benson-routing/completion-control.mjs";
 +import { n as recordModelFallbackStop } from "./model-fallback-stop-B0RY23Zf.mjs";
-@@ -610 +612,191 @@
+@@ -610 +612,192 @@
 -export { bumpAgentRunIndexVersion as A, resolveProjectedAgentRunModel as C, sweepStaleRunContexts as D, rotateAgentRunRegistryLifecycleGeneration as E, getAgentEventExecutionContext as M, recordAgentEventRouting as N, validateAgentRunDelegatedAuthority as O, resetAgentRunRegistryForTest as S, retainQueuedAgentRunContext as T, registerAgentRunContext as _, clearAgentRunContext as a, releaseAgentRunContext as b, getAgentRunContext as c, getAgentRunLifecycleGeneration as d, hasAgentRunContextExecutionOwner as f, recordCronNextCheckProposal as g, recordAgentRunModel as h, claimAgentRunDelegatedAuthority as i, iterateProjectedAgentRunSessionKeys as j, recordAgentRunOutputTokens as k, getAgentRunContextOwnerStatus as l, listAgentRunsForSession as m, claimAgentRunApprovalAuthority as n, consumeCronNextCheckProposal as o, hasLiveAgentRunContext as p, claimAgentRunContext as r, getActiveAgentRunDelegatedAuthority as s, buildProjectedAgentRunIndex as t, getAgentRunContextOwnership as u, registerAgentRunDelegatedAuthorityClosedHandler as v, resolveProjectedAgentRunProgressState as w, releaseAgentRunDelegatedAuthority as x, registerAgentRunSequenceResetHandler as y };
 +// Native execution evidence belongs to the admitted run context, never progress events.
 +function getOrCreateRunExecutionEvidence(context) {
@@ -542,7 +542,7 @@
 +  const complete = execution?.instanceId === binding.instanceId && execution.lifecycleGeneration === binding.lifecycleGeneration &&
 +    execution.complete === true && execution.activeAttempts === 0 && execution.activeExecutions === 0 && execution.settledAttempts > 0;
 +  let candidate = candidateOverride;
-+  if (owner.boundary.record && (result?.meta?.bensonCompletion === owner.boundary.record || result?.meta?.finalAssistantRawText === JSON.stringify(owner.boundary.record))) {
++  if (owner.boundary.record && (candidateOverride === null || result?.meta?.bensonCompletion === owner.boundary.record || result?.meta?.finalAssistantRawText === JSON.stringify(owner.boundary.record))) {
 +    const text = JSON.stringify(owner.boundary.record);
 +    return { ...result, payloads: [{ text }], meta: { ...result?.meta, finalAssistantRawText: text, finalAssistantVisibleText: text, bensonCompletion: owner.boundary.record } };
 +  }
@@ -623,6 +623,7 @@
 +  const captured = getAgentEventExecutionContext().getStore()?.bensonRunOwnership;
 +  const boundary = context?.bensonCompletionBoundary;
 +  if (!boundary || captured?.runId === event.runId && (captured.context !== context || captured.boundary !== boundary) ||
++      event.lifecycleGeneration && event.lifecycleGeneration !== context.lifecycleGeneration ||
 +      boundary.lifecycleGeneration !== getAgentRunLifecycleGeneration() ||
 +      context.delegatedAuthority && context.delegatedAuthority.operationalRunInstance !== boundary.instance) return false;
 +  if (boundary.nonterminal) return true;
@@ -648,14 +649,23 @@
 @@ -0,0 +1,2 @@
 +import { M as getAgentEventExecutionContext } from "./agent-run-registry-DO6Dg2r0.mjs";
 +import { withBensonNativeCompletion, finishBensonNativeCompletion, guardBensonNativeAgentCallbacks } from "./agent-run-registry-DO6Dg2r0.mjs";
-@@ -8882 +8884 @@
+@@ -2891 +2893,5 @@
+-			})) throw new Error(`Could not record superseded writer outcome: ${previousWriterRunId}`);
++			})) {
++				// Terminal publication waits for the previous run to settle after cancellation.
++				const pending = getAgentRunContext(previousWriterRunId)?.bensonCompletionBoundary;
++				if (!pending || pending.record) throw new Error(`Could not record superseded writer outcome: ${previousWriterRunId}`);
++			}
+@@ -8882 +8888 @@
 -	return withAgentRunLifecycleGeneration(lifecycleGeneration, () => runEmbeddedAgentInternal({
 +	return withAgentRunLifecycleGeneration(lifecycleGeneration, () => withBensonNativeCompletion({ ...internalParamsInput, lifecycleGeneration }, () => runEmbeddedAgentInternal(guardBensonNativeAgentCallbacks({
-@@ -8887 +8889 @@
+@@ -8887 +8893 @@
 -	}));
 +	}))));
-@@ -9328,0 +9331 @@
+@@ -9328,0 +9335 @@
 +				result = finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, result);
+@@ -9340,0 +9348 @@
++				finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, { meta: { aborted: error?.name === "AbortError" } }, null);
 --- a/dist/cli-runner-DQ-f1RtK.mjs
 +++ b/dist/cli-runner-DQ-f1RtK.mjs
 @@ -0,0 +1 @@
@@ -671,6 +681,51 @@
 -	return await runWithCliHistoryWriter(context.cliHistoryWriter, run);
 +	const run = () => runPreparedCliAgentOwned({ ...context, params: guardBensonNativeAgentCallbacks(context.params) }, diagnosticLifecycle);
 +	return withAgentRunLifecycleGeneration(context.params.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(context.params.runId), () => withBensonNativeCompletion(context.params, () => runWithCliHistoryWriter(context.cliHistoryWriter, run)));
+--- a/dist/agent-command-Dyd2gex-.mjs
++++ b/dist/agent-command-Dyd2gex-.mjs
+@@ -0,0 +1 @@
++import { withBensonNativeCompletion, beginAgentRunExecutionEvidence, finishBensonNativeCompletion, M as getAgentEventExecutionContext } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -1421 +1422,2 @@
+-		await params.acpManager.runTurn({
++		const acpExecutionEvidence = beginAgentRunExecutionEvidence(admittedRunContext, false);
++		try { await params.acpManager.runTurn({
+@@ -1470 +1472 @@
+-		});
++		}); } finally { acpExecutionEvidence.settle(false); }
+@@ -1478,0 +1481,2 @@
++		finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership,
++			{ meta: { aborted: params.opts.abortSignal?.aborted === true } }, null);
+@@ -1492,3 +1496,12 @@
+-	const finalTextRaw = visibleTextAccumulator.finalizeRaw();
+-	const finalText = visibleTextAccumulator.finalize();
+-	const terminalReply = visibleTextAccumulator.finalizeReplySnapshot();
++	const rawFinalText = visibleTextAccumulator.finalize();
++	let result = applyAgentRunAbortMetadata(attemptExecutionRuntime.buildAcpResult({
++		payloadText: rawFinalText,
++		terminalReply: visibleTextAccumulator.finalizeReplySnapshot(),
++		startedAt, stopReason, resultStatus, abortSignal: params.opts.abortSignal
++	}), params.opts.abortSignal);
++	result = finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, result);
++	const finalTextRaw = result.meta.finalAssistantRawText;
++	const terminalReplyAccumulator = attemptExecutionRuntime.createAcpVisibleTextAccumulator();
++	terminalReplyAccumulator.consume(finalTextRaw);
++	const terminalReply = terminalReplyAccumulator.finalizeReplySnapshot();
++	result.meta.terminalReply = terminalReply;
+@@ -1561,8 +1573,0 @@
+-	const result = applyAgentRunAbortMetadata(attemptExecutionRuntime.buildAcpResult({
+-		payloadText: finalText,
+-		terminalReply,
+-		startedAt,
+-		stopReason,
+-		resultStatus,
+-		abortSignal: params.opts.abortSignal
+-	}), params.opts.abortSignal);
+@@ -3731 +3736 @@
+-				return await runAcpAgentCommand({
++				return await withBensonNativeCompletion({ runId, agentId: sessionAgentId, sessionKey, sessionId, lifecycleGeneration, preparedRunAdmission }, () => runAcpAgentCommand({
+@@ -3754 +3759 @@
+-				});
++			}));
 --- a/dist/auth-profile-failure-policy-BlqvJ9aj.mjs
 +++ b/dist/auth-profile-failure-policy-BlqvJ9aj.mjs
 @@ -0,0 +1 @@

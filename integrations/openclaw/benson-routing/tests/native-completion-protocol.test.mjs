@@ -440,3 +440,158 @@ nativeTest('native lifecycle rotation invalidates retained finalization owner', 
   registry.E(); assert.equal(registry.O(f.authority), false);
   assert.throws(() => registry.finishBensonNativeCompletion(owner, f.result()), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
 });
+
+nativeTest('ACP native admission cannot persist, publish, or deliver raw terminal output', async () => {
+  const source = readFileSync(join(root, 'dist', 'agent-command-Dyd2gex-.mjs'), 'utf8');
+  assert.match(source, /return await withBensonNativeCompletion\([^\n]+runAcpAgentCommand\(/u);
+  for (const failureName of [null, 'Error', 'TimeoutError', 'AbortError']) {
+    const f = await fixture();
+    const writes = []; const eventsSeen = []; let text = '';
+    const runtime = {
+      createAcpToolLifecycleTracker: () => ({}), emitAcpLifecycleStart: () => {},
+      createAcpVisibleTextAccumulator: () => {
+        let value = '';
+        return { consume: chunk => { value += chunk; return { text: value, delta: chunk }; },
+          finalize: () => value.trim(), finalizeRaw: () => value,
+          finalizeReplySnapshot: () => ({ disposition: 'visible', text: value }) };
+      },
+      emitAcpRuntimeEvent: () => {}, emitAcpAssistantDelta: () => {},
+      resolveAcpLifecycleEndFields: () => ({}),
+      buildAcpResult: params => ({ payloads: [{ text: params.payloadText }], meta: { terminalReply: params.terminalReply } }),
+      persistAcpTurnTranscript: async params => {
+        assert.ok(f.context.bensonCompletionBoundary.record);
+        writes.push(['transcript', params.finalText]); return { sessionEntry: {} };
+      },
+      emitAcpLifecycleEnd: params => {
+        assert.ok(f.context.bensonCompletionBoundary.record);
+        writes.push(['terminal', params.terminalReply.text]);
+      },
+      emitAcpLifecycleError: () => {
+        assert.ok(f.context.bensonCompletionBoundary.record);
+        eventsSeen.push('error');
+      }
+    };
+    const acp = nativeFunction('agent-command-Dyd2gex-.mjs', 'runAcpAgentCommand', {
+      Date, Error, getInstallationTarget: () => undefined,
+      loadAttemptExecutionRuntime: async () => runtime,
+      isSubagentCoordinationInputProvenance: () => false,
+      registerAgentRunContext: registry._,
+      loadAcpPolicyRuntime: async () => ({ resolveAcpDispatchPolicyError: () => undefined,
+        resolveAcpAgentPolicyError: () => undefined }),
+      normalizeAgentId: value => value, resolveInlineAgentImageAttachments: () => [],
+      assertAgentRunLifecycleGenerationCurrent: () => {},
+      createLazyAcpElicitationHandler: () => undefined,
+      getAdmittedRunDelegatedAuthority: () => f.authority,
+      isAgentRunRestartAbortReason: () => false,
+      loadAcpRuntimeErrorsRuntime: async () => ({ toAcpRuntimeError: ({ error }) => error }),
+      loadAcpSessionIdentifiersRuntime: async () => ({ resolveAcpSessionCwd: () => undefined }),
+      buildAgentRunTerminalOutcomeFromLifecycleEvent: () => ({}),
+      applyAgentRunAbortMetadata: value => value,
+      loadDeliveryRuntime: async () => ({ deliverAgentCommandResult: async params => {
+        assert.ok(f.context.bensonCompletionBoundary.record);
+        writes.push(['delivery', params.payloads[0].text]); return params.result;
+      } }),
+      classifyAgentRunTerminalOutcome: () => 'success', recordAgentRunTerminalOutcome: value => value,
+      beginAgentRunExecutionEvidence: registry.beginAgentRunExecutionEvidence,
+      finishBensonNativeCompletion: registry.finishBensonNativeCompletion,
+      getAgentEventExecutionContext: registry.M
+    });
+    const preparedRunAdmission = { operationalRunInstance: f.admitted.operationalRunInstance,
+      admit: async () => f.admitted };
+    const params = { ...f.params, sessionAgentId: 'main', preparedRunAdmission,
+      opts: {}, cfg: {}, acpResolution: { meta: { agent: 'main' } },
+      trackInternalModelRunTarget: () => {},
+      acpManager: { runTurn: async callbacks => {
+        if (failureName) { const error = new Error('fixture ACP failure'); error.name = failureName; throw error; }
+        text = 'RAW_ACP_FINAL';
+        callbacks.onEvent({ type: 'text_delta', text });
+        callbacks.onEvent({ type: 'done', status: 'success', stopReason: 'end_turn' });
+      } } };
+    const run = () => registry.withBensonNativeCompletion({ ...params, agentId: 'main' }, () => acp(params));
+    if (failureName) {
+      await assert.rejects(run(), error => {
+        assert.equal(error.name, failureName);
+        assert.equal(error.bensonCompletion.completion.outcome, 'FAILED'); return true;
+      });
+      assert.deepEqual(eventsSeen, ['error']); assert.deepEqual(writes, []);
+    } else {
+      const result = await run();
+      assert.equal(result.meta.bensonCompletion.completion.outcome, 'FAILED');
+      assert.equal(f.context.executionEvidence.complete, false);
+      assert.deepEqual(writes.map(([kind]) => kind), ['transcript', 'terminal', 'delivery']);
+      for (const [, value] of writes) {
+        assert.deepEqual(JSON.parse(value), plain(result.meta.bensonCompletion));
+        assert.equal(value.includes(text), false);
+      }
+      assert.equal(result.meta.terminalReply.text.includes(text), false);
+      assert.deepEqual(JSON.parse(result.payloads[0].text), plain(result.meta.bensonCompletion));
+    }
+    f.attempt.settle(true);
+  }
+});
+
+nativeTest('native writer supersession cancels before a deferred canonical terminal is published', async () => {
+  const f = await fixture(); const seen = []; const off = events.f(event => seen.push(event));
+  try {
+    registry.beginBensonNativeCompletion(f.params);
+    let cancelled = 0;
+    const supersede = nativeFunction('runs-BGbFdTuu.mjs', 'supersedeEmbeddedAgentRunByRunId', {
+      ACTIVE_EMBEDDED_RUNS_BY_RUN_ID: new Map([[f.params.runId, { cancel: () => { cancelled++; } }]]),
+      isEmbeddedRunHandleSupersedable: () => true,
+      supersedeReplyRunByRunId: () => { throw new Error('wrong native run owner'); }
+    });
+    const claim = nativeFunction('embedded-agent-BaH7wGBd.mjs', 'claimAgentSessionWriter', {
+      assertAgentHarnessRunAdmission: () => ({ entry: { sessionId: f.params.sessionId,
+        lifecycleRevision: 1, activeWriterRunId: f.params.runId },
+        sessionKey: f.params.sessionKey, agentId: 'main' }),
+      normalizeOptionalString: value => value,
+      updateSessionEntry: async (_target, update) => update({ sessionId: f.params.sessionId,
+        lifecycleRevision: 1, activeWriterRunId: f.params.runId }),
+      supersedeEmbeddedAgentRunByRunId: supersede,
+      getAgentRunContext: registry.c, emitAgentEventIfCurrent: events.s,
+      log$3: { warn: () => {} }, sanitizeForLog: value => value,
+      redactRunIdentifier: value => value
+    });
+    await claim({ runId: 'successor-writer', sessionId: f.params.sessionId });
+    assert.equal(cancelled, 1); assert.equal(seen.length, 0);
+    f.attempt.settle(true);
+    const error = new Error('native cancellation'); error.name = 'AbortError';
+    await assert.rejects(registry.withBensonNativeCompletion(f.params, async () => { throw error; }), actual => {
+      assert.equal(actual, error); assert.equal(actual.bensonCompletion.completion.outcome, 'RECOVERED'); return true;
+    });
+    assert.equal(events.s({ runId: f.params.runId, stream: 'lifecycle',
+      data: { phase: 'error', aborted: true, endedAt: Date.now() } }), true);
+    assert.equal(seen.length, 1);
+    assert.equal(seen[0].data.completionOutcome, 'RECOVERED');
+  } finally { off(); }
+});
+
+nativeTest('embedded native error catch finalizes before settlement and emits exactly one canonical terminal', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const source = readFileSync(join(root, 'dist', 'embedded-agent-BaH7wGBd.mjs'), 'utf8');
+  const nativeCatch = source.match(/\} catch \(error\) \{\n\t{4}finishBensonNativeCompletion[^]*?\n\t{3}\}/u)?.[0];
+  assert.ok(nativeCatch, 'native error catch must finalize before settling or emitting');
+  const observed = []; const off = events.f(event => observed.push(event));
+  try {
+    const terminal = { emit: (phase, error) => events.s({ runId: f.params.runId,
+      stream: 'lifecycle', data: { phase, error: error.message, endedAt: Date.now() } }) };
+    const failure = new Error('fixture embedded failure');
+    const nativeFailure = new vm.Script(`(async (error) => { try { throw error; ${nativeCatch} })`).runInNewContext({
+      params: {}, terminal,
+      getAgentEventExecutionContext: registry.M,
+      finishBensonNativeCompletion: registry.finishBensonNativeCompletion,
+      settleFailedRequesterRun: (_params, error) => {
+        assert.ok(f.context.bensonCompletionBoundary.record, 'settlement preceded canonical completion');
+        return error;
+      },
+      resolveSessionPlacementTurnSettlementAssertion: () => () => {}
+    });
+    await assert.rejects(registry.withBensonNativeCompletion(f.params, () => nativeFailure(failure)), actual => {
+      assert.equal(actual, failure);
+      assert.equal(actual.bensonCompletion.completion.outcome, 'RECOVERED'); return true;
+    });
+    assert.equal(observed.length, 1);
+    assert.equal(observed[0].data.phase, 'error');
+    assert.equal(observed[0].data.completionOutcome, 'RECOVERED');
+  } finally { off(); }
+});
