@@ -1,0 +1,1153 @@
+--- a/dist/agent-runner.runtime-DH-TOu7I.mjs
++++ b/dist/agent-runner.runtime-DH-TOu7I.mjs
+@@ -5415,7 +5415,7 @@
+ 			});
+ 			return stripped.shouldSkip ? "" : stripped.text || pendingText;
+ 		})() : pendingText;
+-		const sendableFinalPayloads = sourceReplyPolicy.suppressDelivery ? [] : finalPayloads.filter((payload) => normalizePendingFinalDeliveryPayloads([payload]).length > 0);
++		const sendableFinalPayloads = sourceReplyPolicy.suppressDelivery || opts?.bensonManagedFinal === true ? [] : finalPayloads.filter((payload) => normalizePendingFinalDeliveryPayloads([payload]).length > 0);
+ 		if (sendableFinalPayloads.length > 0) {
+ 			const pendingFinalDeliveryIntentId = crypto.randomUUID();
+ 			const expectedSessionId = activeSessionEntry?.sessionId ?? followupRun.run.sessionId;
+@@ -7812,11 +7812,13 @@
+ 	const runStartedAt = Date.now();
+ 	if (await admitUserTurn(followupRun.userTurnTranscriptRecorder) === "duplicate-source") return returnWithQueuedFollowupDrain(void 0);
+ 	await turnAdoptionLifecycle?.onAdopted();
++	let bensonHookHandled = false;
+ 	const runOutcome = await withBeforeAgentReplyObserver({
+ 		beforeDispatch: async () => {
+ 			return await beginBeforeAgentReply();
+ 		},
+ 		afterDispatch: async (hookResult) => {
++			if (hookResult?.handled && opts?.bensonManagedFinal === true) bensonHookHandled = true;
+ 			if (!hookResult?.handled) {
+ 				await checkpointBeforeAgentReply({ state: void 0 });
+ 				return hookResult;
+@@ -7825,7 +7827,7 @@
+ 			const hookFinalDeliveryText = buildRecoverablePendingFinalDeliveryText([hookReply]);
+ 			const normalizedHookReplies = normalizePendingFinalDeliveryPayloads([hookReply]);
+ 			let hookCheckpoint = { state: normalizedHookReplies.length === 0 ? "handled-silent" : "pending" };
+-			if (sessionKey && storePath && normalizedHookReplies.length > 0) {
++			if (sessionKey && storePath && normalizedHookReplies.length > 0 && opts?.bensonManagedFinal !== true) {
+ 				if (!resolveSourceReplyPolicy({
+ 					cfg,
+ 					sessionCtx,
+@@ -7877,6 +7879,7 @@
+ 		resolveVisibleReplyDelivery: input.resolveVisibleReplyDelivery,
+ 		replyThreading: replyThreadingOverride ?? sessionCtx.ReplyThreading
+ 	})));
++	if (bensonHookHandled && runOutcome.runId) opts.onAgentRunStart?.(runOutcome.runId);
+ 	const operationSuperseded = isReplyOperationSuperseded(replyOperation);
+ 	recordReplyOperationAgentTurn(followupRun.replyOperationRunStates, replyOperation, runOutcome.outcome);
+ 	activeSessionEntry = getActiveSessionEntry();
+--- a/dist/agent-tools.before-tool-call-D6M7yTR3.mjs
++++ b/dist/agent-tools.before-tool-call-D6M7yTR3.mjs
+@@ -16,6 +16,7 @@
+ import { i as getNodeSqliteKysely, t as compileSqliteQueryBindings } from "./kysely-sync-Bn6Qrpbz.mjs";
+ import "./automations-tool-name-DBMZPbPL.mjs";
+ import { l as normalizeToolPolicyName } from "./tool-policy-shared-auQCQEhM.mjs";
++import { i as isMessagingToolDeliveryAction } from "./embedded-agent-messaging-CgnP51Zf.mjs";
+ import "./tool-policy-YDdaK0oX.mjs";
+ import { t as notifyListeners } from "./listeners-BogSNJ-R.mjs";
+ import { r as getRuntimeConfig } from "./io.runtime-hPN4FOBi.mjs";
+@@ -2786,6 +2787,13 @@
+ async function runBeforeToolCallHook(args) {
+ 	const toolName = normalizeToolPolicyName(args.toolName || "tool");
+ 	const params = args.params;
++	if (args.ctx?.sessionKey && isMessagingToolDeliveryAction(toolName,
++		params && typeof params === "object" ? params : {})) {
++		const { h: replyRunRegistry } = await import("./reply-run-registry.registry-BoHW1D6q.mjs");
++		if (replyRunRegistry.get(args.ctx.sessionKey)?.bensonManagedFinal === true)
++			return { blocked: true, kind: "veto", deniedReason: "benson-final-egress",
++				reason: "Benson owns this interactive final through native Response Controller", params };
++	}
+ 	let loopWarning;
+ 	const withLoopWarning = (outcome) => {
+ 		if (!outcome.blocked && loopWarning) outcome.loopWarning = loopWarning;
+--- a/dist/dispatch-from-config-Cu599NRF.mjs
++++ b/dist/dispatch-from-config-Cu599NRF.mjs
+@@ -1,3 +1,8 @@
++import { t as captureOpenClawStateWorkerContext } from "./openclaw-state-worker-context-Dn3_Z_Oi.mjs";
++import { B as admitBensonInteractiveFinal, o as failSessionDelivery } from "./session-delivery-queue-storage-DSTuGS2l.mjs";
++import { B as prepareBensonInteractiveFinalAdmission } from "./session-delivery-queue.records-rYJIeHGW.mjs";
++import { L as scheduleSessionDelivery } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
++import { f as listSubagentRunsForController } from "./subagent-registry-read-C2SIiLpb.mjs";
+ import { o as asDateTimestampMs } from "./number-coercion-CLj0HTDM.mjs";
+ import { i as resolveGlobalSingleton } from "./global-singleton-Dc_stLtU.mjs";
+ import { c as normalizeOptionalLowercaseString, l as normalizeOptionalString, o as normalizeLowercaseStringOrEmpty } from "./string-coerce-CIXf7egm.mjs";
+@@ -634,7 +639,7 @@
+ 	if (state.isPreDispatchOperationAborted()) return blocked("bypass", "cancelled");
+ 	const requestId = readChannelSourceTurnId(ctx);
+ 	const sessionKey = state.sessionStoreEntry.sessionKey ?? state.sessionKey;
+-	if (!requestId || !sessionKey) return blocked("main_only", "identity_unavailable");
++	if (!requestId || !sessionKey) return blocked("bypass", "identity_unavailable");
+ 	if (state.inboundAudio || ctx.media?.length > 0) {
+ 		return blocked("main_only", "unsupported_input", requestId, sessionKey);
+ 	}
+@@ -653,7 +658,8 @@
+ }
+ async function chooseDispatchRoute(state) {
+ 	const { acpDispatchSessionKey, attachSourceReplyDeliveryMode, cfg, commitInboundDedupeIfClaimed, completeDispatchReplyOperation, ctx, deliveryChannel, dispatcher, getPreDispatchAbortSignal, hookRunner, isRoutedReplyDelivered, markIdle, markInboundDedupeReplayUnsafe, params, recordProcessed, replyContextAccountId, replyRoute, resolvePreparedTranscriptBinding, routeReplyChannel, routeReplyThreadId, routeReplyTo, runWithDispatchLifecycleAdmission, sendPayloadAsync, sessionAgentId, sessionKey, sessionStoreEntry, sessionTtsAuto, shouldEmitVerboseProgress, shouldRouteToOriginating, traceReplyPhase, trackDispatchLifecycleWork, turnLedger } = state;
+-	const shouldSuppressProgressDelivery = () => state.sendPolicyDenied || state.suppressDelivery && !shouldDeliverVerboseProgressDespiteSourceSuppression();
++	const shouldSuppressProgressDelivery = () => state.bensonManagedFinal?.status === "admitted" ||
++		state.sendPolicyDenied || state.suppressDelivery && !shouldDeliverVerboseProgressDespiteSourceSuppression();
+ 	const shouldSuppressDefaultToolProgressMessages = () => params.replyOptions?.suppressToolProgressMessages === true || !shouldEmitVerboseProgress();
+ 	const shouldSendVerboseProgressMessages = () => !shouldSuppressDefaultToolProgressMessages();
+ 	const shouldSendToolSummaries = () => shouldSendVerboseProgressMessages();
+@@ -750,6 +756,8 @@
+ 		return settled.find(({ outcome }) => outcome === "delivered") ?? settled.find(({ outcome, pending }) => pending || !shouldRetryReplyDispatch(outcome)) ?? settled[0];
+ 	};
+ 	const sendFinalPayload = async (inputPayload, options = {}) => {
++		if (!isBensonManagedEgressAllowed(state.bensonManagedFinal?.status === "admitted", "final", inputPayload))
++			return { queuedFinal: false, routedFinalCount: 0 };
+ 		const abortSignal = options.abortSignal === false ? void 0 : options.abortSignal ?? state.getDispatchAbortSignal();
+ 		const throwIfFinalDeliveryAborted = () => {
+ 			if (abortSignal?.aborted) throw new DispatchReplyOperationAbortedError();
+@@ -1245,7 +1253,12 @@
+ 	const settledOutcome = await runWithDispatchAbortSignal(params.abortSignal, () => outcome);
+ 	if (settledOutcome !== "delivered") throw new ReplyDispatchDeliveryError(settledOutcome);
+ }
++function isBensonManagedEgressAllowed(managed, kind, payload) {
++	return !managed || kind !== "final" && (hasAskUserPayload(payload) ||
++		hasExecApprovalPayload(payload) || hasExecApprovalUnavailablePayload(payload));
++}
+ function createReplyTurnLedger(dispatcher) {
++	let bensonManaged = false;
+ 	const outcomes = /* @__PURE__ */ new Set();
+ 	let pendingDelivery = false;
+ 	let terminalDelivery = "missing";
+@@ -1265,6 +1278,7 @@
+ 	};
+ 	const sendOperation = (kind, operation) => {
+ 		const payload = operation.kind === "prepared" ? operation.plan.payload : operation.payload;
++		if (!isBensonManagedEgressAllowed(bensonManaged, kind, payload)) return { queued: false };
+ 		const capture = dispatcher.supportsSettledReceipt === true ? captureReplyDispatchDeliveryOutcome(payload) : void 0;
+ 		if (!(operation.kind === "prepared" && dispatcher.sendPreparedReply ? dispatcher.sendPreparedReply(kind, operation.plan) : enqueue(kind, payload))) return { queued: false };
+ 		if (!capture || !capture.isTracked()) {
+@@ -1281,6 +1295,7 @@
+ 		};
+ 	};
+ 	return {
++		setBensonManaged: () => { bensonManaged = true; },
+ 		sendQueued: (kind, payload) => sendOperation(kind, {
+ 			kind: "raw",
+ 			payload
+@@ -1350,8 +1365,8 @@
+ }
+ async function commitBensonNativeOwner(state, decision) {
+ 	const admission = state.bensonRequestAdmission;
+-	if (admission?.kind !== "candidate") return { status: "bypass" };
+-	if (decision?.route !== "main" || decision?.eligible !== false) return { status: "direct_unavailable" };
++	if (admission?.kind !== "candidate" && admission?.kind !== "main_only") return { status: "bypass" };
++	if (admission.kind === "candidate" && (decision?.route !== "main" || decision?.eligible !== false)) return { status: "direct_unavailable" };
+ 	if (state.isDispatchOperationAborted()) return { status: "cancelled" };
+ 	const session = state.operationSessionStoreEntry;
+ 	if (!session?.storePath || session.sessionKey !== admission.sessionKey ||
+@@ -1369,10 +1384,15 @@
+ 		if (!Array.isArray(commitments) || commitments.length > 1024 ||
+ 			commitments.some((item) => !item || typeof item !== "object" ||
+ 				typeof item.requestId !== "string" || typeof item.sessionId !== "string" ||
+-				item.owner !== "main" || item.phase !== "committed"))
++				!["main", "jessica-vacuum", "reminder-service"].includes(item.owner) || item.phase !== "committed"))
+ 			throw new Error("Benson commitment history invalid");
+-		if (commitments.some((item) => item.requestId === requestId))
++		const prior = commitments.filter((item) => item.requestId === requestId);
++		if (prior.length > 0) {
++			if (prior.length !== 1 || prior[0].owner !== "main" ||
++				prior[0].sessionId !== expectedSessionId)
++				throw new Error("Benson commitment owner conflict");
+ 			return;
++		}
+ 		if (commitments.length === 1024) throw new Error("Benson commitment capacity reached");
+ 		created = true;
+ 		return { bensonDecisionCommitments: [...commitments, {
+@@ -1390,18 +1410,105 @@
+ 		throw new Error("Benson commitment persistence unverified");
+ 	return { status: created ? "committed" : "already_committed", owner: "main" };
+ }
++async function admitBensonNativeFinalAtMainBoundary(state) {
++	const admission = state.bensonRequestAdmission;
++	if (admission?.kind !== "candidate" && admission?.kind !== "main_only") return null;
++	const session = state.operationSessionStoreEntry;
++	if (!session?.storePath || session.sessionKey !== admission.sessionKey ||
++		!session.entry?.sessionId) throw new Error("Benson final owning session unavailable");
++	const context = {
++		channel: state.ctx.OriginatingChannel, to: state.ctx.OriginatingTo,
++		accountId: state.ctx.AccountId, threadId: state.ctx.MessageThreadId
++	};
++	const ownerFacts = { sessionKey: admission.sessionKey,
++		sessionId: session.entry.sessionId, requestId: admission.requestId,
++		sourceType: "main", deliveryContext: context };
++	const queueEntry = prepareBensonInteractiveFinalAdmission(ownerFacts);
++	const queueContext = captureOpenClawStateWorkerContext();
++	const owner = await admitBensonInteractiveFinal(ownerFacts, queueContext);
++	if (!owner.claimed) return { status: "duplicate", owner };
++	state.markInboundDedupeReplayUnsafe();
++	state.turnLedger.setBensonManaged();
++	state.getDispatchReplyOperation().bensonManagedFinal = true;
++	return { status: "admitted", owner, queueContext, queueEntry,
++		scope: { agentId: "main", sessionKey: admission.sessionKey,
++			sessionId: session.entry.sessionId, storePath: session.storePath } };
++}
++async function prepareBensonMainDispatchFinal(state, failureCode) {
++	const managed = state.bensonManagedFinal;
++	if (managed?.status !== "admitted") throw new Error("Benson Main final admission unavailable");
++	const { createMainResponseEnvelope } = await import("file:///home/oa/projects/benson/integrations/openclaw/benson-routing/envelope.mjs");
++	const { C: prepareFinal } = await import("./dispatch-from-config.finalize-B25V5wMZ.mjs");
++	const runId = state.getAgentRunId();
++	if (typeof runId !== "string" || !runId.trim())
++		throw new Error("Benson Main native run identity unavailable");
++	const requestId = managed.queueEntry.requestId;
++	const childRuns = listSubagentRunsForController(managed.scope.sessionKey, "main")
++		.filter((item) => item.bensonCompletionBinding?.requestId === requestId &&
++			item.bensonCompletionBinding?.parentSessionId === managed.scope.sessionId);
++	const completions = childRuns.flatMap((item) => item.bensonCompletionAdmission ? [{
++		binding: item.bensonCompletionBinding, admission: item.bensonCompletionAdmission
++	}] : []);
++	const childIncomplete = childRuns.length !== completions.length;
++	const observedWork = childRuns.length > 0 || state.bensonObservedToolWork === true ||
++		state.replyOperationRunState.backgroundWorkStarted === true;
++	const replies = Array.isArray(state.replyResult) ? state.replyResult :
++		state.replyResult ? [state.replyResult] : [];
++	const replyError = replies.some((reply) => reply?.isError === true);
++	const failed = Boolean(failureCode) || state.getAgentRunTerminalOutcome() === "failed" ||
++		childIncomplete || replyError;
++	const lifecycle = { domainExecution: observedWork ? "attempted" : failed ? "uncertain" : "none",
++		failure: failed ? { code: childIncomplete ? "CHILD_INCOMPLETE" :
++				failureCode ?? (replyError ? "MAIN_REPLY_ERROR" : "MAIN_RUN_FAILED") } :
++			observedWork && completions.length === 0 ? { code: "RESULT_UNAVAILABLE" } : null };
++	const language = "he";
++	const visible = replies.filter((reply) => !reply?.isReasoning && !reply?.isCommentary &&
++		typeof reply?.text === "string" && reply.text.trim());
++	const candidate = visible.length === 1 && visible[0].text.length <= 4096 &&
++		!visible[0].isError ? { text: visible[0].text, language } : null;
++	const responsePolicy = completions.length === 1 && !failed ? {
++		allowedModes: ["deterministic", "safe_failure"], preferredMode: "deterministic"
++	} : !observedWork && !failed ? {
++		allowedModes: ["pass_through", "safe_failure"], preferredMode: "pass_through"
++	} : { allowedModes: ["safe_failure"], preferredMode: "safe_failure" };
++	const envelope = createMainResponseEnvelope({ messageCandidate: candidate }, {
++		requestId, source: { type: "main", agentId: "main", runId },
++		parentSession: { sessionKey: managed.scope.sessionKey, sessionId: managed.scope.sessionId },
++		completions, lifecycle, responsePolicy
++	});
++	const prepared = await prepareFinal({ scope: managed.scope, queueEntry: managed.queueEntry,
++		responseEnvelope: envelope, referenceTime: Date.now(),
++		preferences: { nativeTimezone: state.cfg.agents?.defaults?.userTimezone } });
++	await scheduleSessionDelivery(managed.owner.id, managed.queueContext);
++	state.commitInboundDedupeIfClaimed();
++	state.recordProcessed("completed", { reason: "benson_native_final_prepared" });
++	state.markIdle("message_completed");
++	state.completeDispatchReplyOperation();
++	return { status: "complete", result: state.attachSourceReplyDeliveryMode({
++		queuedFinal: true, counts: state.dispatcher.getQueuedCounts(),
++		bensonFinalIntentId: prepared.intentId
++	}) };
++}
+ async function executeDispatch(state) {
+ 	const { cfg, commentaryPayloadsEnabled, ctx, deliveryChannel, deferFinalTtsText, dispatcher, failDispatchReplyOperation, flushPendingCommentaryProgress, getAgentRunTerminalOutcome, getDispatchAbortOperation, getDispatchAbortSignal, isDispatchOperationAborted, markInboundDedupeReplayUnsafe, markProgress, maybeApplyTtsWithFinalizationLease, normalizeReplyMediaPayload, notifySessionMetadataChanges, onToolResultFromReplyOptions, onReasoningStream, params, reasoningPayloadsEnabled, replyConfig, replyRoute, resolveToolDeliveryPayload, runWithDispatchLifecycleAdmission, sendPayloadAsync, sessionAgentId, sessionTtsAuto, shouldForwardProgressCallback, shouldRouteToOriginating, shouldSuppressDefaultToolProgressMessages, trackDispatchLifecycleWork, typing, waitForPendingDirectBlockReplyDelivery, wrapProgressCallback } = state;
+-	if (BENSON_ROUTING_PRODUCTION_ENABLED && state.bensonRequestAdmission?.kind === "candidate") {
+-		// The policy/model binding is unavailable. Only an explicit validated Main
+-		// selection can enter this staged commitment path.
+-		const commitment = await commitBensonNativeOwner(state, await resolveBensonStagedDecision());
++	if (BENSON_ROUTING_PRODUCTION_ENABLED && ["candidate", "main_only"].includes(state.bensonRequestAdmission?.kind)) {
++		const decision = state.bensonRequestAdmission.kind === "candidate" ?
++			await resolveBensonStagedDecision() : { route: "main", eligible: false };
++		if (decision.route !== "main" || decision.eligible !== false)
++			throw new Error("Benson direct lifecycle unavailable");
++		if (isDispatchOperationAborted()) throw new DispatchReplyOperationAbortedError();
++		state.bensonManagedFinal = await admitBensonNativeFinalAtMainBoundary(state);
++		if (state.bensonManagedFinal?.status === "duplicate") {
++			const result = state.finishReplyOperationBusyDispatch();
++			state.completeDispatchReplyOperation();
++			return { status: "complete", result };
++		}
++		const commitment = await commitBensonNativeOwner(state, decision);
+ 		if (commitment.status === "already_committed") {
+ 			const result = state.finishReplyOperationBusyDispatch();
+ 			state.completeDispatchReplyOperation();
+ 			return { status: "complete", result };
+ 		}
+-		if (commitment.status === "direct_unavailable") throw new Error("Benson direct lifecycle unavailable");
+ 		if (commitment.status === "cancelled") throw new DispatchReplyOperationAbortedError();
+ 	}
+ 	const replyResolver = bindPreparedReplyDispatchRuntime(params.configOverride ? void 0 : state.preparedReplyDispatchRuntime, state.replyResolver);
+@@ -1439,6 +1546,7 @@
+ 			...state.getReplyOptions(),
+ 			[REPLY_OPERATION_RUN_STATE]: state.replyOperationRunState,
+ 			sourceReplyDeliveryMode: state.sourceReplyDeliveryMode,
++			bensonManagedFinal: state.bensonManagedFinal?.status === "admitted",
+ 			sessionPromptSourceReplyDeliveryMode: state.sessionStableSourceReplyDeliveryMode,
+ 			...state.sourceReplyDeliveryRuntimeOptions,
+ 			mediaNormalizationOwner: state.isInternalWebchatTurn ? "gateway" : void 0,
+@@ -1478,7 +1586,9 @@
+ 				await params.replyOptions?.onQueuedFollowupSettled?.();
+ 			},
+ 			onBlockReplyQueued: wrapProgressCallback(params.replyOptions?.onBlockReplyQueued),
+-			onToolStart: wrapProgressCallback(params.replyOptions?.onToolStart, {
++			onToolStart: (...args) => {
++				if (state.bensonManagedFinal?.status === "admitted") state.bensonObservedToolWork = true;
++				return wrapProgressCallback(params.replyOptions?.onToolStart, {
+ 				allowWhenToolSummariesHidden: params.replyOptions?.allowToolLifecycleWhenProgressHidden === true,
+ 				forwardWhenSourceDeliverySuppressed: true,
+ 				requiresToolSummaryVisibility: true,
+@@ -1486,7 +1596,8 @@
+ 				onForward: async () => {
+ 					await flushPendingCommentaryProgress();
+ 				}
+-			}),
++				})?.(...args);
++			},
+ 			onItemEvent: state.onItemEvent,
+ 			commentaryProgressEnabled: state.deliverStandaloneCommentaryProgress || state.canForwardSuppressedSourceItemEvents || params.replyOptions?.commentaryProgressEnabled,
+ 			reasoningPayloadsEnabled,
+@@ -1509,6 +1620,7 @@
+ 				waitForDirectBlockReplyDelivery: true
+ 			}),
+ 			onToolResult: (payload) => {
++				if (state.bensonManagedFinal?.status === "admitted") state.bensonObservedToolWork = true;
+ 				if (state.replyOperationRunState.heartbeat) return Promise.resolve();
+ 				state.getDispatchReplyOperation()?.recordActivity();
+ 				markProgress();
+@@ -3114,6 +3226,8 @@
+ 	};
+ 	const routeReplyOperationToOriginating = async (operation, options) => {
+ 		const payload = operation.kind === "prepared" ? operation.plan.payload : operation.payload;
++		if (!isBensonManagedEgressAllowed(state.bensonManagedFinal?.status === "admitted",
++			options?.kind ?? "final", payload)) return null;
+ 		const durableRouteAuthorized = options?.deliveryIntentId !== void 0 && canRouteDurableBlockReply;
+ 		const runtime = routeReplyRuntime ?? (durableRouteAuthorized ? await loadRouteReplyRuntime() : void 0);
+ 		if (!shouldRouteToOriginating && !durableRouteAuthorized || !routeReplyChannel || !routeReplyTo || !runtime) {
+@@ -3328,6 +3442,7 @@
+ 	const shouldAllowQuietChannelOwnedProgressCallbacks = (options) => options?.requiresToolSummaryVisibility === true && (params.replyOptions?.suppressDefaultToolProgressMessages === true || options.allowWhenToolSummariesHidden === true);
+ 	const waitForPendingDirectBlockReplyDelivery = (abortSignal) => waitForReplyDispatcherIdle({ waitForIdle: () => progressState.pendingDirectBlockReplyDelivery }, abortSignal);
+ 	const shouldForwardProgressCallback = (options) => {
++		if (state.bensonManagedFinal?.status === "admitted") return false;
+ 		if (options?.requiresToolSummaryVisibility === true && !shouldSendToolSummaries() && !shouldAllowQuietChannelOwnedProgressCallbacks(options)) return false;
+ 		return !state.suppressAutomaticSourceDelivery || allowSuppressedSourceProgressCallbacks && !state.sendPolicyDenied && options?.forwardWhenSourceDeliverySuppressed === true;
+ 	};
+@@ -3791,11 +3906,34 @@
+ 			if (operation.status === "complete") return operation.result;
+ 			const route = await chooseDispatchRoute(operation.state);
+ 			if (route.status === "complete") return route.result;
+-			const executed = await executeDispatch((await prepareDispatchExecution(route.state)).state);
++			const executionState = (await prepareDispatchExecution(route.state)).state;
++			let executed;
++			try { executed = await executeDispatch(executionState); }
++			catch (runError) {
++				if (executionState.bensonManagedFinal?.status !== "admitted" ||
++					!executionState.getAgentRunId()) throw runError;
++				return (await prepareBensonMainDispatchFinal(executionState, "MAIN_RUN_FAILED")).result;
++			}
+ 			if (executed.status === "complete") return executed.result;
++			if (executed.state.bensonManagedFinal?.status === "admitted")
++				return (await prepareBensonMainDispatchFinal(executed.state)).result;
+ 			return (await finalizeDispatchAndAudit(executed.state)).result;
+ 		} catch (err) {
+ 			const { failDispatchReplyOperation, finishReplyOperationAbortedDispatch, inboundDedupeClaim, markIdle, recordAgentDispatchCompleted, recordProcessed } = errorState;
++			if (errorState.bensonManagedFinal?.status === "admitted" &&
++				!isDispatchReplyOperationAbortedError(err)) {
++				try { await failSessionDelivery(errorState.bensonManagedFinal.owner.id,
++					"Benson Main final requires native recovery", errorState.bensonManagedFinal.queueContext); }
++				catch (queueError) { logVerbose(`Benson Main recovery record failed: ${formatErrorMessage(queueError)}`); }
++				if (inboundDedupeClaim.status === "claimed") inboundDedupeClaim.commit();
++				recordAgentDispatchCompleted("error", { error: String(err) });
++				recordProcessed("error", { error: "Benson Main final recovery-owned" });
++				markIdle("message_error");
++				failDispatchReplyOperation(err);
++				messageAuditTerminal?.note("error");
++				return errorState.attachSourceReplyDeliveryMode({ queuedFinal: false,
++					counts: errorState.dispatcher.getQueuedCounts(), bensonRecoveryOwned: true });
++			}
+ 			if (isDispatchReplyOperationAbortedError(err)) return finishReplyOperationAbortedDispatch();
+ 			if (inboundDedupeClaim.status === "claimed") {
+ 				if (errorState.turnAdoptionState?.adopted || errorState.inboundDedupeReplayUnsafe) inboundDedupeClaim.commit();
+@@ -3821,7 +3959,7 @@
+ 					};
+ 					const routed = await errorState.routeReplyToOriginating(payload, { mirror: false });
+ 					if (routed) return errorState.isRoutedReplyDelivered(routed);
+-					if (!params.dispatcher.sendFinalReply(payload)) return false;
++					if (!errorState.turnLedger.sendQueued("final", payload).queued) return false;
+ 					const receipt = await params.dispatcher.waitForIdle();
+ 					return receipt ? receipt.counts.final.delivered > 0 : false;
+ 				}
+--- a/dist/dispatch-from-config.finalize-B25V5wMZ.mjs
++++ b/dist/dispatch-from-config.finalize-B25V5wMZ.mjs
+@@ -1,3 +1,4 @@
++import { createHash } from "node:crypto";
+ import { n as isAbortError, r as racePromiseWithAbortSignal } from "./abort-signal-Z3A36sLL.mjs";
+ import { t as formatErrorMessage } from "./errors-DnjwnOju.mjs";
+ import { r as logVerbose } from "./globals-CEoVCzzr.mjs";
+@@ -5,6 +6,12 @@
+ import { t as resolveConfiguredTtsMode } from "./tts-config-DK27R_zM.mjs";
+ import { u as resolveReplyCompletion } from "./source-reply-delivery-mode-BoFhram-.mjs";
+ import { c as settlePendingFinalDelivery } from "./delivery-completion-D2k5bk44.mjs";
++import { s as normalizeDeliveryContext } from "./delivery-context.shared-CW8dxG7X.mjs";
++import { l as loadSessionEntryReadOnly } from "./session-accessor.sqlite-entry-UCl9kr-O.mjs";
++import { p as persistSessionTranscriptTurn } from "./session-accessor-DLYTHSBj.mjs";
++import { d as patchSessionEntryCore } from "./session-accessor.sqlite-entry-UCl9kr-O.mjs";
++import { r as routeReply } from "./route-reply-yCE94785.mjs";
++import { B as prepareBensonInteractiveFinalAdmission } from "./session-delivery-queue.records-rYJIeHGW.mjs";
+ import { a as hasOutboundReplyContent } from "./reply-payload-RBmrGrXG.mjs";
+ import { t as registerReplyDispatcherSettledTask } from "./dispatch-dispatcher-C6kknpZM.mjs";
+ import { r as recordAgentRunTerminalOutcome } from "./agent-run-terminal-outcome-gv15pQgO.mjs";
+@@ -13,6 +20,201 @@
+ import { t as resolveStatusTtsSnapshot } from "./status-config-BMD-8eHc.mjs";
+ import { a as formatSuppressedReplyPayloadForLog, d as shouldDeliverDespiteSourceReplySuppression, n as buildNoVisibleReplyFallbackText, r as createFinalDispatchPayloadDedupeKey, t as QUEUE_CAP_REJECTION_TEXT } from "./dispatch-from-config.payloads-B-IA8hhg.mjs";
+ import { n as suppressPendingFinalDelivery, t as clearPendingFinalDeliveryAfterSuccess } from "./dispatch-from-config.pending-final-BezJrBZM.mjs";
++//#region src/auto-reply/reply/benson-interactive-finalization.ts
++const BENSON_FINAL_CONTRACT_VERSION = 2;
++const BENSON_FALLBACK_LANGUAGE = "he";
++const BENSON_FALLBACK_TIMEZONE = "Asia/Jerusalem";
++function bensonFinalDigest(value) {
++	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
++}
++function resolveBensonFinalPresentation(params) {
++	const language = params.explicitLanguage ?? params.nativeLanguage ?? BENSON_FALLBACK_LANGUAGE;
++	const timezone = params.explicitTimezone ?? params.nativeTimezone ?? BENSON_FALLBACK_TIMEZONE;
++	if (language !== "he" && language !== "en") throw new Error("Benson final language invalid");
++	if (typeof timezone !== "string" || !timezone.trim()) throw new Error("Benson final timezone invalid");
++	try { new Intl.DateTimeFormat("en-US", { timeZone: timezone }); }
++	catch { throw new Error("Benson final timezone invalid"); }
++	if (typeof params.referenceTime !== "number" || !Number.isSafeInteger(params.referenceTime) ||
++		params.referenceTime < 0) throw new Error("Benson final native reference time invalid");
++	return Object.freeze({ language, timezone, referenceTime: new Date(params.referenceTime).toISOString() });
++}
++/** Prepare one Benson interactive final in the native transcript/session transaction. */
++async function prepareBensonNativeInteractiveFinal(params) {
++	const { scope, queueEntry: admission, responseEnvelope } = params;
++	if (!scope?.sessionKey || !scope?.sessionId || !scope?.storePath ||
++		admission?.kind !== "interactiveFinal" || admission.sessionKey !== scope.sessionKey ||
++		admission.expectedSessionId !== scope.sessionId || !admission.requestId ||
++		!["main", "direct"].includes(admission.sourceType) ||
++		responseEnvelope?.requestId !== admission.requestId ||
++		responseEnvelope?.source?.type !== admission.sourceType ||
++		admission.sourceType === "direct" && (responseEnvelope.source.runId !== admission.sourceRunId ||
++			responseEnvelope.results?.length !== 1 || responseEnvelope.results[0].taskId !== admission.taskId)) {
++		throw new Error("Benson final admission binding invalid");
++	}
++	const context = normalizeDeliveryContext(admission.deliveryContext);
++	if (!context?.channel || !context?.to) throw new Error("Benson final original delivery route unavailable");
++	if (prepareBensonInteractiveFinalAdmission({ sessionKey: scope.sessionKey,
++		sessionId: scope.sessionId, requestId: admission.requestId,
++		sourceType: admission.sourceType, sourceRunId: admission.sourceRunId,
++		taskId: admission.taskId, deliveryContext: context }).id !== admission.id)
++		throw new Error("Benson final queue admission identity invalid");
++	const identity = bensonFinalDigest(["benson-interactive-final-v1", scope.sessionKey,
++		scope.sessionId, admission.requestId]);
++	const intentId = "benson-final:" + identity;
++	const transcriptId = "benson-transcript:" + identity;
++	const deliveryId = "benson-delivery:" + identity;
++	const envelopeDigest = bensonFinalDigest(responseEnvelope);
++	const current = loadSessionEntryReadOnly(scope);
++	if (current?.sessionId !== scope.sessionId) throw new Error("Benson final session replaced");
++	const existing = current.bensonPendingFinals?.find((item) => item.intentId === intentId);
++	if (existing?.intentId === intentId) {
++		if (existing.bensonFinal?.envelopeDigest !== envelopeDigest ||
++			existing.bensonFinal?.textDigest !== bensonFinalDigest(existing.text) ||
++			existing.bensonFinal?.transcriptMessageId !== transcriptId ||
++			JSON.stringify(existing.context) !== JSON.stringify(context)) {
++			throw new Error("Benson final retry contradicts prepared intent");
++		}
++		return Object.freeze({ status: "prepared", replayed: true, intentId,
++			transcriptMessageId: transcriptId, deliveryId, text: existing.text,
++			language: existing.bensonFinal.language, timezone: existing.bensonFinal.timezone,
++			referenceTime: existing.bensonFinal.referenceTime, context });
++	}
++		const presentation = resolveBensonFinalPresentation({
++		...params.preferences,
++		referenceTime: params.referenceTime
++	});
++	const { controlResponse } = await import("file:///home/oa/projects/benson/integrations/openclaw/benson-routing/response-control.mjs");
++	const approved = controlResponse(responseEnvelope, { language: presentation.language,
++		timezone: presentation.timezone, now: presentation.referenceTime });
++	if (approved.rendered.schemaVersion !== BENSON_FINAL_CONTRACT_VERSION) {
++		throw new Error("Benson response contract version mismatch");
++	}
++	const now = params.referenceTime;
++	const prepared = {
++		kind: "replayable", text: approved.rendered.message, intentId,
++		deliveries: [{ id: deliveryId, state: "prepared" }], context, createdAt: now,
++		bensonFinal: { requestId: admission.requestId, sourceType: admission.sourceType,
++			envelopeDigest, textDigest: bensonFinalDigest(approved.rendered.message),
++			responseContractVersion: BENSON_FINAL_CONTRACT_VERSION,
++			policyMode: approved.mode, language: presentation.language,
++			timezone: presentation.timezone, referenceTime: presentation.referenceTime,
++			transcriptMessageId: transcriptId }
++	};
++	const result = await persistSessionTranscriptTurn(scope, {
++		expectedSessionId: scope.sessionId,
++		...scope.expectedLifecycleRevision !== void 0 ?
++			{ expectedLifecycleRevision: scope.expectedLifecycleRevision } : {},
++		bensonFinalIntent: prepared,
++		updateMode: "inline",
++		messages: [{ eventId: transcriptId, idempotencyLookup: "scan-assistant",
++			message: { role: "assistant", content: [{ type: "text", text: approved.rendered.message }],
++				timestamp: now, stopReason: "stop", idempotencyKey: transcriptId,
++				api: "openai-responses", provider: "openclaw", model: "benson-response-controller" },
++			now, useRawWhenLinear: true }],
++		sessionLifecyclePatch: { updatedAt: now }
++	});
++	if (result.rejectedReason === "benson-final-replayed")
++		return await prepareBensonNativeInteractiveFinal(params);
++	if (result.rejectedReason) throw new Error("Benson final preparation refused: " + result.rejectedReason);
++	if (result.appendedCount !== 1 || result.messages[0]?.messageId !== transcriptId ||
++		!result.sessionEntry?.bensonPendingFinals?.some((item) => item.intentId === intentId)) {
++		throw new Error("Benson final transcript/intent commit not proven");
++	}
++	return Object.freeze({ status: "prepared", replayed: false, intentId,
++		transcriptMessageId: transcriptId, deliveryId, text: prepared.text,
++		language: presentation.language, timezone: presentation.timezone,
++		referenceTime: presentation.referenceTime, context });
++}
++/** Settle one native Benson final without changing its frozen response. */
++async function settleBensonNativeFinal(scope, intentId, expectedState, nextState, receipt) {
++	let changed = false;
++	const updated = await patchSessionEntryCore(scope, (entry) => {
++		if (entry.sessionId !== scope.sessionId) return null;
++		const finals = entry.bensonPendingFinals ?? [];
++		const index = finals.findIndex((item) => item.intentId === intentId);
++		if (index < 0 || finals[index].deliveries?.[0]?.state !== expectedState) return null;
++		changed = true;
++		const final = { ...finals[index], deliveries: [{
++			id: finals[index].deliveries[0].id, state: nextState
++		}], ...receipt ? { bensonReceipt: receipt } : {} };
++		const next = [...finals];
++		next[index] = final;
++		return { bensonPendingFinals: next };
++	}, { skipMaintenance: true, takeCacheOwnership: true, preserveActivity: true });
++	if (!changed || !updated?.bensonPendingFinals?.some((item) =>
++		item.intentId === intentId && item.deliveries[0].state === nextState))
++		throw new Error("Benson final settlement owner changed");
++	return updated;
++}
++/** Consume the one shared OpenClaw session queue work item; never rerun a domain task. */
++async function deliverBensonNativeInteractiveFinal(params) {
++	const { queueEntry, scope, cfg } = params;
++	if (queueEntry?.kind !== "interactiveFinal" ||
++		queueEntry.sessionKey !== scope?.sessionKey ||
++		queueEntry.expectedSessionId !== scope?.sessionId ||
++		prepareBensonInteractiveFinalAdmission({ sessionKey: scope.sessionKey,
++			sessionId: scope.sessionId, requestId: queueEntry.requestId,
++			sourceType: queueEntry.sourceType, sourceRunId: queueEntry.sourceRunId,
++			taskId: queueEntry.taskId, deliveryContext: queueEntry.deliveryContext }).id !== queueEntry.id)
++		throw new Error("Benson native final queue owner invalid");
++	const entry = loadSessionEntryReadOnly(scope);
++	if (entry?.sessionId !== scope.sessionId) return { status: "recovery_owned", reason: "session_replaced" };
++	const identity = bensonFinalDigest(["benson-interactive-final-v1", scope.sessionKey,
++		scope.sessionId, queueEntry.requestId]);
++	const intentId = "benson-final:" + identity;
++	const pending = entry.bensonPendingFinals?.find((item) => item.intentId === intentId);
++	if (!pending) return { status: "awaiting_preparation" };
++	const context = normalizeDeliveryContext(queueEntry.deliveryContext);
++	if (pending.bensonFinal?.requestId !== queueEntry.requestId ||
++		pending.bensonFinal?.sourceType !== queueEntry.sourceType ||
++		JSON.stringify(pending.context) !== JSON.stringify(context) ||
++		pending.bensonFinal?.textDigest !== bensonFinalDigest(pending.text))
++		throw new Error("Benson prepared final contradicts queue admission");
++	const state = pending.deliveries?.[0]?.state;
++	if (state === "delivered") return { status: "delivered", receipt: pending.bensonReceipt };
++	if (state === "unknown" || state === "suppressed")
++		return { status: "recovery_owned", reason: state };
++	if (state === "queued") {
++		await settleBensonNativeFinal(scope, intentId, "queued", "unknown");
++		return { status: "recovery_owned", reason: "interrupted_send" };
++	}
++	if (state !== "prepared") throw new Error("Benson prepared final state invalid");
++	if (context.channel === "webchat") {
++		await persistSessionTranscriptTurn(scope, { expectedSessionId: scope.sessionId,
++			messages: [], updateMode: "inline", publishWhen: "always" });
++		const receipt = { kind: "webchat", transcriptMessageId:
++			pending.bensonFinal.transcriptMessageId };
++		await settleBensonNativeFinal(scope, intentId, "prepared", "delivered", receipt);
++		return { status: "delivered", receipt };
++	}
++	await settleBensonNativeFinal(scope, intentId, "prepared", "queued");
++	let outcome;
++	try {
++		outcome = await routeReply({ cfg, channel: context.channel, to: context.to,
++			accountId: context.accountId, threadId: context.threadId,
++			agentId: "main", sessionKey: scope.sessionKey,
++			policySessionKey: scope.sessionKey, replyKind: "final", mirror: false,
++			deliveryIntentId: pending.deliveries[0].id,
++			payload: { text: pending.text } });
++	} catch (error) {
++		await settleBensonNativeFinal(scope, intentId, "queued", "unknown");
++		return { status: "recovery_owned", reason: "send_outcome_unknown" };
++	}
++	const messageId = outcome?.messageId;
++	if (outcome?.ok && outcome.delivered && !outcome.ambiguous &&
++		typeof messageId === "string" && messageId.trim() &&
++		!["unknown", "ok", "skipped", "suppressed"].includes(messageId.toLowerCase())) {
++		const receipt = { kind: "external", platformMessageId: messageId,
++			channel: context.channel, to: context.to,
++			...context.accountId ? { accountId: context.accountId } : {},
++			...context.threadId ? { threadId: context.threadId } : {} };
++		await settleBensonNativeFinal(scope, intentId, "queued", "delivered", receipt);
++		return { status: "delivered", receipt };
++	}
++	await settleBensonNativeFinal(scope, intentId, "queued", "unknown");
++	return { status: "recovery_owned", reason: "receipt_unproven" };
++}
++//#endregion
+ //#region src/auto-reply/reply/dispatch-from-config.abort.ts
+ var DispatchReplyOperationAbortedError = class extends Error {
+ 	constructor() {
+@@ -367,4 +569,4 @@
+ 	};
+ }
+ //#endregion
+-export { isCaptionedFinalTextPayload as a, DispatchReplyOperationAbortedError as c, runWithDispatchAbortSignal as d, cleanDeferredFinalText as i, createAbortAwareDispatcher as l, needsTtsFallback as n, mergeDeferredFinalText as o, buildCaptionedFinalTextFallback as r, shouldDeferFinalTtsText as s, finalizeDispatchAndAudit as t, isDispatchReplyOperationAbortedError as u };
++export { deliverBensonNativeInteractiveFinal as B, prepareBensonNativeInteractiveFinal as C, prepareBensonNativeInteractiveFinal as __testPrepareBensonNativeInteractiveFinal, resolveBensonFinalPresentation as __testResolveBensonFinalPresentation, isCaptionedFinalTextPayload as a, DispatchReplyOperationAbortedError as c, runWithDispatchAbortSignal as d, cleanDeferredFinalText as i, createAbortAwareDispatcher as l, needsTtsFallback as n, mergeDeferredFinalText as o, buildCaptionedFinalTextFallback as r, shouldDeferFinalTtsText as s, finalizeDispatchAndAudit as t, isDispatchReplyOperationAbortedError as u };
+--- a/dist/get-reply-DXzvDRjY.mjs
++++ b/dist/get-reply-DXzvDRjY.mjs
+@@ -4621,7 +4621,7 @@
+ 			cliSessionBindingFacts,
+ 			skipProviderRuntimeHints: useFastReplyRuntime,
+ 			terminalReplyExpectation,
+-			suppressTranscriptOnlyAssistantPersistence: isRoomEvent,
++			suppressTranscriptOnlyAssistantPersistence: isRoomEvent || opts?.bensonManagedFinal === true,
+ 			...opts?.skillWorkshopProposalRevision ? { skillWorkshopProposalRevision: { ...opts.skillWorkshopProposalRevision } } : {},
+ 			...opts?.skillLibraryAuthoring ? { skillLibraryAuthoring: opts.skillLibraryAuthoring } : {},
+ 			...!useFastReplyRuntime && isReasoningTagProvider(provider, {
+--- a/dist/server-restart-sentinel-Bc_R9rEL.mjs
++++ b/dist/server-restart-sentinel-Bc_R9rEL.mjs
+@@ -32,6 +32,7 @@
+ import { t as dispatchReplyWithBufferedBlockDispatcherCore } from "./provider-dispatcher-CekMOBt5.mjs";
+ import { B as recoverPendingSessionDeliveries, z as drainPendingSessionDelivery } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
+ import { a as SessionDeliveryDeferredError, i as SessionDeliveryDeadLetteredError, o as SessionDeliveryRetryChargedError, s as SessionDeliverySafeRetryError } from "./session-delivery-queue.records-rYJIeHGW.mjs";
++import { B as deliverBensonNativeInteractiveFinal } from "./dispatch-from-config.finalize-B25V5wMZ.mjs";
+ import { a as enqueueSessionDelivery, d as mergeSessionDeliveryPreparedMediaBlocks, l as markSessionDeliveryAttemptStarted, o as failSessionDelivery, r as deferSessionDelivery, t as advanceSessionDeliveryAgentRun, u as markSessionDeliverySettlement } from "./session-delivery-queue-storage-DSTuGS2l.mjs";
+ import { r as hasExplicitlyVisibleAgentPayload } from "./message-visibility-yTJ46I8l.mjs";
+ import { r as loadGatewaySessionEntry } from "./session-utils-store-BkTgM9JI.mjs";
+@@ -40,7 +41,8 @@
+ import { a as formatGeneratedMediaDeliveryRetryForPrompt, n as buildGeneratedMediaDeliveryContext } from "./internal-events-CfvyIQfQ.mjs";
+ import { a as getAgentCommandDeliveryFailure, d as hasCompleteAutomaticMediaDeliveryOutcomeEvidence, l as hasCommittedOutboundDeliveryEvidence, n as collectAutomaticDeliveredMediaUrls, r as collectDeliveredMediaUrls, s as getGatewayAgentResult, t as collectAmbiguousAutomaticMediaUrls } from "./delivery-evidence-B9fCOuaI.mjs";
+ import { t as removeCronRunContinuationSessionIfIdle } from "./cron-run-continuation-cleanup-BgbeYljs.mjs";
+-import { a as settleCorrelatedSubagentDelivery, r as resolveCorrelatedSubagentDelivery } from "./subagent-completion-delivery-BlfHhlHm.mjs";
++import { B as prepareBensonDirectFinalFromQueue, a as settleCorrelatedSubagentDelivery, r as resolveCorrelatedSubagentDelivery } from "./subagent-completion-delivery-BlfHhlHm.mjs";
++import { B5 as settleBensonDirectFinalDelivery } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
+ import "./get-reply-run-queue-Bmv2zHLu.mjs";
+ import { n as dispatchAssembledChannelTurn } from "./lifecycle-CJZlG1Ii.mjs";
+ import { t as runStartupTasks } from "./startup-tasks-CW4c6ut8.mjs";
+@@ -502,6 +504,25 @@
+ 		...queuedEntry.kind === "systemEvent" ? { agentId: queuedEntry.agentId } : {}
+ 	});
+ 	const deliveryContext = resolveQueuedSessionDeliveryContext(queuedEntry);
++	if (queuedEntry.kind === "interactiveFinal") {
++		const scope = { agentId: "main", sessionKey: canonicalKey,
++			sessionId: queuedEntry.expectedSessionId, storePath,
++			env: params.queueContext.environment };
++		let outcome = await deliverBensonNativeInteractiveFinal({ queueEntry: queuedEntry, scope, cfg });
++		if (outcome.status === "awaiting_preparation" && queuedEntry.sourceType === "direct") {
++			await prepareBensonDirectFinalFromQueue({ queueEntry: queuedEntry, scope, cfg });
++			outcome = await deliverBensonNativeInteractiveFinal({ queueEntry: queuedEntry, scope, cfg });
++		}
++		if (outcome.status === "awaiting_preparation")
++			throw new SessionDeliveryDeferredError("Benson interactive final awaits native preparation");
++		if (outcome.status === "recovery_owned")
++			throw new SessionDeliveryDeferredError("Benson interactive final awaits receipt reconciliation");
++		if (outcome.status !== "delivered" || !outcome.receipt)
++			throw new Error("Benson final delivery receipt unavailable");
++		if (queuedEntry.sourceType === "direct")
++			settleBensonDirectFinalDelivery(queuedEntry, outcome.receipt);
++		return;
++	}
+ 	if (queuedEntry.kind === "systemEvent") {
+ 		const { agentId: systemEventAgentId = agentId, text } = queuedEntry;
+ 		enqueueRestartSentinelWake(text, canonicalKey, systemEventAgentId, deliveryContext);
+--- a/dist/session-accessor-DLYTHSBj.mjs
++++ b/dist/session-accessor-DLYTHSBj.mjs
+@@ -2132,6 +2132,17 @@
+ 				result = sqliteSessionTranscriptTurnRebound(fresh, options.sessionFile);
+ 				return;
+ 			}
++			// One admission-keyed native final is appended to the same session/transcript transaction.
++			const bensonFinalIntent = options.bensonFinalIntent;
++			if (bensonFinalIntent) {
++				const finals = currentEntry.bensonPendingFinals ?? [];
++				if (!bensonFinalIntent.intentId || finals.some((item) => item.intentId === bensonFinalIntent.intentId)) {
++					result = { appendedMessages: [], rejectedReason: "benson-final-replayed",
++						sessionEntry: currentEntry, sessionFile: options.sessionFile };
++					return;
++				}
++				if (finals.length >= 1024) throw new Error("Benson pending final capacity reached");
++			}
+ 			const goal = mutation ? applySessionGoalOperation(currentEntry, mutation.operation, Date.now()) : void 0;
+ 			const appendedMessages = [];
+ 			for (const append of messages) {
+@@ -2176,6 +2187,9 @@
+ 				touchSessionEntry: options.touchSessionEntry
+ 			});
+ 			if (mutation) sessionPatch.goal = goal;
++			if (bensonFinalIntent) sessionPatch.bensonPendingFinals = [
++				...(appendedEntry.bensonPendingFinals ?? []), bensonFinalIntent
++			];
+ 			const next = Object.keys(sessionPatch).length > 0 ? mergeSessionEntry(appendedEntry, sessionPatch) : appendedEntry;
+ 			let publishIdentity;
+ 			if (initialEntry || next !== appendedEntry) {
+@@ -2389,14 +2403,15 @@
+ 		})),
+ 		onMessageCommitted: options.onMessageCommitted,
+ 		sessionLifecyclePatch: options.sessionLifecyclePatch,
++		bensonFinalIntent: options.bensonFinalIntent,
+ 		sessionTurnMutation: options.sessionTurnMutation,
+ 		sessionFile: target.sessionKey,
+ 		touchSessionEntry: options.touchSessionEntry
+ 	}));
+-	if (turn.rejectedReason === "session-rebound") return {
++	if (turn.rejectedReason) return {
+ 		appendedCount: 0,
+ 		messages: [],
+-		rejectedReason: "session-rebound",
++		rejectedReason: turn.rejectedReason,
+ 		sessionEntry: turn.sessionEntry
+ 	};
+ 	await publishTranscriptTurnUpdate({
+--- a/dist/session-accessor.sqlite-entry-store-DTntRuil.mjs
++++ b/dist/session-accessor.sqlite-entry-store-DTntRuil.mjs
+@@ -2442,7 +2442,7 @@
+ 		items.every((item) => item && typeof item === "object" &&
+ 			Object.keys(item).length === 4 && typeof item.requestId === "string" &&
+ 			item.requestId.length > 0 && typeof item.sessionId === "string" &&
+-			item.sessionId.length > 0 && item.owner === "main" && item.phase === "committed") &&
++			item.sessionId.length > 0 && ["main", "jessica-vacuum", "reminder-service"].includes(item.owner) && item.phase === "committed") &&
+ 		new Set(items.map((item) => item.requestId)).size === items.length;
+ 	if (previousBensonCommitments !== void 0 && !validBensonCommitments(previousBensonCommitments))
+ 		throw new Error("Benson native commitment history invalid");
+@@ -2455,6 +2455,43 @@
+ 			throw new Error("Benson native commitment cannot be removed or rewritten");
+ 	}
+ 
++	// The native session row owns every prepared interactive final across replacement.
++	const previousBensonFinals = canonicalPreviousEntry?.bensonPendingFinals;
++	const nextBensonFinals = normalizedEntry.bensonPendingFinals;
++	const validBensonFinals = (items) => Array.isArray(items) && items.length <= 1024 &&
++		items.every((item) => item && item.kind === "replayable" && item.bensonFinal &&
++			typeof item.intentId === "string" && typeof item.text === "string" &&
++			Array.isArray(item.deliveries) && item.deliveries.length === 1 &&
++			(item.deliveries[0].state === "delivered") === Boolean(item.bensonReceipt)) &&
++		new Set(items.map((item) => item.intentId)).size === items.length;
++	if (previousBensonFinals !== void 0 && !validBensonFinals(previousBensonFinals))
++		throw new Error("Benson native final history invalid");
++	if (nextBensonFinals !== void 0 && !validBensonFinals(nextBensonFinals))
++		throw new Error("Benson native final write invalid");
++	if (previousBensonFinals !== void 0) {
++		if (nextBensonFinals === void 0) normalizedEntry.bensonPendingFinals = structuredClone(previousBensonFinals);
++		else {
++			const nextById = new Map(nextBensonFinals.map((item) => [item.intentId, item]));
++			for (const prior of previousBensonFinals) {
++				const next = nextById.get(prior.intentId);
++				if (!next || next.text !== prior.text || next.createdAt !== prior.createdAt ||
++					!isDeepStrictEqual(next.context, prior.context) ||
++					!isDeepStrictEqual(next.bensonFinal, prior.bensonFinal) ||
++					next.deliveries[0].id !== prior.deliveries[0].id ||
++					prior.bensonReceipt && !isDeepStrictEqual(next.bensonReceipt, prior.bensonReceipt))
++					throw new Error("Benson native final cannot be removed or rewritten");
++				const before = prior.deliveries[0].state;
++				const after = next.deliveries[0].state;
++				const legal = before === after || before === "prepared" &&
++					["queued", "delivered", "suppressed", "unknown"].includes(after) ||
++					before === "queued" && ["delivered", "suppressed", "unknown"].includes(after);
++				if (!legal || after === "delivered" && !next.bensonReceipt ||
++					after !== "delivered" && next.bensonReceipt)
++					throw new Error("Benson native final state regression");
++			}
++		}
++	}
++
+ 	if (!options.providerReviewMutation && !options.allowStoredAliases) normalizedEntry = {
+ 		...normalizedEntry,
+ 		providerReview: canonicalPreviousEntry?.sessionId === normalizedEntry.sessionId && canonicalPreviousEntry.lifecycleRevision === normalizedEntry.lifecycleRevision ? canonicalPreviousEntry.providerReview : void 0
+--- a/dist/session-delivery-queue-storage-DSTuGS2l.mjs
++++ b/dist/session-delivery-queue-storage-DSTuGS2l.mjs
+@@ -1,6 +1,7 @@
+ import { ot as bindDeliveryQueueEntry } from "./openclaw-state-db-read-connection-Beg0AZE7.mjs";
+ import { i as runOpenClawStateWorkerOperation } from "./openclaw-state-worker-store-YAl4mP45.mjs";
+ import { c as prepareClaimedSessionDelivery, l as prepareSessionDelivery, n as SessionDeliveryAcknowledgementFinalizeError, r as SessionDeliveryAttemptStartError, t as SESSION_DELIVERY_QUEUE_NAME } from "./session-delivery-queue.records-rYJIeHGW.mjs";
++import { B as prepareBensonInteractiveFinalAdmission } from "./session-delivery-queue.records-rYJIeHGW.mjs";
+ //#region src/infra/session-delivery-queue-storage.ts
+ function executeSessionDelivery(context, command) {
+ 	return runOpenClawStateWorkerOperation(context, (scope) => scope.execute(command));
+@@ -26,6 +27,27 @@
+ 		input: prepareEntry(prepareClaimedSessionDelivery(params, initialAttemptLeaseMs), "insert")
+ 	});
+ }
++/** Insert once and verify the original session, source and recipient on duplicate admission. */
++async function admitBensonInteractiveFinal(params, context) {
++	const entry = prepareBensonInteractiveFinalAdmission(params);
++	const result = await executeSessionDelivery(context, {
++		type: "sessionDelivery.enqueueClaimed",
++		input: prepareEntry(entry, "insert")
++	});
++	if (!result.claimed && result.status === "pending") {
++		const existing = await loadPendingSessionDelivery(entry.id, context);
++		if (!existing || existing.kind !== "interactiveFinal" ||
++			existing.expectedSessionId !== entry.expectedSessionId ||
++			existing.requestId !== entry.requestId ||
++			existing.sourceType !== entry.sourceType ||
++			existing.sourceRunId !== entry.sourceRunId || existing.taskId !== entry.taskId ||
++			JSON.stringify(existing.deliveryContext) !== JSON.stringify(entry.deliveryContext))
++			throw new Error("Benson final admission contradicts native queue owner");
++	}
++	if (!result.claimed && result.status === "unknown")
++		throw new Error("Benson final queue admission outcome unknown");
++	return { id: entry.id, claimed: result.claimed, status: result.status };
++}
+ async function releaseSessionDeliveryClaim(id, context) {
+ 	return executeSessionDelivery(context, {
+ 		type: "sessionDelivery.releaseClaim",
+@@ -131,4 +153,4 @@
+ 	});
+ }
+ //#endregion
+-export { enqueueSessionDelivery as a, loadPendingSessionDelivery as c, mergeSessionDeliveryPreparedMediaBlocks as d, moveSessionDeliveryToFailed as f, enqueueClaimedSessionDelivery as i, markSessionDeliveryAttemptStarted as l, completeSessionDelivery as n, failSessionDelivery as o, releaseSessionDeliveryClaim as p, deferSessionDelivery as r, loadPendingSessionDeliveries as s, advanceSessionDeliveryAgentRun as t, markSessionDeliverySettlement as u };
++export { admitBensonInteractiveFinal as B, enqueueSessionDelivery as a, loadPendingSessionDelivery as c, mergeSessionDeliveryPreparedMediaBlocks as d, moveSessionDeliveryToFailed as f, enqueueClaimedSessionDelivery as i, markSessionDeliveryAttemptStarted as l, completeSessionDelivery as n, failSessionDelivery as o, releaseSessionDeliveryClaim as p, deferSessionDelivery as r, loadPendingSessionDeliveries as s, advanceSessionDeliveryAgentRun as t, markSessionDeliverySettlement as u };
+--- a/dist/session-delivery-queue.records-rYJIeHGW.mjs
++++ b/dist/session-delivery-queue.records-rYJIeHGW.mjs
+@@ -1,4 +1,5 @@
+ import { n as sha256Hex } from "./node-crypto-Df3MIs6V.mjs";
++import { s as normalizeDeliveryContext } from "./delivery-context.shared-CW8dxG7X.mjs";
+ import "./crypto-digest-D9Nqq3c7.mjs";
+ import { a as generateSecureUuid } from "./secure-random-BJtJxP9Y.mjs";
+ //#region src/infra/session-delivery-queue.records.ts
+@@ -13,6 +14,28 @@
+ 		availableAt: now + Math.max(0, initialAttemptLeaseMs)
+ 	};
+ }
++/** One durable OpenClaw session queue item owns an interactive final admission. */
++function prepareBensonInteractiveFinalAdmission(params, now = Date.now()) {
++	const id = (value) => typeof value === "string" && value.length > 0 &&
++		value.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(value);
++	const context = normalizeDeliveryContext(params.deliveryContext);
++	if (!id(params.sessionKey) || !id(params.sessionId) || !id(params.requestId) ||
++		!['main', 'direct'].includes(params.sourceType) || !context?.channel || !context?.to ||
++		params.sourceType === "direct" && (!id(params.sourceRunId) || !id(params.taskId)))
++		throw new Error("Benson interactive final admission invalid");
++	const key = sha256Hex(JSON.stringify(["benson-interactive-final-v1", params.sessionKey,
++		params.sessionId, params.requestId]));
++	return prepareClaimedSessionDelivery({
++		kind: "interactiveFinal", sessionKey: params.sessionKey,
++		expectedSessionId: params.sessionId, agentId: "main",
++		requestId: params.requestId, sourceType: params.sourceType,
++		...params.sourceType === "direct" ? { sourceRunId: params.sourceRunId, taskId: params.taskId } : {},
++		deliveryContext: context, idempotencyKey: "benson-final-admission:" + key,
++		messageId: "benson-final-admission:" + key,
++		phase: "awaiting", maxRetries: Number.MAX_SAFE_INTEGER,
++		completionRetention: "permanent"
++	}, 0, now);
++}
+ var SessionDeliveryDeferredError = class extends Error {
+ 	constructor(..._args) {
+ 		super(..._args);
+@@ -68,4 +91,4 @@
+ 	}
+ };
+ //#endregion
+-export { SessionDeliveryDeferredError as a, prepareClaimedSessionDelivery as c, SessionDeliveryDeadLetteredError as i, prepareSessionDelivery as l, SessionDeliveryAcknowledgementFinalizeError as n, SessionDeliveryRetryChargedError as o, SessionDeliveryAttemptStartError as r, SessionDeliverySafeRetryError as s, SESSION_DELIVERY_QUEUE_NAME as t };
++export { prepareBensonInteractiveFinalAdmission as B, SessionDeliveryDeferredError as a, prepareClaimedSessionDelivery as c, SessionDeliveryDeadLetteredError as i, prepareSessionDelivery as l, SessionDeliveryAcknowledgementFinalizeError as n, SessionDeliveryRetryChargedError as o, SessionDeliveryAttemptStartError as r, SessionDeliverySafeRetryError as s, SESSION_DELIVERY_QUEUE_NAME as t };
+--- a/dist/store-entry-shape-CWorLqwJ.mjs
++++ b/dist/store-entry-shape-CWorLqwJ.mjs
+@@ -1,5 +1,6 @@
+ import { c as isRecord } from "./record-coerce-DItp3I4t.mjs";
+ import { l as normalizeOptionalString } from "./string-coerce-CIXf7egm.mjs";
++import { m as readNonBlankString } from "./string-coerce-CIXf7egm.mjs";
+ import { A as parseAgentSessionKey } from "./session-key-CBvmC8zz.mjs";
+ import { p as validateSessionId } from "./paths-CcMbq5NY.mjs";
+ import { o as normalizeSessionColorValue, s as normalizeSessionIconValue } from "./session-agent-status-BSzRJm_2.mjs";
+@@ -50,6 +51,7 @@
+ 	} : void 0);
+ 	if (pendingFinalDelivery) canonicalValue.pendingFinalDelivery = pendingFinalDelivery;
+ 	else delete canonicalValue.pendingFinalDelivery;
++	if (canonicalValue.bensonPendingFinals !== void 0) canonicalValue.bensonPendingFinals = normalizeBensonPendingFinals(canonicalValue.bensonPendingFinals);
+ 	const pendingDeliveryNotice = normalizePendingDeliveryNotice(canonicalValue.pendingDeliveryNotice);
+ 	if (pendingDeliveryNotice) canonicalValue.pendingDeliveryNotice = pendingDeliveryNotice;
+ 	else delete canonicalValue.pendingDeliveryNotice;
+@@ -101,7 +103,10 @@
+ 	if (createdAt === void 0) return;
+ 	const intentId = normalizeOptionalString(value.intentId);
+ 	const deliveries = normalizePendingFinalDeliveries(value.deliveries);
++	const bensonFinal = normalizeBensonInteractiveFinal(value.bensonFinal);
++	if (value.bensonFinal !== void 0 && !bensonFinal) throw new Error("Benson prepared final metadata invalid");
+ 	const base = {
++		...bensonFinal ? { bensonFinal } : {},
+ 		createdAt,
+ 		...isRecord(value.context) ? { context: value.context } : {},
+ 		...intentId ? { intentId } : {},
+@@ -111,13 +116,71 @@
+ 		kind: "transport-only",
+ 		...base
+ 	};
+-	const text = normalizeOptionalString(value.text);
++	const text = bensonFinal ? readNonBlankString(value.text) : normalizeOptionalString(value.text);
+ 	return value.kind === "replayable" && text ? {
+ 		kind: "replayable",
+ 		text,
+ 		...base
+ 	} : void 0;
+ }
++function normalizeBensonInteractiveFinal(value) {
++	if (!isRecord(value)) return;
++	const identifier = (item) => typeof item === "string" && item.length > 0 &&
++		item.length <= 512 && !/[\u0000-\u001f\u007f]/u.test(item);
++	if (!identifier(value.requestId) || !identifier(value.transcriptMessageId) ||
++		(value.sourceType !== "main" && value.sourceType !== "direct") ||
++		!/^[a-f0-9]{64}$/u.test(value.envelopeDigest ?? "") ||
++		!/^[a-f0-9]{64}$/u.test(value.textDigest ?? "") ||
++		value.responseContractVersion !== 2 ||
++		!["pass_through", "deterministic", "safe_failure"].includes(value.policyMode) ||
++		!["he", "en"].includes(value.language) || typeof value.timezone !== "string" ||
++		!value.timezone || typeof value.referenceTime !== "string" ||
++		!Number.isFinite(Date.parse(value.referenceTime))) return;
++	try { new Intl.DateTimeFormat("en-US", { timeZone: value.timezone }); }
++	catch { return; }
++	return { requestId: value.requestId, sourceType: value.sourceType,
++		envelopeDigest: value.envelopeDigest, textDigest: value.textDigest,
++		responseContractVersion: value.responseContractVersion,
++		policyMode: value.policyMode, language: value.language,
++		timezone: value.timezone, referenceTime: value.referenceTime,
++		transcriptMessageId: value.transcriptMessageId };
++}
++function normalizeBensonFinalReceipt(value) {
++	if (!isRecord(value)) return;
++	if (value.kind === "webchat" && typeof value.transcriptMessageId === "string" &&
++		value.transcriptMessageId.length > 0) return {
++		kind: "webchat", transcriptMessageId: value.transcriptMessageId
++	};
++	if (value.kind === "external" && typeof value.platformMessageId === "string" &&
++		value.platformMessageId.length > 0 && typeof value.channel === "string" &&
++		typeof value.to === "string") return { kind: "external",
++		platformMessageId: value.platformMessageId, channel: value.channel, to: value.to,
++		...typeof value.accountId === "string" ? { accountId: value.accountId } : {},
++		...typeof value.threadId === "string" ? { threadId: value.threadId } : {}
++	};
++}
++function normalizeBensonPendingFinals(value) {
++	if (!Array.isArray(value) || value.length > 1024) throw new Error("Benson pending finals invalid");
++	const normalized = value.map((item) => {
++		const pending = normalizePendingFinalDelivery(item);
++		if (!pending || !pending.bensonFinal || !pending.intentId ||
++			pending.kind !== "replayable" || pending.deliveries?.length !== 1)
++			throw new Error("Benson pending final invalid");
++		const receipt = normalizeBensonFinalReceipt(item.bensonReceipt);
++		if (item.bensonReceipt !== void 0 && !receipt) throw new Error("Benson final receipt invalid");
++		if ((pending.deliveries[0].state === "delivered") !== Boolean(receipt))
++			throw new Error("Benson final state and receipt disagree");
++		if (receipt?.kind === "webchat" && receipt.transcriptMessageId !== pending.bensonFinal.transcriptMessageId)
++			throw new Error("Benson final transcript receipt mismatch");
++		if (receipt?.kind === "external" && (receipt.channel !== pending.context?.channel || receipt.to !== pending.context?.to ||
++			receipt.accountId !== pending.context?.accountId || receipt.threadId !== pending.context?.threadId))
++			throw new Error("Benson final external receipt route mismatch");
++		return { ...pending, ...receipt ? { bensonReceipt: receipt } : {} };
++	});
++	if (new Set(normalized.map((item) => item.intentId)).size !== normalized.length)
++		throw new Error("Benson duplicate final intent");
++	return normalized;
++}
+ function normalizePendingFinalDeliveries(value) {
+ 	if (!Array.isArray(value)) return;
+ 	const deliveries = value.flatMap((item) => {
+--- a/dist/subagent-announce-D1daXz8n.mjs
++++ b/dist/subagent-announce-D1daXz8n.mjs
+@@ -180,8 +180,12 @@
+ 				return "permanent_failure";
+ 			}
+ 			if (prepared.admission.destination === "RESPONSE_CONTROLLER") {
+-				params.onDeliveryResult?.({ delivered: true, path: "benson_direct_result", disposition: "delivered" });
+-				return "delivered";
++				if (prepared.deliverySettled) {
++					params.onDeliveryResult?.({ delivered: true, path: "benson_response_handoff", disposition: "delivered" });
++					return "delivered";
++				}
++				params.onDeliveryResult?.({ delivered: false, path: "benson_response_handoff", disposition: "session_queued" });
++				return "session_queued";
+ 			}
+ 			params.bensonCompletionAdmission = prepared.admission;
+ 			const validatedText = JSON.stringify(prepared.admission.result);
+--- a/dist/subagent-completion-admission.store-Bw0OSK2O.mjs
++++ b/dist/subagent-completion-admission.store-Bw0OSK2O.mjs
+@@ -1,3 +1,5 @@
++import { s as normalizeDeliveryContext } from "./delivery-context.shared-CW8dxG7X.mjs";
++import { B as prepareBensonInteractiveFinalAdmission } from "./session-delivery-queue.records-rYJIeHGW.mjs";
+ import { c as readErrorName } from "./error-coercion-C787aVxk.mjs";
+ import { t as createDeferredCore } from "./deferred-D0La5CRk.mjs";
+ import { y as uniqueStrings } from "./string-normalization-_gRhJUDw.mjs";
+@@ -1083,8 +1085,7 @@
+ 		};
+ 	}, params.databaseOptions, { operationLabel: "subagent completion delivery admission" });
+ }
+-// Direct results remain private durable native state until Response Controller
+-// consumes them in the later stage. No agent turn or external send is created.
++// A Direct completion and its native interactive-final queue admission share one transaction.
+ function admitBensonDirectCompletion(params) {
+ 	return runOpenClawStateWriteTransaction((database) => {
+ 		const subagent = readSubagentRun(database, params.runId);
+@@ -1098,29 +1099,99 @@
+ 			admission.taskId !== task.taskId || admission.requestId !== params.binding.requestId)
+ 			throw new Error("Benson direct completion owner changed");
+ 		if (subagent.bensonCompletionAdmission) {
+-			if (JSON.stringify(subagent.bensonCompletionAdmission) !== JSON.stringify(admission))
++			if (JSON.stringify(subagent.bensonCompletionAdmission) !== JSON.stringify(admission) ||
++				subagent.delivery?.queueId === void 0 ||
++				!['session_queued', 'delivered'].includes(task.deliveryStatus) ||
++				(subagent.delivery.status === "delivered") !== (task.deliveryStatus === "delivered"))
+ 				throw new Error("Benson direct completion contradicts durable result");
+-			return "duplicate";
++			return { status: "duplicate", queueId: subagent.delivery.queueId,
++				delivered: subagent.delivery.status === "delivered" };
+ 		}
+ 		if (task.status !== "running" || subagent.delivery?.status !== "pending")
+ 			throw new Error("Benson direct completion is no longer pending");
+ 		const now = Date.now();
++		const deliveryContext = normalizeDeliveryContext(subagent.requesterOrigin);
++		const queueEntry = prepareBensonInteractiveFinalAdmission({
++			sessionKey: params.binding.parentSessionKey, sessionId: params.binding.parentSessionId,
++			requestId: params.binding.requestId, sourceType: "direct",
++			sourceRunId: subagent.runId, taskId: task.taskId, deliveryContext
++		}, now);
++		const boundQueue = bindDeliveryQueueEntry({ queueName: SESSION_DELIVERY_QUEUE_NAME,
++			entry: queueEntry, insertOnly: true });
++		if (!upsertBoundDeliveryQueueEntryInDatabase(boundQueue, database)) {
++			const existing = loadDeliveryQueueEntryInDatabase(database, SESSION_DELIVERY_QUEUE_NAME, queueEntry.id);
++			if (!existing || existing.kind !== "interactiveFinal" ||
++				JSON.stringify(existing.deliveryContext) !== JSON.stringify(queueEntry.deliveryContext) ||
++				existing.sourceRunId !== subagent.runId || existing.taskId !== task.taskId ||
++				existing.expectedSessionId !== params.binding.parentSessionId)
++				throw new Error("Benson direct final queue owner conflict");
++		}
++		invokeSynchronousHook(() => params.testHooks?.afterMutation?.("queue", database));
+ 		subagent.bensonCompletionAdmission = structuredClone(admission);
+ 		Object.assign(ensureDeliveryState(subagent), {
+-			status: "delivered", disposition: "benson_direct_result", deliveredAt: now,
+-			announcedAt: now, nextAttemptAt: void 0, queueId: void 0
++			status: "in_progress", disposition: "benson_response_handoff", deliveredAt: void 0,
++			announcedAt: void 0, nextAttemptAt: queueEntry.availableAt, queueId: queueEntry.id
+ 		});
+ 		Object.assign(task, {
+-			status: "succeeded", terminalOutcome: "succeeded", deliveryStatus: "delivered",
++			status: "succeeded", terminalOutcome: "succeeded", deliveryStatus: "session_queued",
+ 			endedAt: subagent.execution.endedAt, lastEventAt: now,
+ 			progressSummary: "Validated Benson result", terminalSummary: null, error: void 0
+ 		});
+ 		upsertSubagentRunRowInDatabase(database, bindSubagentRunRecord(subagent));
+ 		upsertTaskRunRowInDatabase(database, bindTaskRecord(task));
+ 		deferSqlitePostCommitPublication(database.db, () => publishCommittedRecords(subagent, task));
+-		return "admitted";
++		return { status: "admitted", queueId: queueEntry.id };
+ 	}, params.databaseOptions, { operationLabel: "Benson direct completion admission" });
+ }
++function readBensonDirectCompletionForFinal(queueEntry, databaseOptions) {
++	return runOpenClawStateWriteTransaction((database) => {
++		const child = readSubagentRun(database, queueEntry.sourceRunId);
++		const task = readTaskRecord(database.db, queueEntry.taskId);
++		const binding = child?.bensonCompletionBinding;
++		const admission = child?.bensonCompletionAdmission;
++		if (!child || !task || !binding || !admission ||
++			queueEntry.kind !== "interactiveFinal" || queueEntry.sourceType !== "direct" ||
++			child.runId !== queueEntry.sourceRunId || task.taskId !== queueEntry.taskId ||
++			(child.taskRunId ?? child.runId) !== task.runId ||
++			binding.parentSessionKey !== queueEntry.sessionKey ||
++			binding.parentSessionId !== queueEntry.expectedSessionId ||
++			binding.requestId !== queueEntry.requestId ||
++			admission.destination !== "RESPONSE_CONTROLLER" ||
++			admission.childRunId !== child.runId || admission.taskId !== task.taskId ||
++			admission.requestId !== queueEntry.requestId ||
++			child.delivery?.queueId !== queueEntry.id ||
++			!['in_progress', 'delivered'].includes(child.delivery.status) ||
++			!['session_queued', 'delivered'].includes(task.deliveryStatus) ||
++			JSON.stringify(normalizeDeliveryContext(child.requesterOrigin)) !==
++				JSON.stringify(queueEntry.deliveryContext))
++			throw new Error("Benson Direct durable final owner unavailable");
++		return { binding, admission };
++	}, databaseOptions, { operationLabel: "Benson Direct final owner read" });
++}
++function settleBensonDirectFinalDelivery(queueEntry, receipt, databaseOptions) {
++	if (!receipt || typeof receipt !== "object") throw new Error("Benson Direct receipt unavailable");
++	return runOpenClawStateWriteTransaction((database) => {
++		const child = readSubagentRun(database, queueEntry.sourceRunId);
++		const task = readTaskRecord(database.db, queueEntry.taskId);
++		if (!child || !task || child.delivery?.queueId !== queueEntry.id ||
++			child.bensonCompletionAdmission?.destination !== "RESPONSE_CONTROLLER" ||
++			child.bensonCompletionAdmission.requestId !== queueEntry.requestId ||
++			child.bensonCompletionBinding?.parentSessionId !== queueEntry.expectedSessionId ||
++			(child.taskRunId ?? child.runId) !== task.runId)
++			throw new Error("Benson Direct delivery settlement owner changed");
++		if (child.delivery.status === "delivered" && task.deliveryStatus === "delivered") return "duplicate";
++		if (child.delivery.status !== "in_progress" || task.deliveryStatus !== "session_queued")
++			throw new Error("Benson Direct delivery settlement state invalid");
++		const now = Date.now();
++		Object.assign(ensureDeliveryState(child), { status: "delivered", disposition: "delivered",
++			deliveredAt: now, announcedAt: now, lastError: void 0, nextAttemptAt: void 0 });
++		Object.assign(task, { deliveryStatus: "delivered", lastEventAt: now });
++		upsertSubagentRunRowInDatabase(database, bindSubagentRunRecord(child));
++		upsertTaskRunRowInDatabase(database, bindTaskRecord(task));
++		deferSqlitePostCommitPublication(database.db, () => publishCommittedRecords(child, task));
++		return "settled";
++	}, databaseOptions, { operationLabel: "Benson Direct final delivery settlement" });
++}
+ function rejectBensonCompletion(params) {
+ 	return runOpenClawStateWriteTransaction((database) => {
+ 		const subagent = readSubagentRun(database, params.runId);
+@@ -1388,4 +1459,4 @@
+ 	}, params.databaseOptions, { operationLabel: "requester completion batch settlement" });
+ }
+ //#endregion
+-export { admitBensonDirectCompletion as B2, rejectBensonCompletion as B3, safeRemoveAttachmentsDir as A, recoverPendingSessionDeliveries as B, ANNOUNCE_COMPLETION_HARD_EXPIRY_MS as C, logAnnounceGiveUp as D, PROVISIONAL_KILL_RECONCILIATION_MS as E, buildAnnounceIdempotencyKey as F, resolveLifecycleOutcomeFromRunOutcome as G, emitSubagentProgressEndedHook as H, schedulePendingSessionDeliveries as I, scheduleSessionDelivery as L, cleanupMaterializedSubagentAttachments as M, removeSubagentAttachmentTree as N, persistSubagentSessionTiming as O, buildAnnounceIdFromChildRun as P, startSessionDeliveryRuntime as R, safeSetSubagentTaskDeliveryStatus as S, MIN_ANNOUNCE_RETRY_DELAY_MS as T, resolveFinalizedSubagentTaskState as U, emitSubagentEndedHookOnce as V, resolveKilledSubagentTaskEndedAt as W, markRequesterSettleWakePending as _, reconcileRetiredSubagentCancellation as a, refreshFrozenResultFromSession as b, buildSafeLifecycleErrorMeta as c, finalizeSubagentTaskRun as d, formatAnnounceDeliveryError as f, markPendingFinalDelivery as g, loadPendingFinalDeliveryPayload as h, publishCommittedRecords as i, updateSubagentArchiveAtMs as j, resolveAnnounceRetryDelayMs as k, clearSubagentPendingDelivery as l, hasPriorRequesterDeliveryMirror as m, admitSubagentCompletionDelivery as n, settleRequesterCompletionBatch as o, freezeRunResultAtCompletion as p, blockSubagentCompletionDelivery as r, settleSubagentCompletionDelivery as s, SUSPENDED_RETENTION_MS as t, emitCompletionEndedHookIfNeeded as u, maskLifecycleIdentifier as v, ANNOUNCE_EXPIRY_MS as w, refreshPendingFinalDeliveryPayload as x, recordAnnounceDeliveryResult as y, drainPendingSessionDelivery as z };
++export { readBensonDirectCompletionForFinal as B4, settleBensonDirectFinalDelivery as B5, admitBensonDirectCompletion as B2, rejectBensonCompletion as B3, safeRemoveAttachmentsDir as A, recoverPendingSessionDeliveries as B, ANNOUNCE_COMPLETION_HARD_EXPIRY_MS as C, logAnnounceGiveUp as D, PROVISIONAL_KILL_RECONCILIATION_MS as E, buildAnnounceIdempotencyKey as F, resolveLifecycleOutcomeFromRunOutcome as G, emitSubagentProgressEndedHook as H, schedulePendingSessionDeliveries as I, scheduleSessionDelivery as L, cleanupMaterializedSubagentAttachments as M, removeSubagentAttachmentTree as N, persistSubagentSessionTiming as O, buildAnnounceIdFromChildRun as P, startSessionDeliveryRuntime as R, safeSetSubagentTaskDeliveryStatus as S, MIN_ANNOUNCE_RETRY_DELAY_MS as T, resolveFinalizedSubagentTaskState as U, emitSubagentEndedHookOnce as V, resolveKilledSubagentTaskEndedAt as W, markRequesterSettleWakePending as _, reconcileRetiredSubagentCancellation as a, refreshFrozenResultFromSession as b, buildSafeLifecycleErrorMeta as c, finalizeSubagentTaskRun as d, formatAnnounceDeliveryError as f, markPendingFinalDelivery as g, loadPendingFinalDeliveryPayload as h, publishCommittedRecords as i, updateSubagentArchiveAtMs as j, resolveAnnounceRetryDelayMs as k, clearSubagentPendingDelivery as l, hasPriorRequesterDeliveryMirror as m, admitSubagentCompletionDelivery as n, settleRequesterCompletionBatch as o, freezeRunResultAtCompletion as p, blockSubagentCompletionDelivery as r, settleSubagentCompletionDelivery as s, SUSPENDED_RETENTION_MS as t, emitCompletionEndedHookIfNeeded as u, maskLifecycleIdentifier as v, ANNOUNCE_EXPIRY_MS as w, refreshPendingFinalDeliveryPayload as x, recordAnnounceDeliveryResult as y, drainPendingSessionDelivery as z };
+--- a/dist/subagent-completion-delivery-BlfHhlHm.mjs
++++ b/dist/subagent-completion-delivery-BlfHhlHm.mjs
+@@ -6,13 +6,14 @@
+ import "./runtime-internal-BlTJ6Kwo.mjs";
+ import { t as captureOperatorToolGatewayContinuationContext } from "./server-plugin-in-process-dispatch-DeqbsaqC.mjs";
+ import { t as resolveSubagentCompletionResultText } from "./subagent-completion-result-DdiIlFMt.mjs";
+-import { A as safeRemoveAttachmentsDir, B2 as admitBensonDirectCompletion, B3 as rejectBensonCompletion, C as ANNOUNCE_COMPLETION_HARD_EXPIRY_MS, L as scheduleSessionDelivery, h as loadPendingFinalDeliveryPayload, i as publishCommittedRecords, n as admitSubagentCompletionDelivery, r as blockSubagentCompletionDelivery, s as settleSubagentCompletionDelivery, t as SUSPENDED_RETENTION_MS } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
++import { A as safeRemoveAttachmentsDir, B2 as admitBensonDirectCompletion, B4 as readBensonDirectCompletionForFinal, B3 as rejectBensonCompletion, C as ANNOUNCE_COMPLETION_HARD_EXPIRY_MS, L as scheduleSessionDelivery, h as loadPendingFinalDeliveryPayload, i as publishCommittedRecords, n as admitSubagentCompletionDelivery, r as blockSubagentCompletionDelivery, s as settleSubagentCompletionDelivery, t as SUSPENDED_RETENTION_MS } from "./subagent-completion-admission.store-Bw0OSK2O.mjs";
+ import { l as resolveSessionStorePathCore } from "./paths-CcMbq5NY.mjs";
+ import { l as loadSessionEntryReadOnly } from "./session-accessor.sqlite-entry-UCl9kr-O.mjs";
+ import { r as getRuntimeConfig } from "./io.runtime-hPN4FOBi.mjs";
+ import { d as readVisibleSessionTranscriptMessageEntries } from "./session-transcript-runtime-CePvNE-m.mjs";
+ import { a as SessionDeliveryDeferredError, c as prepareClaimedSessionDelivery, i as SessionDeliveryDeadLetteredError } from "./session-delivery-queue.records-rYJIeHGW.mjs";
+ import { p as releaseSessionDeliveryClaim } from "./session-delivery-queue-storage-DSTuGS2l.mjs";
++import { C as prepareBensonNativeInteractiveFinal } from "./dispatch-from-config.finalize-B25V5wMZ.mjs";
+ //#region src/agents/subagents/completion/subagent-completion-instructions.ts
+ const SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION = "This completion ends one child run, not necessarily the original user request. Compare the result with the requested outcome before deciding the task is done. Reviews, failed checks, and other in-scope fixable blockers require continued work or a follow-up in the kept child session; report a blocker only when progress needs new user authority or an unavailable external decision.";
+ const SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION = `Process this result privately. ${SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION} Your final reply stays internal. If the original request requires a user-facing update, send it through an available, permitted messaging tool; do not rely on your final reply for delivery. Reply ONLY: ${SILENT_REPLY_TOKEN} when no further work or user-facing update is owed, or after sending that update.`;
+@@ -102,11 +103,29 @@
+ 		if (!rejected) throw error;
+ 		return { blocked: true };
+ 	}
+-	if (admission.destination === "RESPONSE_CONTROLLER") admitBensonDirectCompletion({
+-		runId: entry.runId, taskId: task.taskId, binding, admission
+-	});
++	if (admission.destination === "RESPONSE_CONTROLLER") {
++		const committed = admitBensonDirectCompletion({
++			runId: entry.runId, taskId: task.taskId, binding, admission
++		});
++		await scheduleSessionDelivery(committed.queueId, captureOpenClawStateWorkerContext());
++		return { admission, queueId: committed.queueId, deliverySettled: committed.delivered === true };
++	}
+ 	return { admission };
+ }
++async function prepareBensonDirectFinalFromQueue(params) {
++	const { queueEntry, scope, cfg } = params;
++	const owner = readBensonDirectCompletionForFinal(queueEntry, params.databaseOptions);
++	const { createDirectResponseEnvelope } = await import("file:///home/oa/projects/benson/integrations/openclaw/benson-routing/envelope.mjs");
++	const responseEnvelope = createDirectResponseEnvelope(owner, {
++		requestId: queueEntry.requestId,
++		source: { type: "direct", agentId: owner.binding.executionOwner, runId: queueEntry.sourceRunId },
++		parentSession: { sessionKey: queueEntry.sessionKey, sessionId: queueEntry.expectedSessionId },
++		responsePolicy: { allowedModes: ["deterministic", "safe_failure"], preferredMode: "deterministic" }
++	});
++	return prepareBensonNativeInteractiveFinal({ scope, queueEntry, responseEnvelope,
++		referenceTime: Date.now(),
++		preferences: { nativeTimezone: cfg?.agents?.defaults?.userTimezone } });
++}
+ function findSubagentForTask(task) {
+ 	for (const entry of subagentRuns.values()) if ((entry.taskRunId ?? entry.runId) === task.runId) return entry;
+ }
+@@ -354,4 +373,4 @@
+ 	};
+ }
+ //#endregion
+-export { prepareBensonNativeCompletion, settleCorrelatedSubagentDelivery as a, retrySubagentCompletionDelivery as i, dismissSubagentCompletionDelivery as n, SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION as o, resolveCorrelatedSubagentDelivery as r, SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION as s, admitCorrelatedSubagentSessionDelivery as t };
++export { prepareBensonDirectFinalFromQueue as B, prepareBensonNativeCompletion, settleCorrelatedSubagentDelivery as a, retrySubagentCompletionDelivery as i, dismissSubagentCompletionDelivery as n, SUBAGENT_COMPLETION_OUTCOME_INSTRUCTION as o, resolveCorrelatedSubagentDelivery as r, SUBAGENT_PRIVATE_COMPLETION_INSTRUCTION as s, admitCorrelatedSubagentSessionDelivery as t };

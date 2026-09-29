@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
 import test from 'node:test';
 import { bindNativeCompletion, validateNativeCompletion } from '../completion-control.mjs';
-import { createDirectResponseEnvelope, createMainResponseEnvelope,
+import { createDirectResponseEnvelope, createDirectFailureResponseEnvelope, createMainResponseEnvelope,
   normalizeLegacyTaskResult, validateResponseEnvelope, MAX_RESPONSE_RESULTS } from '../envelope.mjs';
 
 const corpus = JSON.parse(await readFile(new URL('./fixtures/presentation-cases.json', import.meta.url)));
@@ -21,7 +21,8 @@ function result(id, taskId, messageCandidate = null) {
     pendingExpiresAt: raw.pendingContext?.expiresAt ??
       (raw.pendingContext ? '2026-09-25T22:00:00+03:00' : null) }, messageCandidate);
 }
-function completion(domainResult, childRunId, destination = 'CALLER', parentRunId = callerRunId) {
+function completion(domainResult, childRunId, destination = 'CALLER',
+  parentRunId = destination === 'CALLER' ? callerRunId : null) {
   const executionOwner = domainResult.domain === 'reminder' ? 'reminder-service' : 'jessica-vacuum';
   const commitment = { requestId, sessionId: parentSession.sessionId,
     owner: destination === 'CALLER' ? 'main' : executionOwner, phase: 'committed' };
@@ -33,9 +34,10 @@ function completion(domainResult, childRunId, destination = 'CALLER', parentRunI
     taskId: domainResult.taskId, destination, callerRunId: binding.callerRunId,
     result: domainResult } };
 }
-function main(completions, noDomainStatus = completions.length ? null : 'success') {
+function main(completions, lifecycle = { domainExecution: completions.length ? 'attempted' : 'none',
+  failure: null }) {
   return { requestId, source: { type: 'main', agentId: 'main', runId: 'native-finalization-run' },
-    parentSession, completions, noDomainStatus, responsePolicy };
+    parentSession, completions, lifecycle, responsePolicy };
 }
 function direct(domainResult, childRunId) {
   const completed = completion(domainResult, childRunId, 'RESPONSE_CONTROLLER');
@@ -44,19 +46,33 @@ function direct(domainResult, childRunId) {
     responsePolicy } };
 }
 
-test('Main-only completion has explicit no-domain semantics and no invented verification', () => {
-  for (const noDomainStatus of ['success', 'failure']) {
-    const candidate = noDomainStatus === 'success' ? { text: 'Hello.', language: 'en' } : null;
-    const envelope = createMainResponseEnvelope({ messageCandidate: candidate }, main([], noDomainStatus));
-    assert.equal(envelope.status, noDomainStatus);
-    assert.deepEqual(envelope.results, []);
-    assert.deepEqual(plain(envelope.provenance), {
-      executionVerified: 'not_applicable', completionCorrelated: false });
-    assert.deepEqual(plain(envelope.messageCandidate), candidate);
-    assert.equal(envelope.pendingContext, null);
-  }
-  assert.throws(() => createMainResponseEnvelope({ messageCandidate: null }, main([], null)),
-    /main_finalization_status/);
+test('Main-only success needs positive no-domain proof; terminal failure needs native fact', () => {
+  const candidate = { text: 'Hello.', language: 'en' };
+  const conversation = createMainResponseEnvelope({ messageCandidate: candidate }, main([]));
+  assert.equal(conversation.status, 'success');
+  assert.deepEqual(conversation.results, []);
+  assert.deepEqual(plain(conversation.lifecycle), { domainExecution: 'none', failure: null });
+  assert.equal(conversation.provenance.executionVerified, 'not_applicable');
+  const failure = createMainResponseEnvelope({ messageCandidate: null }, main([], {
+    domainExecution: 'uncertain', failure: { code: 'RESULT_UNAVAILABLE' },
+  }));
+  assert.equal(failure.status, 'failure');
+  assert.equal(failure.provenance.executionVerified, false);
+  assert.deepEqual(failure.results, []);
+  assert.throws(() => createMainResponseEnvelope({ messageCandidate: null }, main([], {
+    domainExecution: 'attempted', failure: null,
+  })), /no_domain_result_invalid/);
+  assert.throws(() => validateResponseEnvelope({ ...conversation, schemaVersion: 1 }), /response_invalid/);
+});
+
+test('Direct terminal failure remains a native failure without a fabricated result', () => {
+  const envelope = createDirectFailureResponseEnvelope({ requestId, parentSession,
+    source: { type: 'direct', agentId: 'jessica-vacuum', runId: 'failed-child' },
+    responsePolicy, lifecycle: { domainExecution: 'uncertain', failure: { code: 'CHILD_RESULT_INVALID' } },
+  });
+  assert.equal(envelope.status, 'failure');
+  assert.deepEqual(envelope.results, []);
+  assert.equal(envelope.provenance.executionVerified, false);
 });
 
 test('direct completion normalizes one authoritative result without Main', () => {
@@ -143,6 +159,18 @@ test('Main aggregates later caller runs in one owning session without losing fac
     /response_results_invalid/);
 });
 
+test('later infrastructure failure keeps a verified result and marks the workflow partial', () => {
+  const first = completion(result('jessica-status-read-en', 'task-before-failure'), 'child-before-failure');
+  const envelope = createMainResponseEnvelope({ messageCandidate: null }, main([first], {
+    domainExecution: 'uncertain', failure: { code: 'LATER_COMPLETION_UNAVAILABLE' },
+  }));
+  assert.equal(envelope.status, 'partial');
+  assert.equal(envelope.results[0].taskId, 'task-before-failure');
+  assert.equal(envelope.lifecycle.failure.code, 'LATER_COMPLETION_UNAVAILABLE');
+  assert.throws(() => validateResponseEnvelope({ ...envelope, status: 'success' }),
+    /response_results_invalid/);
+});
+
 test('one through sixteen independent completions share the same contract', () => {
   for (const count of [1, 3, MAX_RESPONSE_RESULTS]) {
     const completions = Array.from({ length: count }, (_, index) =>
@@ -171,7 +199,7 @@ test('Main candidate cannot author mode, source, correlation or an all-success a
       trusted), /response_candidate_shape/);
   }
   assert.throws(() => createMainResponseEnvelope({ messageCandidate: null },
-    { ...trusted, noDomainStatus: 'success' }), /main_finalization_status/);
+    { ...trusted, lifecycle: { domainExecution: 'none', failure: null } }), /response_results_invalid/);
   assert.throws(() => createMainResponseEnvelope({ messageCandidate: null },
     { ...trusted, provenance: { completionCorrelated: true } }), /main_finalization_shape/);
 });

@@ -69,7 +69,7 @@
 +				return "permanent_failure";
 +			}
 +			if (prepared.admission.destination === "RESPONSE_CONTROLLER") {
-+				params.onDeliveryResult?.({ delivered: true, path: "benson_direct_result", disposition: "delivered" });
++				params.onDeliveryResult?.({ delivered: true, path: "benson_response_handoff", disposition: "delivered" });
 +				return "delivered";
 +			}
 +			params.bensonCompletionAdmission = prepared.admission;
@@ -174,11 +174,11 @@
 +		const now = Date.now();
 +		subagent.bensonCompletionAdmission = structuredClone(admission);
 +		Object.assign(ensureDeliveryState(subagent), {
-+			status: "delivered", disposition: "benson_direct_result", deliveredAt: now,
++			status: "delivered", disposition: "benson_response_handoff", deliveredAt: now,
 +			announcedAt: now, nextAttemptAt: void 0, queueId: void 0
 +		});
 +		Object.assign(task, {
-+			status: "succeeded", terminalOutcome: "succeeded", deliveryStatus: "delivered",
++			status: "succeeded", terminalOutcome: "succeeded", deliveryStatus: "session_queued",
 +			endedAt: subagent.execution.endedAt, lastEventAt: now,
 +			progressSummary: "Validated Benson result", terminalSummary: null, error: void 0
 +		});

@@ -21,7 +21,9 @@ export function bindNativeCompletion({ commitment, sourceTurnId, parentSessionKe
   completionTarget }) {
   if (!plain(commitment) || !same(commitment.requestId, sourceTurnId) ||
       !same(commitment.sessionId, parentSessionId) || commitment.phase !== 'committed' ||
-      !id(parentSessionKey) || !id(parentRunId) || !id(childRunId) ||
+      !id(parentSessionKey) ||
+      (completionTarget === 'CALLER' ? !id(parentRunId) : parentRunId !== null) ||
+      !id(childRunId) ||
       !id(childSessionKey) || !DOMAINS.has(executionOwner) ||
       !childSessionKey.startsWith(`agent:${executionOwner}:subagent:`) ||
       !['CALLER', 'RESPONSE_CONTROLLER'].includes(completionTarget) ||
@@ -38,7 +40,9 @@ export function validateNativeCompletion({ binding, commitment, parentSession,
   child, task, result }) {
   if (!plain(binding) || binding.schemaVersion !== VERSION ||
       !id(binding.requestId) || !id(binding.parentSessionKey) ||
-      !id(binding.parentSessionId) || !id(binding.parentRunId) ||
+      !id(binding.parentSessionId) ||
+      (binding.completionTarget === 'CALLER' ? !id(binding.parentRunId) :
+        binding.parentRunId !== null) ||
       !id(binding.childRunId) || !id(binding.childSessionKey) ||
       !DOMAINS.has(binding.executionOwner) ||
       !['CALLER', 'RESPONSE_CONTROLLER'].includes(binding.completionTarget) ||
@@ -47,7 +51,9 @@ export function validateNativeCompletion({ binding, commitment, parentSession,
       !plain(child) || !same(child.runId, binding.childRunId) ||
       !same(child.childSessionKey, binding.childSessionKey) ||
       !same(child.requesterSessionKey, binding.parentSessionKey) ||
-      !same(child.requesterTurnRunId, binding.parentRunId) ||
+      (binding.completionTarget === 'CALLER' ?
+        !same(child.requesterTurnRunId, binding.parentRunId) :
+        child.requesterTurnRunId != null) ||
       !same(child.agentId, binding.executionOwner) ||
       child.execution?.status !== 'terminal' || child.execution?.outcome?.status !== 'ok' ||
       !plain(task) || !same(task.runId, binding.childRunId) ||

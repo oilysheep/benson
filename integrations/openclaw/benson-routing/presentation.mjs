@@ -1,3 +1,5 @@
+import { formatUserDatetime } from "../../../shared/benson-datetime.mjs";
+
 const LANGUAGES = new Set(["en", "he"]);
 
 function record(value) {
@@ -122,7 +124,7 @@ function reminderDeliveries(result) {
   return Array.isArray(deliveries) ? deliveries : [];
 }
 
-function renderReminder(result, language) {
+function renderReminder(result, language, timezone, now) {
   if (!exactKeys(result, [
     "status",
     "domain",
@@ -163,11 +165,32 @@ function renderReminder(result, language) {
     return rendered(`The “${result.data.record.content.trim()}” reminder was deleted.`);
   }
 
+  if (result.operation === "create" && language === "he" &&
+      result.data.transaction?.status === "success" &&
+      result.data.transaction?.verified === true &&
+      result.data.record?.status === "active" &&
+      nonempty(result.data.record?.content) &&
+      result.data.record.schedule?.type === "one-shot" &&
+      nonempty(result.data.record.schedule?.resolvedTime) &&
+      nonempty(result.data.record.schedule?.timezone) &&
+      result.data.record.calendar?.requested === false &&
+      nonempty(timezone) && nonempty(now)) {
+    try {
+      const when = formatUserDatetime(result.data.record.schedule.resolvedTime,
+        timezone, { now });
+      return rendered(`התזכורת „${result.data.record.content.trim()}” נקבעה ל${when}.`);
+    } catch {
+      return unsupported("invalid_datetime");
+    }
+  }
+
   return unsupported("semantic_rendering_required");
 }
 
 export function renderPresentation(input) {
-  if (!exactKeys(input, ["result", "language"]) || !LANGUAGES.has(input.language) ||
+  if (!(exactKeys(input, ["result", "language"]) ||
+      exactKeys(input, ["result", "language", "timezone", "now"])) ||
+      !LANGUAGES.has(input.language) ||
       !record(input.result)) {
     return unsupported("invalid_input");
   }
@@ -175,7 +198,7 @@ export function renderPresentation(input) {
     return renderJessica(input.result, input.language);
   }
   if (input.result.domain === "reminder") {
-    return renderReminder(input.result, input.language);
+    return renderReminder(input.result, input.language, input.timezone, input.now);
   }
   return unsupported("unsupported_result_shape");
 }

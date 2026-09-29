@@ -36,8 +36,8 @@
       ]
     },
     "reminderDateFormatter": {
-      "path": "agents/reminder-service/libexec/reminder-service-core",
-      "function": "format_user_datetime"
+      "path": "shared/benson-datetime.mjs",
+      "function": "formatUserDatetime"
     }
   },
   "cases": [
@@ -419,7 +419,7 @@
         "pendingContext": null
       },
       "expected": {
-        "disposition": "semantic_rendering_required",
+        "disposition": "render_candidate",
         "userVisibleFacts": ["reminder created and verified", "content=להתקשר לאבא", "local time=מחר ב־08:00"],
         "exactText": "התזכורת „להתקשר לאבא” נקבעה למחר ב־08:00.",
         "mustNotClaim": ["calendar event created", "ISO timestamp", "timezone name"]

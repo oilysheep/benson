@@ -568,27 +568,16 @@ test("reviewed presentation corpus covers bounded renderer and continuation boun
     projectRoot,
     corpus.ownerCatalog.reminderDateFormatter.path,
   );
-  const formatter = spawnSync("python3", [
-    "-c",
-    [
-      "import datetime as dt, importlib.machinery, importlib.util, sys",
-      "loader=importlib.machinery.SourceFileLoader('benson_reminder_formatter',sys.argv[1])",
-      "spec=importlib.util.spec_from_loader(loader.name,loader)",
-      "module=importlib.util.module_from_spec(spec)",
-      "loader.exec_module(module)",
-      "now=dt.datetime.fromisoformat(sys.argv[4].replace('Z','+00:00'))",
-      "print(module.format_user_datetime(sys.argv[2],sys.argv[3],now=now))",
-    ].join(";"),
-    formatterOwner,
+  const formatter = await import(pathToFileURL(formatterOwner).href);
+  const formatted = formatter[corpus.ownerCatalog.reminderDateFormatter.function](
     "2026-09-24T05:00:00Z",
     corpus.fixedClock.timezone,
-    corpus.fixedClock.now,
-  ], { encoding: "utf8", timeout: 10_000 });
-  assert.equal(formatter.status, 0, formatter.stderr);
-  assert.equal(formatter.stdout.trim(), "מחר ב־08:00");
+    { now: corpus.fixedClock.now },
+  );
+  assert.equal(formatted, "מחר ב־08:00");
   assert.equal(
     corpus.cases.find((item) => item.id === "reminder-create-verified-he")
-      .expected.exactText.includes(formatter.stdout.trim()),
+      .expected.exactText.includes(formatted),
     true,
   );
 });

@@ -42,7 +42,7 @@ test("reviewed render candidates produce exact goldens and preserve clarificatio
   const candidates = CORPUS.cases.filter(
     (item) => item.expected.disposition === "render_candidate",
   );
-  assert.equal(candidates.length, 8);
+  assert.equal(candidates.length, 9);
 
   for (const item of candidates) {
     if (item.domain === "jessica") {
@@ -52,8 +52,10 @@ test("reviewed render candidates produce exact goldens and preserve clarificatio
       );
     }
     const before = structuredClone(item.result);
-    const first = renderPresentation({ result: item.result, language: item.language });
-    const second = renderPresentation({ result: item.result, language: item.language });
+    const input = { result: item.result, language: item.language,
+      ...(item.coverage.includes("dates_timezones") ? { now: CORPUS.fixedClock.now, timezone: CORPUS.fixedClock.timezone } : {}) };
+    const first = renderPresentation(input);
+    const second = renderPresentation(input);
 
     assert.deepEqual(first, second, item.id);
     assert.deepEqual(item.result, before, item.id);
@@ -72,7 +74,7 @@ test("semantic, delivery-dependent, unverified, and unsupported results fail clo
   const unsupportedCases = CORPUS.cases.filter(
     (item) => item.expected.disposition !== "render_candidate",
   );
-  assert.equal(unsupportedCases.length, 7);
+  assert.equal(unsupportedCases.length, 6);
 
   for (const item of unsupportedCases) {
     const before = structuredClone(item.result);
@@ -146,11 +148,25 @@ test("renderer has no clock, I/O, model, execution, transport, or delivery surfa
   assert.equal(child.stdout, "PASS");
 });
 
-test("Reminder date goldens remain semantic because canonical formatting is not reusable from pure JS", () => {
+test("Reminder date golden uses the shared formatter and an explicit clock", () => {
   const dateCase = CORPUS.cases.find((item) => item.id === "reminder-create-verified-he");
-  assert.equal(dateCase.expected.disposition, "semantic_rendering_required");
+  assert.deepEqual(
+    renderPresentation({ result: dateCase.result, language: dateCase.language,
+      now: CORPUS.fixedClock.now, timezone: CORPUS.fixedClock.timezone }),
+    { kind: "rendered", text: dateCase.expected.exactText, pendingContext: null },
+  );
   assert.deepEqual(
     renderPresentation({ result: dateCase.result, language: dateCase.language }),
     { kind: "unsupported", reason: "semantic_rendering_required" },
+  );
+  assert.deepEqual(
+    renderPresentation({ result: dateCase.result, language: dateCase.language,
+      now: CORPUS.fixedClock.now }),
+    { kind: "unsupported", reason: "invalid_input" },
+  );
+  assert.deepEqual(
+    renderPresentation({ result: dateCase.result, language: dateCase.language,
+      now: "invalid", timezone: CORPUS.fixedClock.timezone }),
+    { kind: "unsupported", reason: "invalid_datetime" },
   );
 });

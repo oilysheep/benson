@@ -60,6 +60,7 @@ export function parseTaskEnvelope(serialized) {
 
 // Private, inactive contracts. Native owners must supply trusted metadata.
 export const CONTROL_CONTRACT_VERSION = 1;
+export const RESPONSE_CONTRACT_VERSION = 2;
 export const MAX_RESPONSE_RESULTS = 16;
 export const MAX_RENDERED_TEXT = 4096;
 const MAX_WARNINGS = 64;
@@ -68,7 +69,7 @@ const MAX_BYTES = 262144;
 const RESULT_KEYS = ["schemaVersion", "domainSchemaVersion", "taskId", "status", "domain", "operation", "verified", "data", "warnings", "error", "pendingContext", "messageCandidate"];
 const LEGACY_KEYS = ["status", "domain", "operation", "verified", "data", "warnings", "error", "pendingContext"];
 const ROUTE_KEYS = ["schemaVersion", "requestId", "executionOwner", "completionTarget", "callerRunId", "responsePolicy"];
-const RESPONSE_KEYS = ["schemaVersion", "requestId", "source", "status", "results", "pendingContext", "messageCandidate", "responsePolicy", "provenance"];
+const RESPONSE_KEYS = ["schemaVersion", "requestId", "source", "status", "results", "pendingContext", "messageCandidate", "responsePolicy", "provenance", "lifecycle"];
 const COMPLETION_ADMISSION_KEYS = ["schemaVersion", "requestId", "childRunId", "taskId", "destination", "callerRunId", "result"];
 const COMPLETION_BINDING_KEYS = ["schemaVersion", "requestId", "parentSessionKey", "parentSessionId", "parentRunId", "childRunId", "childSessionKey", "executionOwner", "completionTarget", "callerRunId"];
 const NATIVE_COMPLETION_KEYS = ["binding", "admission"];
@@ -217,23 +218,53 @@ export function deriveResponseStatus(results) {
   return statuses.every((status) => status === statuses[0]) ? statuses[0] : "partial";
 }
 
+function responseLifecycle(value) {
+  exact(value, ["domainExecution", "failure"], "response_lifecycle_shape");
+  if (!["none", "attempted", "uncertain"].includes(value.domainExecution)) {
+    fail("response_lifecycle_execution");
+  }
+  if (value.failure !== null) {
+    exact(value.failure, ["code"], "response_failure_shape");
+    if (typeof value.failure.code !== "string" ||
+        !/^[A-Z][A-Z0-9_]{0,63}$/u.test(value.failure.code)) fail("response_failure_code");
+  }
+  return { domainExecution: value.domainExecution,
+    failure: value.failure === null ? null : { code: value.failure.code } };
+}
+
+export function deriveResponseStatusWithLifecycle(results, lifecycle) {
+  const facts = responseLifecycle(lifecycle);
+  if (results.length === 0) return facts.failure === null ? "success" : "failure";
+  const resultStatus = deriveResponseStatus(results);
+  if (facts.failure === null) return resultStatus;
+  return results.some((result) => result.status !== "failure") ? "partial" : "failure";
+}
+
 export function validateResponseEnvelope(raw) {
   exact(raw, RESPONSE_KEYS, "response_shape");
   exact(raw.source, ["type", "agentId", "runId"], "source_shape");
   exact(raw.provenance, ["executionVerified", "completionCorrelated"], "provenance_shape");
-  if (raw.schemaVersion !== CONTROL_CONTRACT_VERSION || !identifier(raw.requestId) ||
+  if (raw.schemaVersion !== RESPONSE_CONTRACT_VERSION || !identifier(raw.requestId) ||
       !["main", "direct"].includes(raw.source.type) ||
       !identifier(raw.source.agentId) || !identifier(raw.source.runId) ||
       !Array.isArray(raw.results) || raw.results.length > MAX_RESPONSE_RESULTS ||
       ![true, false, "not_applicable"].includes(raw.provenance.executionVerified) ||
       typeof raw.provenance.completionCorrelated !== "boolean") fail("response_invalid");
   const results = raw.results.map(validateTaskResultEnvelope);
+  const lifecycle = responseLifecycle(raw.lifecycle);
   if (new Set(results.map((result) => result.taskId)).size !== results.length) fail("duplicate_task_result");
   if (results.length === 0) {
-    if (raw.source.type !== "main" || raw.provenance.executionVerified !== "not_applicable" ||
-        raw.provenance.completionCorrelated || raw.pendingContext !== null ||
-        !["success", "failure"].includes(raw.status)) fail("no_domain_result_invalid");
-  } else if (raw.status !== deriveResponseStatus(results) ||
+    if (raw.provenance.completionCorrelated || raw.pendingContext !== null ||
+        raw.status !== deriveResponseStatusWithLifecycle(results, lifecycle) ||
+        (lifecycle.failure === null && (raw.source.type !== "main" ||
+          lifecycle.domainExecution !== "none" ||
+          raw.provenance.executionVerified !== "not_applicable")) ||
+        (lifecycle.failure !== null && raw.provenance.executionVerified !==
+          (lifecycle.domainExecution === "none" ? "not_applicable" : false))) {
+      fail("no_domain_result_invalid");
+    }
+  } else if (lifecycle.domainExecution === "none" ||
+      raw.status !== deriveResponseStatusWithLifecycle(results, lifecycle) ||
       raw.provenance.executionVerified !== results.every((result) => result.verified) ||
       !raw.provenance.completionCorrelated ||
       (raw.source.type === "direct" && results.length !== 1)) fail("response_results_invalid");
@@ -243,14 +274,14 @@ export function validateResponseEnvelope(raw) {
         JSON.stringify(raw.pendingContext) !== JSON.stringify(contexts[0]))) fail("response_pending_mismatch");
   const response = { ...raw, results, pendingContext: pending(raw.pendingContext),
     messageCandidate: candidate(raw.messageCandidate), responsePolicy: policy(raw.responsePolicy),
-    source: { ...raw.source }, provenance: { ...raw.provenance } };
+    source: { ...raw.source }, provenance: { ...raw.provenance }, lifecycle };
   boundedCopy(response);
   return freeze(response);
 }
 
 export function validateRenderedOutput(raw) {
   exact(raw, ["schemaVersion", "message"], "rendered_shape");
-  if (raw.schemaVersion !== CONTROL_CONTRACT_VERSION || typeof raw.message !== "string" ||
+  if (raw.schemaVersion !== RESPONSE_CONTRACT_VERSION || typeof raw.message !== "string" ||
       raw.message.length < 1 || raw.message.length > MAX_RENDERED_TEXT ||
       !raw.message.trim()) fail("rendered_invalid");
   return freeze({ ...raw });
@@ -260,9 +291,9 @@ export function validateRenderedOutput(raw) {
 // finalization owner supplies source, results, policy, and provenance.
 export function createResponseEnvelope(candidateInput, trusted) {
   exact(candidateInput, ["messageCandidate"], "response_candidate_shape");
-  exact(trusted, ["requestId", "source", "results", "status", "pendingContext", "responsePolicy", "provenance"], "response_trusted_shape");
+  exact(trusted, ["requestId", "source", "results", "status", "pendingContext", "responsePolicy", "provenance", "lifecycle"], "response_trusted_shape");
   return validateResponseEnvelope({
-    schemaVersion: CONTROL_CONTRACT_VERSION,
+    schemaVersion: RESPONSE_CONTRACT_VERSION,
     ...trusted,
     messageCandidate: candidateInput.messageCandidate,
   });
@@ -277,7 +308,9 @@ function resultFromNativeCompletion(completion, requestId, parentSession, destin
       binding.requestId !== requestId ||
       binding.parentSessionKey !== parentSession.sessionKey ||
       binding.parentSessionId !== parentSession.sessionId ||
-      !identifier(binding.parentRunId) || !identifier(binding.childRunId) ||
+      !((destination === "CALLER" && identifier(binding.parentRunId)) ||
+        (destination === "RESPONSE_CONTROLLER" && binding.parentRunId === null)) ||
+      !identifier(binding.childRunId) ||
       !identifier(binding.childSessionKey) || !identifier(binding.executionOwner) ||
       !binding.childSessionKey.startsWith(`agent:${binding.executionOwner}:subagent:`) ||
       binding.completionTarget !== destination ||
@@ -318,7 +351,7 @@ function factsFromCompletions(completions, requestId, parentSession, destination
 // owning session, S07 completion records, request and policy. Main supplies
 // candidate wording alone; earlier child caller runs may differ from this run.
 export function createMainResponseEnvelope(candidateInput, trusted) {
-  exact(trusted, ["requestId", "source", "parentSession", "completions", "noDomainStatus", "responsePolicy"],
+  exact(trusted, ["requestId", "source", "parentSession", "completions", "lifecycle", "responsePolicy"],
     "main_finalization_shape");
   exact(trusted.source, ["type", "agentId", "runId"], "source_shape");
   exact(trusted.parentSession, PARENT_SESSION_KEYS, "parent_session_shape");
@@ -328,13 +361,13 @@ export function createMainResponseEnvelope(candidateInput, trusted) {
       !identifier(trusted.parentSession.sessionId)) fail("main_finalization_source");
   const facts = factsFromCompletions(trusted.completions, trusted.requestId,
     trusted.parentSession, "CALLER");
-  if (facts.results.length === 0 ? !["success", "failure"].includes(trusted.noDomainStatus) :
-      trusted.noDomainStatus !== null) fail("main_finalization_status");
+  const lifecycle = responseLifecycle(trusted.lifecycle);
   return createResponseEnvelope(candidateInput, {
     requestId: trusted.requestId, source: trusted.source,
-    status: facts.results.length ? deriveResponseStatus(facts.results) : trusted.noDomainStatus,
-    results: facts.results, pendingContext: facts.pendingContext,
-    responsePolicy: trusted.responsePolicy, provenance: facts.provenance,
+    status: deriveResponseStatusWithLifecycle(facts.results, lifecycle),
+    results: facts.results, pendingContext: facts.pendingContext, lifecycle,
+    responsePolicy: trusted.responsePolicy, provenance: { ...facts.provenance,
+      executionVerified: facts.results.length === 0 && lifecycle.domainExecution !== "none" ? false : facts.provenance.executionVerified },
   });
 }
 
@@ -360,6 +393,24 @@ export function createDirectResponseEnvelope(completion, trusted) {
     status: facts.results[0].status, results: facts.results,
     pendingContext: facts.pendingContext, responsePolicy: trusted.responsePolicy,
     provenance: facts.provenance,
+    lifecycle: { domainExecution: "attempted", failure: null },
+  });
+}
+
+// A native terminal failure can have no valid domain result. The failure fact
+// remains separate from TaskResultEnvelope and cannot invent domain success.
+export function createDirectFailureResponseEnvelope(trusted) {
+  exact(trusted, ["requestId", "source", "parentSession", "responsePolicy", "lifecycle"],
+    "direct_failure_shape");
+  exact(trusted.parentSession, PARENT_SESSION_KEYS, "parent_session_shape");
+  if (!identifier(trusted.parentSession.sessionKey) ||
+      !identifier(trusted.parentSession.sessionId)) fail("direct_failure_session");
+  return createResponseEnvelope({ messageCandidate: null }, {
+    requestId: trusted.requestId, source: trusted.source, status: "failure",
+    results: [], pendingContext: null, responsePolicy: trusted.responsePolicy,
+    provenance: { executionVerified: trusted.lifecycle.domainExecution === "none" ?
+      "not_applicable" : false, completionCorrelated: false },
+    lifecycle: trusted.lifecycle,
   });
 }
 
