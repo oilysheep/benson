@@ -96,6 +96,11 @@ When Oren explicitly requests a pre-merge review, run a fresh independent
 Codex process using the configured `reviewer` profile from the target
 checkout/worktree. Reviews are manual and must not start automatically.
 
+When the request is made from an active Builder Codex session, the Builder must
+launch that independent reviewer process itself, wait for it to finish, and
+return the reviewer report to Oren. The Builder must not substitute its own
+review or pass its reasoning/session context to the reviewer.
+
 Use the PR plus the stage, capability, or domain named by Oren as the review
 target. The reviewer must independently establish the minimum sufficient
 authoritative context for that target:
