@@ -96,8 +96,17 @@ function jsonCopy(value, depth = 0) {
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number" && Number.isFinite(value)) return value;
   if (typeof value === "string" && value.length <= 16384) return value;
-  if (Array.isArray(value) && value.length <= 256) return value.map((item) => jsonCopy(item, depth + 1));
+  if (Array.isArray(value) && value.length <= 256) {
+    if (Reflect.ownKeys(value).length !== value.length + 1 ||
+        Array.from({ length: value.length }, (_, index) => Object.getOwnPropertyDescriptor(value, String(index)))
+          .some((descriptor) => !descriptor || !Object.hasOwn(descriptor, 'value'))) fail("json_array_invalid");
+    return value.map((item) => jsonCopy(item, depth + 1));
+  }
   if (isPlainObject(value) && Object.keys(value).length <= 256) {
+    if (Reflect.ownKeys(value).length !== Object.keys(value).length ||
+        Object.values(Object.getOwnPropertyDescriptors(value)).some((descriptor) => !Object.hasOwn(descriptor, 'value'))) {
+      fail("json_object_invalid");
+    }
     const copy = Object.create(null);
     for (const [key, child] of Object.entries(value)) {
       if (key.length > 128 || ["__proto__", "constructor", "prototype"].includes(key)) fail("json_key_invalid");
@@ -424,4 +433,239 @@ export function assertPendingContextBinding(value, trusted, now = new Date()) {
       normalized.binding.conversationId !== trusted.conversationId ||
       Date.parse(normalized.expiresAt) <= now.getTime()) fail("pending_binding_or_expiry");
   return freeze(normalized);
+}
+
+// R02 staged protocol. The exports above remain accepted-main v1 readers only.
+// Native lifecycle integration and persistence belong to R03/R04/R06.
+import { isDeepStrictEqual } from 'node:util';
+
+export const COMPLETION_SCHEMA_VERSION = 3;
+export const COMPLETION_KINDS = Object.freeze(['domain-task', 'final-workflow']);
+export const COMPLETION_STATUSES = Object.freeze([
+  'success', 'clarification_required', 'failure', 'partial', 'unknown', 'not_applicable',
+]);
+const FACT_KEYS = ['status', 'domain', 'domainSchemaVersion', 'operation', 'verified',
+  'verificationScope', 'data', 'warnings', 'error', 'effects', 'uncertainty', 'pendingContext'];
+const BINDING_KEYS = ['requestId', 'workflowId', 'runId', 'agentId', 'sessionKey',
+  'sessionId', 'generation', 'taskId', 'callerRunId', 'completionTarget', 'finality',
+  'authorizationId', 'deliveryPolicy'];
+const RECORD_KEYS = ['schemaVersion', 'kind', 'facts', 'results', 'userResponse',
+  'binding', 'completion'];
+const authorities = new WeakMap();
+
+function code(value) { return typeof value === 'string' && /^[A-Z][A-Z0-9_]{0,63}$/u.test(value); }
+function list(value, field) {
+  if (!Array.isArray(value) || value.length > MAX_WARNINGS ||
+      value.some((entry) => !isPlainObject(entry))) fail(`${field}_invalid`);
+  return boundedCopy(value);
+}
+function gaps(value) {
+  const result = list(value, 'completion_gaps');
+  for (const gap of result) {
+    exact(gap, ['code', 'path', 'detail'], 'completion_gap_shape');
+    if (!code(gap.code) || !identifier(gap.path) || !identifier(gap.detail)) fail('completion_gap_invalid');
+  }
+  return result;
+}
+function userResponse(value) {
+  if (!isPlainObject(value)) fail('user_response_required');
+  if (value.state === 'usable') {
+    exact(value, ['state', 'text', 'language'], 'user_response_shape');
+    return { state: 'usable', ...candidate({ text: value.text, language: value.language }) };
+  }
+  if (value.state === 'unavailable') {
+    exact(value, ['state', 'reason'], 'user_response_shape');
+    exact(value.reason, ['code', 'detail'], 'user_response_reason_shape');
+    if (!code(value.reason.code) || !identifier(value.reason.detail)) fail('user_response_reason_invalid');
+    return boundedCopy(value);
+  }
+  fail('user_response_state');
+}
+function nativeBinding(value, kind) {
+  exact(value, BINDING_KEYS, 'completion_binding_shape');
+  for (const key of ['requestId', 'workflowId', 'runId', 'agentId', 'sessionKey',
+    'sessionId', 'authorizationId']) if (!identifier(value[key])) fail('completion_binding_identity');
+  if (!Number.isSafeInteger(value.generation) || value.generation < 1 ||
+      (value.taskId !== null && !identifier(value.taskId)) ||
+      (kind === 'domain-task' && value.taskId === null) ||
+      (kind === 'final-workflow' && value.taskId !== null) ||
+      !['CALLER', 'RESPONSE_CONTROLLER'].includes(value.completionTarget) ||
+      (value.completionTarget === 'CALLER' ? !identifier(value.callerRunId) : value.callerRunId !== null) ||
+      value.finality !== (value.completionTarget === 'RESPONSE_CONTROLLER')) fail('completion_binding_invalid');
+  exact(value.deliveryPolicy, ['eligible', 'reason'], 'completion_delivery_policy_shape');
+  if (typeof value.deliveryPolicy.eligible !== 'boolean' ||
+      (value.deliveryPolicy.reason !== null && !code(value.deliveryPolicy.reason)) ||
+      (!value.finality && value.deliveryPolicy.eligible)) fail('completion_delivery_policy_invalid');
+  return freeze(boundedCopy(value));
+}
+function facts(value, kind, outcome) {
+  exact(value, FACT_KEYS, 'completion_facts_shape');
+  if (!COMPLETION_STATUSES.includes(value.status) ||
+      ![true, false, 'unknown', 'not_applicable'].includes(value.verified) ||
+      !Array.isArray(value.verificationScope) || value.verificationScope.length > MAX_WARNINGS ||
+      value.verificationScope.some((entry) => !identifier(entry)) ||
+      new Set(value.verificationScope).size !== value.verificationScope.length ||
+      (value.error !== null && !isPlainObject(value.error)) ||
+      (value.operation !== null && !identifier(value.operation))) fail('completion_facts_invalid');
+  if (kind === 'domain-task') {
+    if (value.domain === null && value.domainSchemaVersion === null) {
+      if (outcome !== 'FAILED') fail('completion_domain_unknown');
+    } else if (!Object.hasOwn(DOMAIN_VERSIONS, value.domain) ||
+        DOMAIN_VERSIONS[value.domain] !== value.domainSchemaVersion) fail('completion_domain_version');
+  } else if (value.domain !== null || value.domainSchemaVersion !== null || value.operation !== null) {
+    fail('completion_workflow_domain');
+  }
+  if (value.verified === true && value.verificationScope.length === 0) fail('completion_verification_scope');
+  if (value.verified === 'not_applicable' && (value.verificationScope.length || value.effects.length)) {
+    fail('completion_verification_not_applicable');
+  }
+  // A FAILED report may have gaps in error/pending/verification evidence. Known
+  // business status is retained; the completion gaps explicitly explain absence.
+  if (outcome !== 'FAILED') {
+    if (value.status === 'success' && (value.error !== null || value.pendingContext !== null ||
+        (kind === 'domain-task' && value.verified !== true))) fail('completion_success_invalid');
+    if (value.status === 'failure' && value.error === null) fail('completion_failure_error');
+    if (value.status === 'clarification_required' &&
+        (value.pendingContext === null || value.error !== null || value.verified !== false)) fail('completion_clarification_invalid');
+    if (value.status === 'unknown' && value.uncertainty.length === 0) fail('completion_unknown_unexplained');
+    if (value.status === 'not_applicable' && value.verified !== 'not_applicable') fail('completion_not_applicable_invalid');
+  }
+  return freeze({ ...value, verificationScope: [...value.verificationScope],
+    data: boundedCopy(value.data), warnings: list(value.warnings, 'completion_warnings'),
+    error: boundedCopy(value.error), effects: list(value.effects, 'completion_effects'),
+    uncertainty: list(value.uncertainty, 'completion_uncertainty'), pendingContext: pending(value.pendingContext) });
+}
+
+// Shape validation alone never establishes trust. Every consumer additionally
+// requires validateCompletion(record, nativeAuthority) against native evidence.
+function completionShape(raw) {
+  exact(raw, RECORD_KEYS, 'completion_shape');
+  if (raw.schemaVersion !== COMPLETION_SCHEMA_VERSION || !COMPLETION_KINDS.includes(raw.kind)) {
+    fail('completion_version_or_kind');
+  }
+  exact(raw.completion, ['outcome', 'gaps'], 'completion_outcome_shape');
+  if (!['NORMAL', 'RECOVERED', 'FAILED'].includes(raw.completion.outcome)) fail('completion_outcome_invalid');
+  const missing = gaps(raw.completion.gaps);
+  if ((raw.completion.outcome === 'FAILED') !== (missing.length > 0)) fail('completion_outcome_gaps');
+  if (!Array.isArray(raw.results) || raw.results.length > MAX_RESPONSE_RESULTS ||
+      (raw.kind === 'domain-task' && raw.results.length)) fail('completion_results_count');
+  const results = raw.results.map((result) => {
+    if (result?.kind !== 'domain-task') fail('completion_result_kind');
+    return completionShape(result);
+  });
+  if (new Set(results.map((result) => result.binding.taskId)).size !== results.length) fail('completion_duplicate_task');
+  const result = { schemaVersion: raw.schemaVersion, kind: raw.kind,
+    facts: facts(raw.facts, raw.kind, raw.completion.outcome), results,
+    userResponse: userResponse(raw.userResponse), binding: nativeBinding(raw.binding, raw.kind),
+    completion: { outcome: raw.completion.outcome, gaps: missing } };
+  for (const child of results) {
+    if (child.binding.requestId !== result.binding.requestId ||
+        child.binding.workflowId !== result.binding.workflowId ||
+        child.binding.sessionId !== result.binding.sessionId ||
+        child.binding.sessionKey !== result.binding.sessionKey) fail('completion_result_correlation');
+    if (child.binding.completionTarget === 'RESPONSE_CONTROLLER' &&
+        (results.length !== 1 || result.binding.completionTarget !== 'RESPONSE_CONTROLLER' ||
+         child.binding.runId !== result.binding.runId || child.binding.agentId !== result.binding.agentId ||
+         child.binding.generation !== result.binding.generation)) fail('completion_direct_result_binding');
+  }
+  if (raw.kind === 'final-workflow' && raw.completion.outcome !== 'FAILED') {
+    if (raw.facts.status === 'success' && results.some((child) =>
+        !['success', 'not_applicable'].includes(child.facts.status))) fail('completion_success_hides_result');
+    if (!results.length && raw.facts.status === 'success' && raw.facts.verified !== 'not_applicable') {
+      fail('completion_empty_execution_proof');
+    }
+  }
+  boundedCopy(result);
+  return freeze(result);
+}
+function authoritySnapshot(authority) {
+  const snapshot = authorities.get(authority);
+  if (!snapshot) fail('native_completion_authority_required');
+  return snapshot;
+}
+function unknownFacts() {
+  return { status: 'unknown', domain: null, domainSchemaVersion: null, operation: null,
+    verified: 'unknown', verificationScope: [], data: null, warnings: [], error: null,
+    effects: [], uncertainty: [], pendingContext: null };
+}
+
+// Private, in-memory capability for an independently collected native evidence
+// snapshot. Never expose this constructor as an agent tool or feed agent JSON
+// into it. It owns no run state, completion history, retries or durable store.
+// Following restart the native owner reconstructs it from existing native state.
+export function createCompletionAuthority(native) {
+  exact(native, ['kind', 'binding', 'knownFacts', 'results', 'coverage', 'gaps', 'origin'], 'native_evidence_shape');
+  if (!COMPLETION_KINDS.includes(native.kind) || !['agent', 'runtime'].includes(native.origin) ||
+      !['complete', 'incomplete'].includes(native.coverage) ||
+      !isPlainObject(native.knownFacts) || Object.keys(native.knownFacts).some((key) => !FACT_KEYS.includes(key)) ||
+      !Array.isArray(native.results) || native.results.length > MAX_RESPONSE_RESULTS ||
+      (native.kind === 'domain-task' && native.results.length)) fail('native_evidence_invalid');
+  const binding = nativeBinding(native.binding, native.kind);
+  const known = boundedCopy(native.knownFacts);
+  const missing = gaps(native.gaps);
+  if (native.coverage !== 'complete') missing.push({ code: 'EVIDENCE_COVERAGE_INCOMPLETE',
+    path: 'evidence.coverage', detail: 'Native execution evidence does not account for all required work.' });
+  for (const field of FACT_KEYS) {
+    if (!Object.hasOwn(known, field)) missing.push({ code: 'FACT_NOT_ESTABLISHED',
+      path: `facts.${field}`, detail: 'Required semantic fact is absent from trusted native evidence.' });
+  }
+  const results = native.results.map((entry) => {
+    exact(entry, ['record', 'authority'], 'native_result_evidence_shape');
+    const record = validateCompletion(entry.record, entry.authority);
+    if (record.completion.outcome === 'FAILED') missing.push({ code: 'CHILD_COMPLETION_INCOMPLETE',
+      path: `results.${record.binding.taskId}`, detail: 'Child report preserves known facts but lacks complete semantics.' });
+    return record;
+  });
+  const normalized = facts({ ...unknownFacts(), ...known }, native.kind,
+    missing.length ? 'FAILED' : 'RECOVERED');
+  gaps(missing); // Includes generated gaps; never silently truncate evidence.
+  const authority = Object.freeze(Object.create(null));
+  if (native.origin === 'agent' && missing.length) fail('completion_evidence_insufficient');
+  const snapshot = freeze({ kind: native.kind, binding, facts: normalized, results, gaps: missing,
+    outcome: native.origin === 'agent' ? 'NORMAL' : missing.length ? 'FAILED' : 'RECOVERED' });
+  // Validate correlation and collection bounds even before an agent is consulted.
+  completionShape(recordFromSnapshot(snapshot, 'unavailable', snapshot.outcome));
+  authorities.set(authority, snapshot);
+  return authority;
+}
+function recordFromSnapshot(snapshot, response, outcome) {
+  return { schemaVersion: COMPLETION_SCHEMA_VERSION, kind: snapshot.kind,
+    facts: snapshot.facts, results: snapshot.results,
+    userResponse: response === 'unavailable' ? { state: 'unavailable', reason: {
+      code: 'RUNTIME_WORDING_UNAVAILABLE', detail: 'No owner-authored usable message is retained.' } } : response,
+    binding: snapshot.binding, completion: { outcome, gaps: snapshot.gaps } };
+}
+function assertEvidence(record, snapshot) {
+  if (!isDeepStrictEqual(boundedCopy(record.binding), boundedCopy(snapshot.binding)) ||
+      record.kind !== snapshot.kind) fail('completion_native_binding_mismatch');
+  if (!isDeepStrictEqual(boundedCopy(record.facts), boundedCopy(snapshot.facts)) ||
+      !isDeepStrictEqual(boundedCopy(record.results), boundedCopy(snapshot.results))) fail('completion_evidence_mismatch');
+  if (!isDeepStrictEqual(boundedCopy(record.completion.gaps), boundedCopy(snapshot.gaps)) ||
+      record.completion.outcome !== snapshot.outcome) fail('completion_evidence_insufficient');
+  if (snapshot.outcome !== 'NORMAL' && !isDeepStrictEqual(boundedCopy(record.userResponse),
+      boundedCopy(recordFromSnapshot(snapshot, 'unavailable', snapshot.outcome).userResponse))) {
+    fail('completion_runtime_response_mismatch');
+  }
+}
+export function validateCompletion(raw, nativeAuthority) {
+  const snapshot = authoritySnapshot(nativeAuthority);
+  const record = completionShape(raw);
+  assertEvidence(record, snapshot);
+  return record;
+}
+export function acceptAgentCompletion(proposal, nativeAuthority) {
+  const snapshot = authoritySnapshot(nativeAuthority);
+  exact(proposal, ['schemaVersion', 'kind', 'facts', 'userResponse'], 'agent_completion_shape');
+  if (proposal.schemaVersion !== COMPLETION_SCHEMA_VERSION || proposal.kind !== snapshot.kind) fail('completion_version_or_kind');
+  if (snapshot.outcome !== 'NORMAL') fail('completion_origin_mismatch');
+  if (!isDeepStrictEqual(boundedCopy(proposal.facts), boundedCopy(snapshot.facts))) fail('completion_evidence_mismatch');
+  return validateCompletion(recordFromSnapshot(snapshot, userResponse(proposal.userResponse), 'NORMAL'), nativeAuthority);
+}
+
+// Called only by native terminal handling after exhaustion or inability to
+// continue. No callbacks, I/O, tools, replay, model calls or route selection.
+export function reconstructCompletion(nativeAuthority) {
+  const snapshot = authoritySnapshot(nativeAuthority);
+  if (snapshot.outcome === 'NORMAL') fail('completion_origin_mismatch');
+  return validateCompletion(recordFromSnapshot(snapshot, 'unavailable', snapshot.outcome), nativeAuthority);
 }

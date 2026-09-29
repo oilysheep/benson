@@ -243,3 +243,167 @@ test('foreign, contradictory, duplicate and ambiguous completions fail closed', 
   assert.throws(() => createDirectResponseEnvelope(first, directCompletion.trusted),
     /completion_binding_mismatch/);
 });
+
+import { createCompletionAuthority, acceptAgentCompletion, reconstructCompletion,
+  validateCompletion, COMPLETION_SCHEMA_VERSION } from '../envelope.mjs';
+
+function protocolFacts(changes = {}) {
+  return { status: 'success', domain: 'jessica-vacuum', domainSchemaVersion: '1', operation: 'clean',
+    verified: true, verificationScope: ['command_started'], data: { started: true },
+    warnings: [{ code: 'LIMITED_SCOPE' }], error: null,
+    effects: [{ kind: 'cleaning_started' }], uncertainty: [{ kind: 'physical_completion_unknown' }],
+    pendingContext: null, ...changes };
+}
+function protocolBinding(taskId = null, changes = {}) {
+  return { requestId: 'r02-request', workflowId: 'r02-workflow', runId: taskId ?? 'main-final-run',
+    agentId: taskId === null ? 'main' : 'jessica-vacuum', sessionKey: 'agent:main:oren', sessionId: 'r02-session',
+    generation: 1, taskId, callerRunId: taskId === null ? null : 'main-original-run',
+    completionTarget: taskId === null ? 'RESPONSE_CONTROLLER' : 'CALLER', finality: taskId === null,
+    authorizationId: 'native-authorization', deliveryPolicy: { eligible: taskId === null, reason: null }, ...changes };
+}
+function protocolChild(taskId, changes = {}, origin = 'agent', coverage = 'complete') {
+  const facts = protocolFacts(changes);
+  const authority = createCompletionAuthority({ kind: 'domain-task', binding: protocolBinding(taskId),
+    knownFacts: facts, results: [], coverage, gaps: [], origin });
+  const record = origin === 'runtime' ? reconstructCompletion(authority) : acceptAgentCompletion({
+    schemaVersion: COMPLETION_SCHEMA_VERSION, kind: 'domain-task', facts,
+    userResponse: { state: 'usable', text: 'Cleaning started; physical completion is not established.', language: 'en' },
+  }, authority);
+  return { record, authority };
+}
+function protocolWorkflow(results, changes = {}, origin = 'agent', coverage = 'complete') {
+  const facts = protocolFacts({ domain: null, domainSchemaVersion: null, operation: null,
+    verified: results.length ? true : 'not_applicable', verificationScope: results.length ? ['retained_child_results'] : [],
+    data: {}, effects: [], warnings: [], uncertainty: [], ...changes });
+  const authority = createCompletionAuthority({ kind: 'final-workflow', binding: protocolBinding(),
+    knownFacts: facts, results, coverage, gaps: [], origin });
+  const record = origin === 'runtime' ? reconstructCompletion(authority) : acceptAgentCompletion({
+    schemaVersion: COMPLETION_SCHEMA_VERSION, kind: 'final-workflow', facts,
+    userResponse: { state: 'usable', text: results.length ? 'Requested work has started.' : 'Hello.', language: 'en' },
+  }, authority);
+  return { record, authority };
+}
+
+test('R02 final-workflow collections preserve every child and accept 0/1/many/max', () => {
+  for (const count of [0, 1, 3, MAX_RESPONSE_RESULTS]) {
+    const children = Array.from({ length: count }, (_, index) => protocolChild(`task-${index}`));
+    const { record, authority } = protocolWorkflow(children);
+    assert.equal(record.schemaVersion, 3);
+    assert.equal(record.kind, 'final-workflow');
+    assert.equal(record.completion.outcome, 'NORMAL');
+    assert.equal(record.results.length, count);
+    assert.equal(record.facts.verified, count ? true : 'not_applicable');
+    children.forEach((child, index) => assert.deepEqual(plain(record.results[index]), plain(child.record)));
+    assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+    const { record: recovered } = protocolWorkflow(children, {}, 'runtime');
+    assert.equal(recovered.completion.outcome, 'RECOVERED');
+    assert.equal(recovered.facts.status, 'success');
+    assert.deepEqual(plain(recovered.results), plain(record.results));
+  }
+  const overflow = Array.from({ length: MAX_RESPONSE_RESULTS + 1 }, (_, index) => protocolChild(`task-${index}`));
+  assert.throws(() => protocolWorkflow(overflow), /native_evidence_invalid/);
+  const child = protocolChild('duplicate');
+  assert.throws(() => protocolWorkflow([child, child]), /duplicate_task/);
+  assert.throws(() => protocolWorkflow([], { verified: true, verificationScope: ['unproven_empty_execution'] }), /empty_execution_proof/);
+});
+
+test('R02 mixed outcomes preserve business failure, partial effects and child finalization', () => {
+  const success = protocolChild('verified-start', {}, 'runtime');
+  const failure = protocolChild('business-failure', { status: 'failure', verified: false,
+    verificationScope: [], error: { code: 'ROOM_UNAVAILABLE' }, data: { failedRoom: 'bedroom' }, effects: [] }, 'runtime');
+  const partial = protocolChild('partial-effects', { status: 'partial', verified: false,
+    verificationScope: [], error: { code: 'ROOM_UNAVAILABLE' }, data: { startedRoom: 'kitchen', failedRoom: 'bedroom' } });
+  const children = [success, failure, partial];
+  const { record } = protocolWorkflow(children, { status: 'partial', verified: false,
+    verificationScope: [], error: { code: 'WORKFLOW_PARTIAL' } }, 'runtime');
+  assert.equal(record.completion.outcome, 'RECOVERED');
+  assert.equal(record.facts.status, 'partial');
+  assert.deepEqual(record.results.map((child) => child.facts.status), ['success', 'failure', 'partial']);
+  assert.deepEqual(record.results.map((child) => child.completion.outcome), ['RECOVERED', 'RECOVERED', 'NORMAL']);
+  children.forEach((child, index) => assert.deepEqual(plain(record.results[index]), plain(child.record)));
+  assert.throws(() => protocolWorkflow(children), /success_hides_result/);
+  const onlyFailure = protocolWorkflow([failure], { status: 'failure', verified: false,
+    verificationScope: [], error: { code: 'WORKFLOW_FAILED' } }, 'runtime').record;
+  assert.equal(onlyFailure.completion.outcome, 'RECOVERED');
+  assert.equal(onlyFailure.facts.status, 'failure');
+});
+
+test('R02 incomplete child evidence cannot manufacture recovered workflow success', () => {
+  const knownSuccess = protocolChild('known-success', {}, 'runtime', 'incomplete');
+  const { record, authority } = protocolWorkflow([knownSuccess], {}, 'runtime');
+  assert.equal(record.completion.outcome, 'FAILED');
+  assert.equal(record.facts.status, 'success');
+  assert.equal(record.results[0].facts.status, 'success');
+  assert.deepEqual(plain(record.results[0].facts.effects), [{ kind: 'cleaning_started' }]);
+  assert.ok(record.completion.gaps.some((gap) => gap.code === 'CHILD_COMPLETION_INCOMPLETE'));
+  assert.throws(() => protocolWorkflow([knownSuccess]), /evidence_insufficient/);
+  const forged = plain(record); forged.completion = { outcome: 'RECOVERED', gaps: [] };
+  assert.throws(() => validateCompletion(forged, authority), /evidence_insufficient/);
+});
+
+test('R02 native workflow binding, retained child authority and pending provenance are checked', () => {
+  const pendingContext = { schemaVersion: 1, value: { question: 'Which room?', evidenceId: 'native-question-evidence' },
+    binding: { requesterId: 'oren', conversationId: 'agent:main:oren' }, expiresAt: '2026-09-29T12:00:00Z' };
+  const child = protocolChild('clarify', { status: 'clarification_required', verified: false,
+    verificationScope: [], pendingContext, effects: [] });
+  const { record, authority } = protocolWorkflow([child], { status: 'clarification_required', verified: false,
+    verificationScope: [], pendingContext });
+  assert.deepEqual(plain(record.facts.pendingContext), pendingContext);
+  assert.deepEqual(plain(record.results[0].facts.pendingContext), pendingContext);
+  const forged = plain(record); forged.results[0].facts.pendingContext.binding.requesterId = 'foreign';
+  assert.throws(() => validateCompletion(forged, authority), /evidence_mismatch/);
+  const replayed = plain(record); replayed.binding.generation++;
+  assert.throws(() => validateCompletion(replayed, authority), /native_binding_mismatch/);
+  assert.throws(() => protocolWorkflow([{ record: child.record, authority: {} }], {
+    status: 'clarification_required', verified: false, verificationScope: [], pendingContext }), /native_completion_authority_required/);
+  const native = { kind: 'final-workflow', binding: protocolBinding(null, { requestId: 'another-request' }),
+    knownFacts: protocolFacts({ domain: null, domainSchemaVersion: null, operation: null }),
+    results: [protocolChild('foreign-child')], coverage: 'complete', gaps: [], origin: 'runtime' };
+  assert.throws(() => createCompletionAuthority(native), /result_correlation/);
+});
+
+test('R02 runtime reconstruction is repeatable, bounded and preserves cancellation delivery policy', () => {
+  const binding = protocolBinding(null, { deliveryPolicy: { eligible: false, reason: 'CANCELLED' } });
+  const authority = createCompletionAuthority({ kind: 'final-workflow', binding,
+    knownFacts: protocolFacts({ domain: null, domainSchemaVersion: null, operation: null,
+      status: 'unknown', verified: 'unknown', verificationScope: [], effects: [],
+      uncertainty: [{ kind: 'outstanding_tool_result' }] }), results: [],
+    coverage: 'complete', gaps: [], origin: 'runtime' });
+  const before = JSON.stringify(binding);
+  const first = reconstructCompletion(authority), again = reconstructCompletion(authority);
+  assert.deepEqual(plain(first), plain(again));
+  assert.equal(first.completion.outcome, 'RECOVERED');
+  assert.equal(first.facts.status, 'unknown'); // Proven unknown work is not a missing semantic fact.
+  assert.equal(first.binding.deliveryPolicy.eligible, false);
+  assert.equal(first.binding.deliveryPolicy.reason, 'CANCELLED');
+  assert.equal(JSON.stringify(binding), before);
+  const legacy = createMainResponseEnvelope({ messageCandidate: null }, {
+    requestId, source: { type: 'main', agentId: 'main', runId: 'old-final-run' },
+    parentSession, completions: [],
+    lifecycle: { domainExecution: 'none', failure: null }, responsePolicy });
+  assert.equal(legacy.schemaVersion, 2);
+  assert.throws(() => validateCompletion({ ...legacy, schemaVersion: 1 }, authority), /completion_shape/);
+  assert.throws(() => validateCompletion(legacy, authority), /completion_shape/);
+});
+
+
+test('R02 family can represent a direct final owner without replacing the result binding', () => {
+  const facts = protocolFacts();
+  const directBinding = protocolBinding('direct-task', { runId: 'direct-run', callerRunId: null,
+    completionTarget: 'RESPONSE_CONTROLLER', finality: true, deliveryPolicy: { eligible: true, reason: null } });
+  const childAuthority = createCompletionAuthority({ kind: 'domain-task', binding: directBinding,
+    knownFacts: facts, results: [], coverage: 'complete', gaps: [], origin: 'agent' });
+  const childRecord = acceptAgentCompletion({ schemaVersion: 3, kind: 'domain-task', facts,
+    userResponse: { state: 'usable', text: 'Cleaning started.', language: 'en' } }, childAuthority);
+  const workflowFacts = protocolFacts({ domain: null, domainSchemaVersion: null, operation: null });
+  const native = { kind: 'final-workflow', binding: { ...directBinding, taskId: null },
+    knownFacts: workflowFacts, results: [{ record: childRecord, authority: childAuthority }],
+    coverage: 'complete', gaps: [], origin: 'agent' };
+  const authority = createCompletionAuthority(native);
+  const final = acceptAgentCompletion({ schemaVersion: 3, kind: 'final-workflow', facts: workflowFacts,
+    userResponse: childRecord.userResponse }, authority);
+  assert.deepEqual(plain(final.results[0]), plain(childRecord));
+  assert.deepEqual(plain(final.userResponse), plain(childRecord.userResponse));
+  assert.throws(() => createCompletionAuthority({ ...native, binding: { ...native.binding, runId: 'unrelated' } }),
+    /direct_result_binding/);
+});

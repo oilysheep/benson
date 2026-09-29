@@ -1,12 +1,12 @@
 # Benson control-plane implementation plan
 
-Status: R01 ACCEPTED with D1-D5; R02-R14 are not accepted or advanced by this plan-only revision.
+Status: R01 ACCEPTED with D1-D5; R02 IMPLEMENTED AND VALIDATED IN ISOLATED SOURCE, pending PR #8 review/merge. R03-R14 are NOT STARTED.
 Date: 2026-09-29.
 Canonical owner: `BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md`.
 Authority: [Benson architecture](architecture/BENSON_SUBAGENT_ARCHITECTURE.md), revision 2026-09-29, SHA-256 `8d3cf69b58230040e3794714a37bfc6f4fb1cce8dc6a8a5bdc3a46e022d86046`.
-Current scope: canonical plan alignment through accepted R01 and D1-D5 only. No R02 implementation or acceptance, runtime code, agent, configuration, installation, or production change is included in this plan-only revision.
+Current scope: R02 adds the private v3 Benson completion family and deterministic evidence-based reconstruction in source only. Existing response readers remain compatible; no runtime/configuration/agent/provider/production exposure is included.
 
-Oren approved the target architecture and accepted R01 with decisions D1-D5. This plan-only revision records that accepted boundary; it does not incorporate or accept R02 implementation. R01-R14 are the replacement stage sequence in this same canonical plan. S01-S18 refer only to historical stages in Section 2; their acceptance must not be transferred to replacement stages. No instruction to resume old S09 or start old S10 remains active.
+Oren approved the target architecture and accepted R01 with decisions D1-D5. R02 source implementation and validation are recorded below; R03-R14 remain separate later stages. Historical S01-S18 evidence remains historical and PR #7 remains excluded.
 
 ## 1. Objective, boundaries, and definition of done
 
@@ -165,7 +165,7 @@ If native surfaces cannot enforce an invariant, record the precise gap and compa
 
 ## 5. Ordered replacement stages
 
-R01 and D1-D5 are accepted in Section 8.4. R02-R14 remain separate and unaccepted in this plan-only revision. The stage definitions and dependencies below are unchanged and normative; historical assets do not mark a replacement stage accepted.
+R01 and D1-D5 are accepted in Section 8.4. R02 is implemented and validated in isolated source but is not yet merged or exposed. R03-R14 remain separate and NOT STARTED.
 
 ### R01 — Native capability and evidence rebaseline
 
@@ -484,7 +484,7 @@ Preserve Reminder's existing atomic transaction/Calendar linkage, fresh read/lis
 
 ### 8.4 Single replacement-stage acceptance ledger
 
-Current status: R01 and D1-D5 accepted; R02-R14 are not advanced by this plan-only closure. The observations below remain the R01 read-only evidence, not native implementation acceptance. Prior facts remain scoped historical evidence in Section 2.
+Current status: R01 and D1-D5 accepted; R02 implemented and validated in isolated source, pending PR #8 review/merge; R03-R14 NOT STARTED.
 
 For each future stage replace its status with one concise factual closure record in this section: scope, implemented delta/paths, C/R, exact focused validation and observed results, native binding/version, production exposure, acceptance/limitations, required E2E and cleanup, snapshot when required, remaining gate, and meaningful deviations. Record BLOCKED or LIMITED acceptance with the precise missing capability; never use a successful isolated test count to close production acceptance. A materially changed approved stage/dependency/architecture returns to Oren before implementation.
 
@@ -584,15 +584,29 @@ For the map below, **N** is the installed package's `dist/` directory, **D** is 
 
 Jessica exact-task completion is an **independent external blocker** for R10's positive conditional cohort and R14 F4, owned by its capability plan. It is not a reason to redesign routing, fake physical completion, or perform that domain work inside R01. Running build byte identity and current WhatsApp readiness are publication-time proof gates; unchanged installed version strings do not close them.
 
-**Next gate:** R01 and D1-D5 are accepted. This plan-only revision must land before any R02 implementation/acceptance is incorporated into the canonical plan. R02 remains a separate stage/PR concern; R03/R04 enforcement, provider binding, actual WhatsApp delivery and physical conditional execution retain their separate acceptance gates.
+**Next gate:** independent review and merge of R02 PR #8. Do not start R03 before R02 is merged and main is synchronized.
 
 **Validation / closure:** each I01-I10 has a current owner/symbol observation or explicit gap, documented-support reference, dependent-stage disposition and smallest proof specification. Patch checks are read-only applicability evidence, not patch replay or test acceptance. Document checks, source/installed hash protection and checkpoint reconstruction are recorded in `/tmp/benson-r01-m5sw3c90/validation.md`; no proposed implementation proof was executed. Oren accepted R01 and D1-D5 on this evidence. This closes the read-only R01 decision stage only; it does not establish native implementation, runtime deployment or production acceptance.
+
+
+### 8.5 R02 — source implementation closure
+
+**Status:** IMPLEMENTED AND VALIDATED IN ISOLATED SOURCE; PR #8 remains unmerged and unexposed.
+
+**Delta:** `envelope.mjs` adds one private `schemaVersion: 3` completion family for `domain-task` and `final-workflow`, explicit `userResponse`, runtime-bound authority, NORMAL/RECOVERED/FAILED separation, and pure deterministic evidence-based reconstruction. Existing legacy response exports/readers remain intact. Existing contract/envelope tests add R02 regression coverage.
+
+**Validation:** focused `33/33`; affected compatibility suite `86/86`, including `response-control.test.mjs`; the existing `response-control.mjs` consumer imports successfully; legacy response exports remain present; changed JavaScript passes syntax and Git whitespace checks.
+
+**Limits:** no native terminal interception, repair budget, routing, provider binding, rendering/delivery implementation, runtime activation, or production acceptance is part of R02. Those remain R03+ concerns.
+
+**Rollback / stop:** Git baseline `1ee030cd6588e08b46ab4a29b8cf1c0e47f42468` before merge; shared-history rollback uses a new revert commit. Stop for independent review and separate merge approval; do not start R03 before merge and main synchronization.
+
 
 ## 9. Plan revision validation, historical evidence, rollback, and stop condition
 
 Historical edit-session evidence from the 2026-09-28 rewrite remains at `/home/oa/projects/benson/output/checkpoints/completion-protocol-plan-20260928-qh4rlden/BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md`, with pre-edit SHA-256 `e2ed301cd3cc71a6dc6b6244946f0893de3bfd0fef8850475edf06bb2dce8b57`. That checkpoint was required because the source plan then had uncommitted edits on `decision-routing/s09`. It is retained as historical evidence, not as the rollback owner for the current Git-managed revision.
 
-For the current plan-only revision, the verified pre-change repository baseline is `06ba82166261d981da40b1b6be79b26874793a8d` on `main`. Before merge, Git history from that baseline is the rollback point. After merge, rollback uses a new Git revert commit rather than rewriting shared history. No runtime, configuration, installed artifact, or durable-state rollback is required for this documentation-only change.
+For the current unexposed R02 source revision, the verified pre-change Git baseline is `1ee030cd6588e08b46ab4a29b8cf1c0e47f42468` on `main`. Before merge that Git baseline owns rollback; after merge use a new revert commit. No runtime-state rollback is required because R02 is not deployed.
 
 Historical document validation evidence retained from the 2026-09-28 rewrite:
 
@@ -607,4 +621,4 @@ Historical validation for the earlier NORMAL/RECOVERED/FAILED and JS/TS wording 
 
 Current revision rollback follows the Git baseline above. Historical checkpoints and patches must not be restored over newer canonical repository state. Preserve all unrelated dirty files, active configuration/packages, native queues, operation/idempotency history and production state.
 
-The historical R01-inspection stop is superseded by Oren's acceptance of R01 and D1-D5. This plan-only branch records that acceptance and the merged architecture authority; it does not include R02 implementation or acceptance. Stop after this plan revision passes its normal review and PR gates. Do not implement or merge R02 or later stages as part of this branch, modify runtime/config/agents/installation/production, or resume historical S09/S10.
+The historical R01-inspection stop remains superseded. Stop after PR #8 passes independent review and receives separate operator merge approval. Do not start R03 or modify runtime/configuration/agents/installation/production before R02 is merged and main is synchronized.
