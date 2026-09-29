@@ -62,7 +62,7 @@ This document is the canonical source for:
 
 Domain-specific architecture documents may refine this document for a particular domain, but they must not contradict it.
 
-The canonical owner for this revision is `/home/oa/projects/benson/architecture/BENSON_SUBAGENT_ARCHITECTURE.md`. Ownership and duplicate-copy inspection are recorded in Section 27. The decision-routing implementation plan is subordinate to this architecture; preparation code and historical plan decisions do not define the target. Changes to this architecture require Oren's review; implementation-plan approval and stage authorization remain separate gates.
+The canonical owner for this revision is `/home/oa/projects/benson/architecture/BENSON_SUBAGENT_ARCHITECTURE.md`. Ownership and revision scope are recorded in Section 27. The decision-routing implementation plan is subordinate to this architecture; preparation code and historical plan decisions do not define the target. Changes to this architecture require Oren's review; implementation-plan approval and stage authorization remain separate gates.
 
 ### 2.2 Current runtime state
 
