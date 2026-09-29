@@ -1785,7 +1785,7 @@ The 2026-09-28 design revision changes only the canonical architecture owner:
 `/home/oa/projects/benson/architecture/BENSON_SUBAGENT_ARCHITECTURE.md`.
 Project AGENTS.md assigns architecture authority to this file. This revision changes only this canonical architecture document. It does not itself change runtime code, configuration, agents, installation, production state, or the implementation plan. Git branch, commit, PR, and merge mechanics are repository workflow state, not architectural state.
 
-The explicitly requested pre-edit checkpoint is `/home/oa/projects/benson/output/checkpoints/architecture-completion-protocol-20260928-mq27smab/BENSON_SUBAGENT_ARCHITECTURE.md`, SHA-256 `adaeb2fa00601798848783044e6bf80ad212bb6cc7f2f451788ec4db022dad08`. A byte-identical copy and restore rehearsal were verified outside active canonical directories. Git baseline is `d4cdf5692a0007a60dcfbae10a7d6954f48cbee1` on `decision-routing/s09`. Document rollback restores only this checkpoint file to the canonical path; it does not touch other working-tree changes or runtime history.
+This canonical architecture document is Git-managed. For this revision, the verified pre-change repository baseline is `b363111e3b2576110fb2b20c1ac87541dcb6ea21` on `main`; rollback uses Git history from that baseline, and shared-history rollback after merge uses a new revert commit rather than history rewriting. The earlier checkpoint `/home/oa/projects/benson/output/checkpoints/architecture-completion-protocol-20260928-mq27smab/BENSON_SUBAGENT_ARCHITECTURE.md` is retained only as historical evidence of the 2026-09-28 edit session, not as the canonical rollback mechanism.
 
 ### 27.2 Historical evidence and current verification limits
 
