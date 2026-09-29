@@ -1,0 +1,442 @@
+import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { pathToFileURL } from 'node:url';
+import vm from 'node:vm';
+import test from 'node:test';
+import { createCompletionAuthority, acceptAgentCompletion, validateCompletion } from '../envelope.mjs';
+
+// Run explicitly against an independent patched package with isolated native
+// state/config. This suite must never install patches or touch production state.
+const root = process.env.OPENCLAW_PACKAGE_ROOT;
+const nativeTest = root ? test : test.skip;
+const load = async (file) => import(pathToFileURL(join(root, 'dist', file)).href);
+const registry = root && await load('agent-run-registry-DO6Dg2r0.mjs');
+const admission = root && await load('admitted-run-context-BNasoszr.mjs');
+const events = root && await load('agent-events-BOSJcayE.mjs');
+const tools = root && await load('agent-tools.before-tool-call-D6M7yTR3.mjs');
+let sequence = 0;
+const plain = (value) => JSON.parse(JSON.stringify(value));
+const finalFacts = { status: 'not_applicable', domain: null, domainSchemaVersion: null,
+  operation: null, verified: 'not_applicable', verificationScope: [], data: null,
+  warnings: [], error: null, effects: [], uncertainty: [], pendingContext: null };
+const domainFacts = { status: 'success', domain: 'jessica-vacuum', domainSchemaVersion: '1',
+  operation: 'clean', verified: true, verificationScope: ['command_started'],
+  data: { operationId: 'fixture-op', started: true }, warnings: [], error: null,
+  effects: [{ kind: 'command_started', operationId: 'fixture-op' }],
+  uncertainty: [{ kind: 'physical_completion_not_established' }], pendingContext: null };
+async function fixture(agentId = 'main', { coverage = true, scheduled = false, domain = false } = {}) {
+  const runId = `r03-native-fixture-${++sequence}`;
+  const params = { runId, agentId, sessionKey: `agent:${agentId}:r03-fixture-${sequence}`,
+    sessionId: `r03-session-${sequence}`, config: {}, provider: 'fixture', model: 'fixture',
+    lifecycleGeneration: registry.d() };
+  registry._(runId, params);
+  params.preparedRunAdmission = admission.l({}, runId, agentId,
+    scheduled ? 'cron.isolated-agent' : 'r03.fixture');
+  const admitted = await params.preparedRunAdmission.admit('embedded');
+  const authority = registry.s(admitted.operationalRunInstance);
+  assert.equal(registry.O(authority), true);
+  const context = registry.c(runId);
+  const binding = { requestId: `fixture-request-${sequence}`, workflowId: `fixture-workflow-${sequence}`,
+    runId, agentId, sessionKey: domain ? 'agent:main:r03-caller' : params.sessionKey,
+    sessionId: domain ? 'r03-caller-session' : params.sessionId,
+    instanceId: admitted.operationalRunInstance.instanceId, lifecycleGeneration: authority.lifecycleGeneration,
+    taskId: domain ? `fixture-task-${sequence}` : null, callerRunId: domain ? 'fixture-caller' : null,
+    completionTarget: domain ? 'CALLER' : 'RESPONSE_CONTROLLER', finality: !domain,
+    authorizationId: 'fixture-native-authorization', deliveryPolicy: { eligible: false, reason: 'FIXTURE_ONLY' } };
+  // Semantic facts/routes are host fixtures, NOT model data and NOT proof of the
+  // future R05/R06 adapters or real domain execution/delivery.
+  context.bensonCompletionEvidence = { kind: domain ? 'domain-task' : 'final-workflow', binding,
+    knownFacts: plain(domain ? domainFacts : finalFacts), results: [], coverage: 'complete', gaps: [] };
+  const attempt = registry.beginAgentRunExecutionEvidence(admitted, coverage);
+  const proposal = { schemaVersion: 3, kind: context.bensonCompletionEvidence.kind,
+    facts: plain(context.bensonCompletionEvidence.knownFacts),
+    userResponse: { state: 'usable', text: 'Fixture owner message.', language: 'en' } };
+  return { params, context, admitted, authority, attempt, proposal,
+    result: (candidate = proposal) => ({ payloads: [{ text: typeof candidate === 'string' ? candidate : JSON.stringify(candidate) }],
+      meta: { durationMs: 1 } }) };
+}
+function nativeFunction(file, name, injected) {
+  const source = readFileSync(join(root, 'dist', file), 'utf8');
+  const body = source.match(new RegExp(`(?:async )?function ${name}\\([^]*?\\n\\}`, 'u'))?.[0];
+  assert.ok(body, `${name} missing from native package`);
+  return new vm.Script(`(${body})`).runInNewContext({ Buffer, ...injected });
+}
+function entry(kind, execute) {
+  const common = { captureAgentRunLifecycleGeneration: () => registry.d(),
+    withAgentRunLifecycleGeneration: events.y, withBensonNativeCompletion: registry.withBensonNativeCompletion,
+    guardBensonNativeAgentCallbacks: registry.guardBensonNativeAgentCallbacks };
+  if (kind === 'embedded') return nativeFunction('embedded-agent-BaH7wGBd.mjs', 'runEmbeddedAgent', {
+    ...common, normalizeOptionalString: (v) => v?.trim(), getRuntimeConfigSnapshot: () => ({}),
+    getPreparedModelRuntimePluginGeneration: () => undefined, runEmbeddedAgentInternal: execute,
+  });
+  return nativeFunction('cli-runner-DQ-f1RtK.mjs', 'runCliAgent', {
+    ...common, isClaudeCliBackend: () => false, runCliAgentInternal: execute,
+  });
+}
+
+for (const kind of ['embedded', 'cli']) {
+  for (const agentId of ['main', 'jessica-vacuum', 'reminder-service', 'future-fixture']) {
+    nativeTest(`${kind}: native entry enforces completion for ${agentId} without a private hook`, async () => {
+      const f = await fixture(agentId, { domain: agentId === 'jessica-vacuum', scheduled: agentId === 'reminder-service' });
+      f.attempt.settle(true);
+      const run = entry(kind, async () => f.result());
+      const result = await run(f.params);
+      assert.equal(result.meta.bensonCompletion.completion.outcome, 'NORMAL');
+      assert.equal(result.meta.bensonCompletion.binding.instanceId, f.admitted.operationalRunInstance.instanceId);
+      assert.equal(result.meta.bensonCompletion.binding.lifecycleGeneration, f.authority.lifecycleGeneration);
+      assert.deepEqual(JSON.parse(result.payloads[0].text), plain(result.meta.bensonCompletion));
+      assert.equal(result.meta.bensonCompletion.userResponse.text, 'Fixture owner message.');
+    });
+  }
+  for (const invalid of ['ordinary prose', '{invalid-json', { schemaVersion: 3, kind: 'final-workflow' }]) {
+    nativeTest(`${kind}: malformed/plain/missing-field terminal cannot leave as raw completion: ${JSON.stringify(invalid)}`, async () => {
+      const f = await fixture('jessica-vacuum', { domain: true });
+      f.attempt.settle(true);
+      const result = await entry(kind, async () => f.result(invalid))(f.params);
+      assert.equal(result.meta.bensonCompletion.completion.outcome, 'RECOVERED');
+      assert.equal(result.meta.bensonCompletion.facts.status, 'success');
+      assert.deepEqual(plain(result.meta.bensonCompletion.facts.effects), domainFacts.effects);
+      assert.equal(result.meta.bensonCompletion.userResponse.state, 'unavailable');
+    });
+  }
+}
+
+nativeTest('actual native UUID bindings reject serialized completion from replacement/lifecycle', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const evidence = f.context.bensonCompletionEvidence;
+  const accepted = acceptAgentCompletion(f.proposal, createCompletionAuthority({ ...evidence, origin: 'agent' }));
+  assert.match(accepted.binding.instanceId, /^[a-f\d-]{36}$/u);
+  assert.match(accepted.binding.lifecycleGeneration, /^[a-f\d-]{36}$/u);
+  for (const key of ['instanceId', 'lifecycleGeneration']) {
+    const binding = { ...evidence.binding, [key]: admission.a('replacement').instanceId };
+    assert.throws(() => validateCompletion(plain(accepted), createCompletionAuthority({ ...evidence, binding, origin: 'agent' })), /native_binding_mismatch/u);
+  }
+});
+
+nativeTest('actual hidden native tool wrapper records execution without UI/diagnostic callbacks across attempts', async () => {
+  const f = await fixture(); let executions = 0;
+  const wrapped = tools.u({ name: 'r03_hidden_fixture_tool', label: 'Fixture', hideFromChannelProgress: true,
+    description: 'Read-only fixture', parameters: { type: 'object', properties: {} },
+    execute: async () => { executions++; return { content: [{ type: 'text', text: 'fixture' }] }; } },
+    { runId: f.params.runId, sessionKey: f.params.sessionKey, config: {} }, { emitDiagnostics: false });
+  await wrapped.execute('fixture-call-one', {});
+  const first = f.attempt.settle(true);
+  assert.equal(first.executionCount, 1); assert.equal(first.complete, true);
+  const second = registry.beginAgentRunExecutionEvidence(f.admitted, true);
+  await wrapped.execute('fixture-call-two', {});
+  const last = second.settle(true);
+  assert.equal(executions, 2); assert.equal(last.executionCount, 2); assert.equal(last.complete, true);
+});
+
+nativeTest('native nested executions count independently; incomplete/plugin coverage never certifies zero', async () => {
+  const f = await fixture('future-fixture', { coverage: false });
+  const nested = registry.recordAgentRunToolExecution(f.params.runId);
+  const outer = registry.recordAgentRunToolExecution(f.params.runId);
+  nested(); outer(); nested();
+  const evidence = f.attempt.settle(true);
+  assert.equal(evidence.executionCount, 2); assert.equal(evidence.complete, false);
+  const result = await registry.withBensonNativeCompletion(f.params, async () => f.result());
+  assert.equal(result.meta.bensonCompletion.completion.outcome, 'FAILED');
+  assert.ok(result.meta.bensonCompletion.completion.gaps.some(g => g.code === 'EVIDENCE_COVERAGE_INCOMPLETE'));
+  const zero = await fixture('future-fixture', { coverage: false }); zero.attempt.settle(true);
+  const failed = await registry.withBensonNativeCompletion(zero.params, async () => zero.result());
+  assert.equal(failed.meta.bensonCompletion.completion.outcome, 'FAILED');
+});
+
+for (const name of ['AbortError', 'TimeoutError', 'Error']) {
+  nativeTest(`native ${name} finalizes retained evidence without reauthorizing execution or delivery`, async () => {
+    const f = await fixture('jessica-vacuum', { domain: true }); f.attempt.settle(true);
+    const error = new Error('fixture native terminal'); error.name = name;
+    registry.x(f.authority); assert.equal(registry.O(f.authority), false);
+    let calls = 0;
+    await assert.rejects(registry.withBensonNativeCompletion(f.params, async () => { calls++; throw error; }), actual => {
+      assert.equal(actual, error); assert.equal(actual.name, name);
+      assert.equal(actual.bensonCompletion.completion.outcome, 'RECOVERED');
+      assert.equal(actual.bensonCompletion.facts.status, 'success');
+      assert.equal(actual.bensonCompletion.binding.deliveryPolicy.eligible, false);
+      return true;
+    });
+    assert.equal(calls, 1); assert.equal(registry.O(f.authority), false);
+  });
+}
+
+nativeTest('yield/wait is native nonterminal suspension, never canonical completion', async () => {
+  for (const field of ['yielded', 'continuationPending']) {
+    const f = await fixture();
+    const result = { payloads: [], meta: { [field]: true } };
+    const got = await registry.withBensonNativeCompletion(f.params, async () => result);
+    assert.equal(got, result); assert.equal(got.meta.bensonCompletion, undefined);
+    assert.equal(f.context.bensonCompletionBoundary.record, null);
+    f.attempt.settle(true);
+  }
+});
+
+nativeTest('native publication rejects pre-finalization terminal through all public/audit emitter paths', async () => {
+  const f = await fixture(); f.attempt.settle(true); registry.x(f.authority);
+  const owner = registry.beginBensonNativeCompletion(f.params);
+  const seen = []; const off = events.f(event => seen.push(event)); const offAudit = events.d(event => seen.push(event));
+  try {
+    const emit = () => ({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end', endedAt: Date.now() } });
+    events.s(emit()); events.o(emit(), f.context); events.r(emit());
+    assert.equal(seen.length, 0);
+    registry.finishBensonNativeCompletion(owner, f.result());
+    events.s(emit()); events.o(emit(), f.context); events.r(emit());
+    assert.equal(seen.length, 3);
+    for (const event of seen) assert.equal(event.data.completionOutcome, 'NORMAL');
+  } finally { off(); offAudit(); }
+});
+
+nativeTest('handled reply is finalized before native observer recovery/delivery bookkeeping', async () => {
+  const f = await fixture(); f.attempt.settle(true); let observed;
+  const runHook = nativeFunction('auth-profile-failure-policy-BlqvJ9aj.mjs', 'runBeforeAgentReplyForTurn', {
+    isPluginHookAgentTrigger: () => true, runOncePerAgentRun: events.v,
+    getGlobalHookRunner: () => ({ hasHooks: () => true, runBeforeAgentReply: async () => ({ handled: true, reply: { text: 'ordinary hook prose' } }) }),
+    beforeAgentReplyObserver: { getStore: () => ({ beforeDispatch: async () => true,
+      afterDispatch: async result => { observed = JSON.parse(result.reply.text); return result; } }) },
+    finalizeBensonHandledReply: registry.finalizeBensonHandledReply,
+    markAgentRunExecutionCoverageUnknown: registry.markAgentRunExecutionCoverageUnknown,
+  });
+  await events.y(registry.d(), () => registry.withBensonNativeCompletion(f.params, async () => {
+    const reply = await runHook({ runId: f.params.runId, trigger: 'user', context: {}, event: {} });
+    assert.equal(observed.completion.outcome, 'FAILED');
+    return { payloads: [reply.reply], meta: { finalAssistantRawText: reply.reply.text } };
+  }));
+});
+
+nativeTest('missing trusted binding holds output instead of inventing a route; agent bindings never become authority', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const fake = { ...f.proposal, binding: f.context.bensonCompletionEvidence.binding };
+  delete f.context.bensonCompletionEvidence;
+  await assert.rejects(registry.withBensonNativeCompletion(f.params, async () => f.result(fake)), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+  assert.equal(f.context.bensonCompletionBoundary.record, null);
+});
+
+nativeTest('provider schema hints cannot bypass deterministic finalization', async () => {
+  for (const structuredOutput of [undefined, { type: 'json_schema' }]) {
+    const f = await fixture(); f.attempt.settle(true); f.params.structuredOutput = structuredOutput;
+    const result = await entry('embedded', async () => f.result('invalid'))(f.params);
+    assert.equal(result.meta.bensonCompletion.completion.outcome, 'RECOVERED');
+  }
+});
+
+nativeTest('real native CLI synthetic terminal is canonical before the actual observer runs', async () => {
+  const f = await fixture('future-fixture'); f.attempt.settle(true); f.params.trigger = 'user';
+  const hookOwner = await load('hook-runner-global-C81Znoo2.mjs');
+  const empty = await load('registry-empty--vb91VWS.mjs');
+  const observer = await load('auth-profile-failure-policy-BlqvJ9aj.mjs');
+  const cli = await load('cli-runner-DQ-f1RtK.mjs');
+  const hooks = empty.t();
+  hooks.typedHooks.push({ pluginId: 'r03-fixture', hookName: 'before_agent_reply',
+    handler: async () => ({ handled: true, reply: { text: 'RAW_SYNTHETIC_FIXTURE' } }) });
+  hookOwner.i(hooks); let observed;
+  try {
+    const result = await observer.i({ beforeDispatch: async () => true,
+      afterDispatch: async hook => { observed = JSON.parse(hook.reply.text); return hook; } }, () => cli.n(f.params));
+    // An uninstrumented plugin hook cannot certify zero execution, even when
+    // a previous attempt was fully covered. Known business facts remain intact.
+    assert.equal(observed.completion.outcome, 'FAILED');
+    assert.deepEqual(JSON.parse(result.payloads[0].text), plain(observed));
+    assert.equal(result.meta.bensonCompletion.completion.outcome, 'FAILED');
+    assert.equal(result.payloads[0].text.includes('RAW_SYNTHETIC_FIXTURE'), false);
+  } finally { hookOwner.a(); }
+});
+
+nativeTest('real native CLI cancellation preserves the AbortError and trusted success', async () => {
+  const f = await fixture('jessica-vacuum', { domain: true }); f.attempt.settle(true);
+  const cli = await load('cli-runner-DQ-f1RtK.mjs');
+  const controller = new AbortController(); const reason = new Error('fixture cancellation'); reason.name = 'AbortError';
+  controller.abort(reason); f.params.abortSignal = controller.signal;
+  await assert.rejects(cli.n(f.params), error => {
+    assert.equal(error, reason); assert.equal(error.bensonCompletion.completion.outcome, 'RECOVERED');
+    assert.equal(error.bensonCompletion.facts.status, 'success'); return true;
+  });
+});
+
+nativeTest('real native embedded preparation failure cannot return raw terminal output', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const embedded = await load('embedded-agent-BaH7wGBd.mjs');
+  f.params.workspaceDir = process.env.OPENCLAW_STATE_DIR;
+  f.params.agentDir = join(process.env.OPENCLAW_STATE_DIR, 'fixture-agent');
+  f.params.sessionPersistence = 'detached'; f.params.sessionTarget = undefined;
+  await assert.rejects(embedded.t(f.params), error => {
+    assert.ok(error.bensonCompletion, error.message);
+    assert.equal(error.bensonCompletion.completion.outcome, 'RECOVERED'); return true;
+  });
+});
+
+nativeTest('actual failed/nested wrappers retain launches despite absent UI events', async () => {
+  const f = await fixture(); let executions = 0;
+  const make = (name, execute) => tools.u({ name, label: name, description: 'Fixture',
+    hideFromChannelProgress: true, parameters: { type: 'object', properties: {} }, execute },
+    { runId: f.params.runId, sessionKey: f.params.sessionKey, config: {} }, { emitDiagnostics: false });
+  const child = make('r03_nested_child', async () => { executions++; throw new Error('fixture tool failure'); });
+  const parent = make('r03_nested_parent', async () => { executions++; return child.execute('nested-child', {}); });
+  await assert.rejects(parent.execute('nested-parent', {}), /fixture tool failure/u);
+  const snapshot = f.attempt.settle(true);
+  assert.equal(executions, 2); assert.equal(snapshot.executionCount, 2); assert.equal(snapshot.complete, true);
+  assert.equal(f.context.executionEvidence.activeExecutions, 0);
+});
+
+nativeTest('native run replacement rejects old accepted records and captured terminal ownership', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const owner = registry.beginBensonNativeCompletion(f.params);
+  registry.finishBensonNativeCompletion(owner, f.result());
+  const replacement = admission.a(f.params.runId); registry.i(replacement);
+  assert.throws(() => registry.finishBensonNativeCompletion(owner, f.result()), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+  assert.equal(registry.permitBensonNativeTerminalEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } }), false);
+});
+
+nativeTest('new tool execution invalidates a previously accepted native terminal record', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const owner = registry.beginBensonNativeCompletion(f.params); registry.finishBensonNativeCompletion(owner, f.result());
+  const settle = registry.recordAgentRunToolExecution(f.params.runId);
+  assert.equal(f.context.bensonCompletionBoundary.record, null);
+  assert.equal(registry.permitBensonNativeTerminalEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } }), false);
+  const result = registry.finishBensonNativeCompletion(owner, f.result());
+  assert.equal(result.meta.bensonCompletion.completion.outcome, 'FAILED');
+  settle();
+});
+
+nativeTest('native callback boundary blocks early terminal/prose block callbacks', async () => {
+  const f = await fixture(); f.attempt.settle(true); registry.x(f.authority);
+  const owner = registry.beginBensonNativeCompletion(f.params); const seen = [];
+  const guarded = registry.guardBensonNativeAgentCallbacks({ ...f.params,
+    onAgentEvent: event => seen.push(event), onBlockReply: payload => seen.push(payload) });
+  guarded.onAgentEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } });
+  guarded.onBlockReply({ text: 'RAW_CALLBACK_FIXTURE' }); assert.equal(seen.length, 0);
+  const result = registry.finishBensonNativeCompletion(owner, f.result());
+  guarded.onAgentEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } });
+  guarded.onBlockReply({ text: 'RAW_CALLBACK_FIXTURE' }); assert.equal(seen.length, 2);
+  assert.equal(seen[0].data.completionOutcome, 'NORMAL');
+  assert.deepEqual(JSON.parse(seen[1].text), plain(result.meta.bensonCompletion));
+});
+
+nativeTest('executed or unaccounted native error is marked non-retryable by the native fallback owner', async () => {
+  const fallback = await load('model-fallback-stop-B0RY23Zf.mjs');
+  for (const coverage of [true, false]) {
+    const f = await fixture('jessica-vacuum', { domain: true, coverage });
+    if (coverage) registry.recordAgentRunToolExecution(f.params.runId)();
+    f.attempt.settle(true); const error = new Error('fixture provider failure');
+    await assert.rejects(registry.withBensonNativeCompletion(f.params, async () => { throw error; }), actual => {
+      assert.equal(actual, error); assert.equal(fallback.t(actual), true); return true;
+    });
+  }
+});
+
+nativeTest('exported prepared CLI execution also inherits the native completion boundary', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const prepared = nativeFunction('cli-runner-DQ-f1RtK.mjs', 'runPreparedCliAgent', {
+    withAgentRunLifecycleGeneration: events.y, captureAgentRunLifecycleGeneration: () => registry.d(),
+    withBensonNativeCompletion: registry.withBensonNativeCompletion,
+    guardBensonNativeAgentCallbacks: registry.guardBensonNativeAgentCallbacks,
+    runPreparedCliAgentOwned: async () => f.result('plain prepared CLI answer'),
+    runWithCliHistoryWriter: async (_writer, run) => run(),
+  });
+  const result = await prepared({ params: f.params });
+  assert.equal(result.meta.bensonCompletion.completion.outcome, 'RECOVERED');
+});
+
+nativeTest('late native callbacks cannot reuse completion after run/session replacement', async () => {
+  for (const replacement of ['run', 'session']) {
+    const f = await fixture(); f.attempt.settle(true);
+    const owner = registry.beginBensonNativeCompletion(f.params); registry.finishBensonNativeCompletion(owner, f.result());
+    let calls = 0; const guarded = registry.guardBensonNativeAgentCallbacks({ ...f.params,
+      onAgentEvent: () => calls++, onBlockReply: () => calls++ });
+    if (replacement === 'run') registry.i(admission.a(f.params.runId));
+    else f.context.sessionId = 'replacement-session';
+    guarded.onAgentEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } });
+    guarded.onBlockReply({ text: 'late output' }); assert.equal(calls, 0);
+  }
+});
+
+nativeTest('frozen native errors and primitive failures still retain canonical runtime completion', async () => {
+  for (const error of [Object.freeze(new Error('frozen fixture error')), 'primitive fixture failure']) {
+    const f = await fixture(); f.attempt.settle(true);
+    await assert.rejects(registry.withBensonNativeCompletion(f.params, async () => { throw error; }), actual => {
+      if (error instanceof Error) assert.equal(actual, error);
+      else { assert.ok(actual instanceof Error); assert.equal(actual.message.includes(error), false); }
+      assert.equal(f.context.bensonCompletionBoundary.record.completion.outcome, 'RECOVERED'); return true;
+    });
+  }
+});
+
+nativeTest('nested native completion boundaries preserve the original terminal error without replay', async () => {
+  const f = await fixture('jessica-vacuum', { domain: true }); f.attempt.settle(true);
+  const error = new Error('nested fixture error'); let calls = 0;
+  await assert.rejects(registry.withBensonNativeCompletion(f.params, () =>
+    registry.withBensonNativeCompletion(f.params, async () => { calls++; throw error; })), actual => {
+      assert.equal(actual, error); assert.equal(actual.bensonCompletion.completion.outcome, 'RECOVERED'); return true;
+    });
+  assert.equal(calls, 1);
+});
+
+nativeTest('actual native coverage classifier fails closed for every registered extension and changed catalog', async () => {
+  const metadata = await load('registry-empty--vb91VWS.mjs'); const empty = metadata.t();
+  let active = empty; let version = 2;
+  const coverage = nativeFunction('selection-WkHO-qmO.mjs', 'hasCompleteNativeExecutionCoverage', {
+    getActivePluginRegistry: () => active, getActivePluginRegistryVersion: () => version,
+    pluginArrays: metadata.n, pluginMaps: metadata.r, Map,
+  });
+  const check = (params = {}, selection = { builtIn: true }) => coverage(selection, params, empty, 2);
+  assert.equal(check(), true);
+  for (const key of metadata.n) { empty[key].push({ fixture: true }); assert.equal(check(), false, key); empty[key].pop(); }
+  for (const key of metadata.r) { empty[key].set('fixture', {}); assert.equal(check(), false, key); empty[key].delete('fixture'); }
+  empty.contextEngines.set('fixture', {}); assert.equal(check(), false); empty.contextEngines.clear();
+  empty.compactionProviders.push({}); assert.equal(check(), false); empty.compactionProviders.pop();
+  assert.equal(check({ clientTools: [{}] }), false); assert.equal(check({ contextEngine: {} }), false);
+  assert.equal(check({}, { builtIn: false }), false);
+  version++; assert.equal(check(), false); version = 2; active = metadata.t(); assert.equal(check(), false);
+});
+
+nativeTest('native pre-execution abort does not count a tool launch or fabricate zero from UI silence', async () => {
+  const f = await fixture(); let executions = 0;
+  const wrapped = tools.u({ name: 'r03_prelaunch_fixture', label: 'Fixture', description: 'Fixture',
+    parameters: { type: 'object', properties: {} }, execute: async () => { executions++; return {}; } },
+    { runId: f.params.runId, sessionKey: f.params.sessionKey, config: {} }, { emitDiagnostics: false });
+  const controller = new AbortController(); controller.abort(new Error('fixture prelaunch abort'));
+  await assert.rejects(wrapped.execute('aborted-fixture', {}, controller.signal));
+  const snapshot = f.attempt.settle(true);
+  assert.equal(executions, 0); assert.equal(snapshot.executionCount, 0); assert.equal(snapshot.complete, true);
+});
+
+nativeTest('missing native admission cannot run the agent or release its plain terminal result', async () => {
+  for (const kind of ['embedded', 'cli']) {
+    let calls = 0; const f = await fixture(); delete f.params.preparedRunAdmission;
+    await assert.rejects(entry(kind, async () => { calls++; return f.result('plain'); })(f.params), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+    assert.equal(calls, 0);
+  }
+});
+
+nativeTest('child native execution identity is fenced independently of the trusted caller workflow session', async () => {
+  const f = await fixture('jessica-vacuum', { domain: true }); f.attempt.settle(true);
+  assert.notEqual(f.context.bensonCompletionEvidence.binding.sessionId, f.context.sessionId);
+  assert.notEqual(f.context.bensonCompletionEvidence.binding.sessionKey, f.context.sessionKey);
+  const result = await entry('embedded', async () => f.result())(f.params);
+  assert.equal(result.meta.bensonCompletion.completion.outcome, 'NORMAL');
+  assert.equal(result.meta.bensonCompletion.binding.sessionKey, 'agent:main:r03-caller');
+  assert.equal(result.meta.bensonCompletion.binding.instanceId, f.admitted.operationalRunInstance.instanceId);
+  assert.equal(registry.permitBensonNativeTerminalEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } }), true);
+  f.context.sessionId = 'replacement-child-execution-session';
+  assert.throws(() => registry.finishBensonNativeCompletion({ context: f.context, boundary: f.context.bensonCompletionBoundary, runId: f.params.runId }, f.result()), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+  assert.equal(registry.permitBensonNativeTerminalEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } }), false);
+});
+
+nativeTest('nested native event lifecycle scopes preserve immutable completion ownership', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  await events.y(registry.d(), () => registry.withBensonNativeCompletion(f.params, async () => {
+    const owner = registry.M().getStore().bensonRunOwnership;
+    await events.y(registry.d(), async () => {
+      assert.equal(registry.M().getStore().bensonRunOwnership, owner);
+      assert.equal(registry.permitBensonNativeTerminalEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } }), false);
+    });
+    return f.result();
+  }));
+});
+
+nativeTest('native lifecycle rotation invalidates retained finalization owner', async () => {
+  const f = await fixture(); f.attempt.settle(true);
+  const owner = registry.beginBensonNativeCompletion(f.params);
+  registry.E(); assert.equal(registry.O(f.authority), false);
+  assert.throws(() => registry.finishBensonNativeCompletion(owner, f.result()), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+});

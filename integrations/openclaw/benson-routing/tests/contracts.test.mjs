@@ -231,7 +231,7 @@ const newFacts = (changes = {}) => ({ status: 'success', domain: 'jessica-vacuum
   uncertainty: [{ kind: 'physical_completion_not_established' }], pendingContext: null, ...changes });
 const newBinding = (changes = {}) => ({ requestId: 'request-r02', workflowId: 'workflow-r02',
   runId: 'run-r02', agentId: 'jessica-vacuum', sessionKey: 'agent:main:oren',
-  sessionId: 'session-r02', generation: 1, taskId: 'task-r02', callerRunId: 'caller-r02',
+  sessionId: 'session-r02', instanceId: 'instance-r02', lifecycleGeneration: 'lifecycle-r02', taskId: 'task-r02', callerRunId: 'caller-r02',
   completionTarget: 'CALLER', finality: false, authorizationId: 'authorization-r02',
   deliveryPolicy: { eligible: false, reason: null }, ...changes });
 const unavailableResponse = { state: 'unavailable', reason: {
@@ -278,8 +278,8 @@ test('R02 agent payload and serialized objects cannot author native authority or
   }
   const accepted = acceptAgentCompletion(proposal(), authority);
   for (const field of ['requestId', 'workflowId', 'runId', 'agentId', 'sessionId', 'sessionKey',
-    'generation', 'taskId', 'callerRunId', 'authorizationId']) {
-    const raw = plain(accepted); raw.binding[field] = field === 'generation' ? 2 : 'forged';
+    'instanceId', 'lifecycleGeneration', 'taskId', 'callerRunId', 'authorizationId']) {
+    const raw = plain(accepted); raw.binding[field] = 'forged';
     assert.throws(() => validateCompletion(raw, authority), /native_binding_mismatch/);
   }
   const raw = plain(accepted); raw.completion.outcome = 'RECOVERED';
@@ -385,4 +385,21 @@ test('R02 retained legacy domain facts migrate only with explicit response and n
       assert.deepEqual(plain(migrated.facts[key]), plain(legacy[key]), `${entry.id}:${key}`);
     }
   }
+});
+
+// Pre-exposure correction: native identities are opaque strings, never derived counters.
+test('v3 native binding rejects synthetic generation and preserves replacement/lifecycle identity', () => {
+  const accepted = acceptAgentCompletion(proposal(), createCompletionAuthority(nativeEvidence()));
+  for (const field of ['instanceId', 'lifecycleGeneration']) {
+    for (const value of [undefined, null, 1, '', {}, []]) {
+      const binding = newBinding({ [field]: value });
+      if (value === undefined) delete binding[field];
+      assert.throws(() => createCompletionAuthority(nativeEvidence({ binding })));
+    }
+    const successor = createCompletionAuthority(nativeEvidence({ binding: newBinding({ [field]: 'new-native-owner' }) }));
+    assert.throws(() => validateCompletion(plain(accepted), successor), /native_binding_mismatch/);
+  }
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ binding: newBinding({ generation: 1 }) })), /binding_shape/);
+  const legacy = newBinding({ generation: 1 }); delete legacy.instanceId; delete legacy.lifecycleGeneration;
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ binding: legacy })), /binding_shape/);
 });

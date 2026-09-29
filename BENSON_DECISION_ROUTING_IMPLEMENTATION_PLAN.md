@@ -1,12 +1,12 @@
 # Benson control-plane implementation plan
 
-Status: R01 ACCEPTED with D1-D5; R02 IMPLEMENTED AND VALIDATED IN ISOLATED SOURCE, pending PR #8 review/merge. R03-R14 are NOT STARTED.
+Status: R01 ACCEPTED with D1-D5 and R02 ACCEPTED AND MERGED. R03 technical acceptance PASS for isolated source/native preparation; Oren PR approval pending in Section 8.6. R04-R14 are NOT STARTED.
 Date: 2026-09-29.
 Canonical owner: `BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md`.
 Authority: [Benson architecture](architecture/BENSON_SUBAGENT_ARCHITECTURE.md), revision 2026-09-29, SHA-256 `8d3cf69b58230040e3794714a37bfc6f4fb1cce8dc6a8a5bdc3a46e022d86046`.
-Current scope: R02 adds the private v3 Benson completion family and deterministic evidence-based reconstruction in source only. Existing response readers remain compatible; no runtime/configuration/agent/provider/production exposure is included.
+Current scope: R03 source and independent native-overlay preparation only. No active runtime/configuration/agent/provider/installation/production exposure. Section 8.6 records observed technical acceptance and the Oren PR approval gate.
 
-Oren approved the target architecture and accepted R01 with decisions D1-D5. R02 source implementation and validation are recorded below; R03-R14 remain separate later stages. Historical S01-S18 evidence remains historical and PR #7 remains excluded.
+Oren approved the target architecture and accepted R01 with decisions D1-D5. R01/R02 are merged in the verified stage baseline below. R03 has passed isolated technical acceptance and awaits Oren PR approval; it is not merged or operationally accepted. R04-R14 remain separate later stages. Historical S01-S18 evidence remains historical and PR #7 remains excluded.
 
 ## 1. Objective, boundaries, and definition of done
 
@@ -165,7 +165,7 @@ If native surfaces cannot enforce an invariant, record the precise gap and compa
 
 ## 5. Ordered replacement stages
 
-R01 and D1-D5 are accepted in Section 8.4. R02 is implemented and validated in isolated source but is not yet merged or exposed. R03-R14 remain separate and NOT STARTED.
+R01 and D1-D5 are accepted in Section 8.4. R02 is accepted and merged, with its original validation retained in Section 8.5; it remains unexposed. R03 isolated technical acceptance and PR approval gate are recorded in Section 8.6. R04-R14 remain separate and NOT STARTED. Stage definitions and dependencies below are unchanged.
 
 ### R01 — Native capability and evidence rebaseline
 
@@ -584,14 +584,14 @@ For the map below, **N** is the installed package's `dist/` directory, **D** is 
 
 Jessica exact-task completion is an **independent external blocker** for R10's positive conditional cohort and R14 F4, owned by its capability plan. It is not a reason to redesign routing, fake physical completion, or perform that domain work inside R01. Running build byte identity and current WhatsApp readiness are publication-time proof gates; unchanged installed version strings do not close them.
 
-**Next gate:** independent review and merge of R02 PR #8. Do not start R03 before R02 is merged and main is synchronized.
+**Next gate:** R02 PR #8 is merged and main is synchronized. R03 now owns the native integration and acceptance gate.
 
 **Validation / closure:** each I01-I10 has a current owner/symbol observation or explicit gap, documented-support reference, dependent-stage disposition and smallest proof specification. Patch checks are read-only applicability evidence, not patch replay or test acceptance. Document checks, source/installed hash protection and checkpoint reconstruction are recorded in `/tmp/benson-r01-m5sw3c90/validation.md`; no proposed implementation proof was executed. Oren accepted R01 and D1-D5 on this evidence. This closes the read-only R01 decision stage only; it does not establish native implementation, runtime deployment or production acceptance.
 
 
 ### 8.5 R02 — source implementation closure
 
-**Status:** IMPLEMENTED AND VALIDATED IN ISOLATED SOURCE; PR #8 remains unmerged and unexposed.
+**Status:** ACCEPTED AND MERGED through PR #8 at `5bc9065bc4d834ef26b653475a048dac3438225e`; source remains unexposed. The validation below is original R02 acceptance evidence, not R03 native integration acceptance.
 
 **Delta:** `envelope.mjs` adds one private `schemaVersion: 3` completion family for `domain-task` and `final-workflow`, explicit `userResponse`, runtime-bound authority, NORMAL/RECOVERED/FAILED separation, and pure deterministic evidence-based reconstruction. Existing legacy response exports/readers remain intact. Existing contract/envelope tests add R02 regression coverage.
 
@@ -599,8 +599,26 @@ Jessica exact-task completion is an **independent external blocker** for R10's p
 
 **Limits:** no native terminal interception, repair budget, routing, provider binding, rendering/delivery implementation, runtime activation, or production acceptance is part of R02. Those remain R03+ concerns.
 
-**Rollback / stop:** Git baseline `1ee030cd6588e08b46ab4a29b8cf1c0e47f42468` before merge; shared-history rollback uses a new revert commit. Stop for independent review and separate merge approval; do not start R03 before merge and main synchronization.
+**Rollback / stop:** Git baseline `1ee030cd6588e08b46ab4a29b8cf1c0e47f42468` before merge; shared-history rollback uses a new revert commit. The R02 review/merge gate is satisfied. R03 started after local `main` and `origin/main` were verified synchronized at the merge commit above.
 
+
+### 8.6 R03 — isolated native completion enforcement closure
+
+**Status:** technical acceptance PASS for isolated source/native preparation; Oren PR creation approval PENDING. Not merged, exposed or production-accepted. R04 has not started; all fourteen stage definitions/dependencies are unchanged.
+
+**C / preservation:** `decision-routing/r03` in `/tmp/benson-r03-source`, baseline `5bc9065bc4d834ef26b653475a048dac3438225e`. Checkpoint `/tmp/benson-r03-checkpoint/manifest.json` records baseline, native hashes and unrelated dirty-file hashes. Its package copy is verified independent; `/tmp/benson-r03-runtime` is a separate candidate. All 19 unrelated files match preserved stash `f076759c017d81045928b0d3d5644c40e3cc2f7e`; operator `main` is clean/unchanged. Eight installed/checkpoint hashes and the additional handled-reply owner match. Git owns source rollback.
+
+**Approved decision:** Oren approved keeping `runId` and replacing synthetic numeric `generation` with separate opaque `instanceId` and `lifecycleGeneration` from existing native owners. No numeric mapping or new state owner. v3 validation and direct-result correlation now retain both; legacy delivery generations are unchanged. Architecture bytes and unaffected R02 semantics remain valid. Original numeric-binding evidence is superseded, including the earlier diagnostic `native-binding-proof` `5/5`.
+
+**Inspection / implementation:** inspected native admission/delegated authority, embedded/CLI and prepared CLI exits, handled-reply observer ordering, every terminal emitter/callback, actual tool launch/settlement, plugin catalog/version coverage and stateless simple-completion transport. `envelope.mjs` implements the corrected binding; `completion-control.mjs:finalizeNativeAgentCompletion` applies R02 validation/reconstruction without further model/tool/delegation calls. The existing completion-control patch extends seven native owners: run registry, agent events, embedded agent, CLI runner, handled-reply policy, before-tool-call wrapper and harness selection. New `tests/native-completion-protocol.test.mjs` owns native proof; existing contract/envelope tests cover the correction. No public tool, registration/configuration surface or parallel store.
+
+Every managed entry inherits finalization without an agent list. Accepted proposals produce NORMAL; sufficient retained evidence produces RECOVERED with actual business status preserved; incomplete evidence produces canonical FAILED. Missing binding holds output under native ownership. Native error/cancellation and delivery policy remain intact; existing native fallback-stop marking prevents executed/uncertain work from retrying. Yield/wait is nonterminal. Native execution-session fencing is distinct from the trusted caller/workflow session in v3 bindings, so a child is neither rejected nor rerouted merely because those sessions differ. Nested native lifecycle scopes retain the same immutable completion ownership. Late/replaced ownership cannot publish old records.
+
+**S09 reuse:** only native execution collection, actual wrapper instrumentation and conservative catalog coverage were salvaged. Positive launches survive missing UI callbacks, nesting, failures and multiple attempts; unknown coverage never certifies zero. Historical patch hunks remain unchanged as legacy preparation, not v3 authority. Rendering/freeze/delivery/domain/agent work remains preserved and deferred; PR #7 was not incorporated wholesale.
+
+**Validation:** contract/envelope correction `34/34`; affected Completion/Response compatibility `47/47`; final native matrix `43/43`, zero skipped. Covers four managed identities/scheduled admission across embedded/CLI entries, real native CLI synthetic/cancellation and embedded failure, plain/malformed/missing-field output, reconstruction, child/caller session separation, replacement/rotation, missing authority/binding, emitters/callbacks, actual hidden/nested/failed/pre-aborted wrappers, catalog uncertainty, error variants, no-replay marking, yield/wait and schema-hint parity. Positive entry fixtures substitute provider/inner execution; semantic facts/routes are host fixtures, not real domain/provider proof. New native hunks roundtrip `7/7` byte-identically; syntax/whitespace pass. Zero-context hunks require `git apply --unidiff-zero` and verified baseline. Select the seven R03 paths when checking the already-patched installed baseline; historical hunks are not replayed. Evidence: `/tmp/benson-r03-checkpoint/r03-validation.json`, `native-protocol.tap`, `affected-compatibility.tap`, `identity-contract.tap`.
+
+**Limits / next gate:** R04 owns repair/capability restriction and durable phase/budget/record recovery. R05/R06 own real semantic evidence and CompletionRoute/authorization/delivery binding; absent producers intentionally hold output. Unaccounted plugin/harness/catalog execution remains incomplete/FAILED; relevant coverage must be proven before exposure. Schema hints do not prove provider structured-output integration (R12). Revised consumers/fallback/freeze/delivery remain R07-R09; installation/exposure remains R13. Active state is unchanged, so runtime bensonsnap belongs to separately approved exposure. Before merge discard/revert to C; after shared merge use a new revert commit, preserving operation history and S09. Stop for Oren PR approval; PR creation/merge each require separate approval. R04 waits for merged R03 and synchronized main.
 
 ## 9. Plan revision validation, historical evidence, rollback, and stop condition
 
@@ -621,4 +639,4 @@ Historical validation for the earlier NORMAL/RECOVERED/FAILED and JS/TS wording 
 
 Current revision rollback follows the Git baseline above. Historical checkpoints and patches must not be restored over newer canonical repository state. Preserve all unrelated dirty files, active configuration/packages, native queues, operation/idempotency history and production state.
 
-The historical R01-inspection stop remains superseded. Stop after PR #8 passes independent review and receives separate operator merge approval. Do not start R03 or modify runtime/configuration/agents/installation/production before R02 is merged and main is synchronized.
+The historical R01-inspection and R02 PR #8 review/merge stops are satisfied. The R03 native identity decision is approved and isolated technical acceptance is recorded in Section 8.6. The current stop is Oren stage/PR approval; do not start R04 or expose runtime/configuration/agents/installation/production behavior.

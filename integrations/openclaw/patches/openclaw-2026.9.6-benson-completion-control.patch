@@ -433,3 +433,287 @@
  			entry,
  			outcome: entry.execution.outcome
  		});
+
+# R03: global native terminal enforcement and execution evidence.
+--- a/dist/agent-run-registry-DO6Dg2r0.mjs
++++ b/dist/agent-run-registry-DO6Dg2r0.mjs
+@@ -0,0 +1,2 @@
++import { finalizeNativeAgentCompletion } from "file:///home/oa/projects/benson/integrations/openclaw/benson-routing/completion-control.mjs";
++import { n as recordModelFallbackStop } from "./model-fallback-stop-B0RY23Zf.mjs";
+@@ -610 +612,191 @@
+-export { bumpAgentRunIndexVersion as A, resolveProjectedAgentRunModel as C, sweepStaleRunContexts as D, rotateAgentRunRegistryLifecycleGeneration as E, getAgentEventExecutionContext as M, recordAgentEventRouting as N, validateAgentRunDelegatedAuthority as O, resetAgentRunRegistryForTest as S, retainQueuedAgentRunContext as T, registerAgentRunContext as _, clearAgentRunContext as a, releaseAgentRunContext as b, getAgentRunContext as c, getAgentRunLifecycleGeneration as d, hasAgentRunContextExecutionOwner as f, recordCronNextCheckProposal as g, recordAgentRunModel as h, claimAgentRunDelegatedAuthority as i, iterateProjectedAgentRunSessionKeys as j, recordAgentRunOutputTokens as k, getAgentRunContextOwnerStatus as l, listAgentRunsForSession as m, claimAgentRunApprovalAuthority as n, consumeCronNextCheckProposal as o, hasLiveAgentRunContext as p, claimAgentRunContext as r, getActiveAgentRunDelegatedAuthority as s, buildProjectedAgentRunIndex as t, getAgentRunContextOwnership as u, registerAgentRunDelegatedAuthorityClosedHandler as v, resolveProjectedAgentRunProgressState as w, releaseAgentRunDelegatedAuthority as x, registerAgentRunSequenceResetHandler as y };
++// Native execution evidence belongs to the admitted run context, never progress events.
++function getOrCreateRunExecutionEvidence(context) {
++	const authority = context.delegatedAuthority;
++	return context.executionEvidence ??= { instanceId: authority?.operationalRunInstance.instanceId ?? null,
++		lifecycleGeneration: context.lifecycleGeneration, executionCount: 0,
++		activeExecutions: 0, activeAttempts: 0, settledAttempts: 0, complete: !!authority };
++}
++function beginAgentRunExecutionEvidence(admitted, coverageComplete) {
++	const instance = admitted?.operationalRunInstance;
++	const context = instance && getAgentRunContext(instance.runId);
++	const authority = instance && getActiveAgentRunDelegatedAuthority(instance);
++	if (!context || !authority) return { settle: () => Object.freeze({ schemaVersion: 1, complete: false, executionCount: 0 }) };
++	const record = getOrCreateRunExecutionEvidence(context);
++	if (record.instanceId !== instance.instanceId || record.lifecycleGeneration !== authority.lifecycleGeneration) record.complete = false;
++	record.complete &&= coverageComplete === true;
++	record.activeAttempts++;
++	let settled = false;
++	return { settle: (completed) => {
++		if (!settled) {
++			settled = true;
++			record.activeAttempts--;
++			record.settledAttempts++;
++		}
++		const current = getAgentRunContext(instance.runId) === context &&
++			getActiveAgentRunDelegatedAuthority(instance) === authority;
++		record.complete &&= completed === true && current;
++		return Object.freeze({ schemaVersion: 1, runId: instance.runId,
++			instanceId: instance.instanceId, lifecycleGeneration: record.lifecycleGeneration,
++			executionCount: record.executionCount,
++			complete: record.complete && record.activeAttempts === 0 && record.activeExecutions === 0 && record.settledAttempts > 0 });
++	} };
++}
++function recordAgentRunToolExecution(runId) {
++	const context = getAgentRunContext(runId);
++	if (!context) return () => {};
++	const record = getOrCreateRunExecutionEvidence(context);
++	if (context.bensonCompletionBoundary) context.bensonCompletionBoundary.record = null;
++	record.executionCount++;
++	record.activeExecutions++;
++	let settled = false;
++	return () => { if (!settled) { settled = true; record.activeExecutions--; } };
++}
++function markAgentRunExecutionCoverageUnknown(runId) {
++	const context = getAgentRunContext(runId);
++	if (context) getOrCreateRunExecutionEvidence(context).complete = false;
++}
++// Merge native attempt evidence conservatively across retries and fallback runs.
++function publishAgentRunExecutionEvidence(operation, snapshot) {
++	if (!operation) return;
++	const previous = operation.nativeExecutionEvidence;
++	const sameInstance = !previous || previous.instanceId === snapshot.instanceId &&
++		previous.lifecycleGeneration === snapshot.lifecycleGeneration && previous.runId === snapshot.runId;
++	operation.nativeExecutionEvidence = Object.freeze({ ...snapshot,
++		executionCount: sameInstance ? Math.max(previous?.executionCount ?? 0, snapshot.executionCount) :
++			(previous?.executionCount ?? 0) + snapshot.executionCount,
++		complete: snapshot.complete === true && sameInstance && previous?.complete !== false });
++}
++
++// Benson extends the existing native run context, not a second completion store.
++// Only native admission/evidence owners may populate bensonCompletionEvidence.
++function beginBensonNativeCompletion(params) {
++  const instance = params.admittedRunContext?.operationalRunInstance ?? params.preparedRunAdmission?.operationalRunInstance;
++  if (!instance || instance.runId !== params.runId || typeof instance.instanceId !== "string" || !instance.instanceId) throw bensonCompletionBlocked();
++  const generation = params.lifecycleGeneration ?? getAgentRunLifecycleGeneration();
++  if (generation !== getAgentRunLifecycleGeneration()) throw bensonCompletionBlocked();
++  registerAgentRunContext(params.runId, { agentId: params.agentId, sessionKey: params.sessionKey, sessionId: params.sessionId });
++  const context = getAgentRunContext(params.runId);
++  let boundary = context.bensonCompletionBoundary;
++  if (!boundary || boundary.instance !== instance || boundary.lifecycleGeneration !== generation) {
++    boundary = context.bensonCompletionBoundary = { instance, lifecycleGeneration: generation, record: null, nonterminal: false };
++  }
++  return { context, boundary, runId: params.runId };
++}
++function bensonCompletionBlocked() {
++  const error = new Error("Benson terminal completion is not established");
++  error.code = "ERR_BENSON_COMPLETION_BLOCKED";
++  recordModelFallbackStop(error); // Never redispatch work to repair missing completion/binding.
++  return error;
++}
++function assertBensonNativeCompletionOwner(owner) {
++  if (getAgentRunContext(owner.runId) !== owner.context || owner.context.bensonCompletionBoundary !== owner.boundary ||
++      owner.boundary.lifecycleGeneration !== getAgentRunLifecycleGeneration() ||
++      owner.context.delegatedAuthority && owner.context.delegatedAuthority.operationalRunInstance !== owner.boundary.instance ||
++      owner.boundary.record && (owner.boundary.terminalSessionKey !== owner.context.sessionKey || owner.boundary.terminalSessionId !== owner.context.sessionId)) throw bensonCompletionBlocked();
++}
++function finishBensonNativeCompletion(owner, result, candidateOverride) {
++  assertBensonNativeCompletionOwner(owner);
++  if (result?.meta?.yielded === true || result?.meta?.continuationPending === true) {
++    owner.boundary.nonterminal = true;
++    return result; // Native suspension is not terminal protocol success.
++  }
++  owner.boundary.nonterminal = false;
++  const trusted = owner.context.bensonCompletionEvidence;
++  const binding = trusted?.binding;
++  if (!binding || binding.runId !== owner.runId || binding.instanceId !== owner.boundary.instance.instanceId ||
++      binding.lifecycleGeneration !== owner.boundary.lifecycleGeneration || binding.agentId !== owner.context.agentId) throw bensonCompletionBlocked();
++  const execution = owner.context.executionEvidence;
++  const complete = execution?.instanceId === binding.instanceId && execution.lifecycleGeneration === binding.lifecycleGeneration &&
++    execution.complete === true && execution.activeAttempts === 0 && execution.activeExecutions === 0 && execution.settledAttempts > 0;
++  let candidate = candidateOverride;
++  if (owner.boundary.record && (result?.meta?.bensonCompletion === owner.boundary.record || result?.meta?.finalAssistantRawText === JSON.stringify(owner.boundary.record))) {
++    const text = JSON.stringify(owner.boundary.record);
++    return { ...result, payloads: [{ text }], meta: { ...result?.meta, finalAssistantRawText: text, finalAssistantVisibleText: text, bensonCompletion: owner.boundary.record } };
++  }
++  if (candidate === undefined) {
++    const text = result?.meta?.finalAssistantRawText ?? (result?.payloads?.length === 1 ? result.payloads[0]?.text : undefined);
++    if (typeof text === "string" && Buffer.byteLength(text, "utf8") <= 262144) {
++      try { candidate = JSON.parse(text); } catch { /* Prose/invalid JSON is never evidence. */ }
++    }
++  }
++  let accepted;
++  try {
++    accepted = finalizeNativeAgentCompletion({ ...trusted,
++      coverage: complete && trusted.coverage === "complete" ? "complete" : "incomplete" }, candidate);
++  } catch { throw bensonCompletionBlocked(); }
++  assertBensonNativeCompletionOwner(owner);
++  owner.boundary.record = accepted.record;
++  owner.boundary.terminalSessionKey = owner.context.sessionKey;
++  owner.boundary.terminalSessionId = owner.context.sessionId;
++  owner.boundary.validationCode = accepted.validationCode;
++  const text = JSON.stringify(accepted.record);
++  return { ...result, payloads: [{ text }], meta: { ...result?.meta,
++    finalAssistantRawText: text, finalAssistantVisibleText: text,
++    bensonCompletion: accepted.record } };
++}
++function guardBensonNativeAgentCallbacks(params) {
++  const instance = params.admittedRunContext?.operationalRunInstance ?? params.preparedRunAdmission?.operationalRunInstance;
++  const generation = params.lifecycleGeneration ?? getAgentRunLifecycleGeneration();
++  const readCurrent = () => {
++    const context = getAgentRunContext(params.runId);
++    const boundary = context?.bensonCompletionBoundary;
++    if (!instance || boundary?.instance !== instance || generation !== getAgentRunLifecycleGeneration() ||
++        boundary.lifecycleGeneration !== generation || context.sessionKey !== params.sessionKey || context.sessionId !== params.sessionId ||
++        context.delegatedAuthority && context.delegatedAuthority.operationalRunInstance !== instance ||
++        boundary.record && (boundary.terminalSessionKey !== context.sessionKey || boundary.terminalSessionId !== context.sessionId)) return;
++    return boundary;
++  };
++  return { ...params,
++    ...params.onAgentEvent ? { onAgentEvent: (event) => {
++      if (readCurrent() && permitBensonNativeTerminalEvent(event)) return params.onAgentEvent(event);
++    } } : {},
++    ...params.onBlockReply ? { onBlockReply: (...args) => {
++      const record = readCurrent()?.record;
++      if (!record) return;
++      return params.onBlockReply({ text: JSON.stringify(record) }, ...args.slice(1));
++    } } : {}
++  };
++}
++async function withBensonNativeCompletion(params, run) {
++  const owner = beginBensonNativeCompletion(params);
++  const storage = getAgentEventExecutionContext();
++  return storage.run({ ...storage.getStore(), bensonRunOwnership: owner }, async () => {
++    try { return finishBensonNativeCompletion(owner, await run()); }
++    catch (error) {
++      if (error?.code === "ERR_BENSON_COMPLETION_BLOCKED") throw error;
++      const result = finishBensonNativeCompletion(owner, { meta: { aborted: error?.name === "AbortError" } }, null);
++      const failure = error instanceof Error ? error : new Error("Agent execution terminated without a native Error object");
++      const execution = owner.context.executionEvidence;
++      if (!execution || execution.complete !== true || execution.executionCount > 0 || result.meta.bensonCompletion.facts.effects.length > 0)
++        recordModelFallbackStop(failure); // Executed/uncertain work is never a provider retry.
++      // Preserve native cancellation/error identity and delivery eligibility.
++      try {
++        if (Object.isExtensible(failure)) Object.defineProperty(failure, "bensonCompletion", { value: result.meta.bensonCompletion, configurable: true });
++      } catch { /* Canonical record remains under the existing native context owner. */ }
++      throw failure;
++    }
++  });
++}
++function finalizeBensonHandledReply(runId, result) {
++  if (!result?.handled) return result;
++  const owner = getAgentEventExecutionContext().getStore()?.bensonRunOwnership;
++  if (!owner || owner.runId !== runId) throw bensonCompletionBlocked();
++  const final = finishBensonNativeCompletion(owner, { payloads: [result.reply ?? { text: "NO_REPLY" }] });
++  return { ...result, reply: final.payloads[0] };
++}
++function permitBensonNativeTerminalEvent(event) {
++  if (event.stream !== "lifecycle" || !["end", "error"].includes(event.data?.phase)) return true;
++  const context = getAgentRunContext(event.runId);
++  const captured = getAgentEventExecutionContext().getStore()?.bensonRunOwnership;
++  const boundary = context?.bensonCompletionBoundary;
++  if (!boundary || captured?.runId === event.runId && (captured.context !== context || captured.boundary !== boundary) ||
++      boundary.lifecycleGeneration !== getAgentRunLifecycleGeneration() ||
++      context.delegatedAuthority && context.delegatedAuthority.operationalRunInstance !== boundary.instance) return false;
++  if (boundary.nonterminal) return true;
++  if (!boundary.record || boundary.record.binding.agentId !== context.agentId || boundary.terminalSessionId !== context.sessionId ||
++      boundary.terminalSessionKey !== context.sessionKey) return false;
++  event.data = { ...event.data, completionProtocolVersion: 3, completionOutcome: boundary.record.completion.outcome };
++  return true;
++}
++
++export { beginAgentRunExecutionEvidence, recordAgentRunToolExecution, markAgentRunExecutionCoverageUnknown, publishAgentRunExecutionEvidence, beginBensonNativeCompletion, finishBensonNativeCompletion, withBensonNativeCompletion, guardBensonNativeAgentCallbacks, finalizeBensonHandledReply, permitBensonNativeTerminalEvent, bumpAgentRunIndexVersion as A, resolveProjectedAgentRunModel as C, sweepStaleRunContexts as D, rotateAgentRunRegistryLifecycleGeneration as E, getAgentEventExecutionContext as M, recordAgentEventRouting as N, validateAgentRunDelegatedAuthority as O, resetAgentRunRegistryForTest as S, retainQueuedAgentRunContext as T, registerAgentRunContext as _, clearAgentRunContext as a, releaseAgentRunContext as b, getAgentRunContext as c, getAgentRunLifecycleGeneration as d, hasAgentRunContextExecutionOwner as f, recordCronNextCheckProposal as g, recordAgentRunModel as h, claimAgentRunDelegatedAuthority as i, iterateProjectedAgentRunSessionKeys as j, recordAgentRunOutputTokens as k, getAgentRunContextOwnerStatus as l, listAgentRunsForSession as m, claimAgentRunApprovalAuthority as n, consumeCronNextCheckProposal as o, hasLiveAgentRunContext as p, claimAgentRunContext as r, getActiveAgentRunDelegatedAuthority as s, buildProjectedAgentRunIndex as t, getAgentRunContextOwnership as u, registerAgentRunDelegatedAuthorityClosedHandler as v, resolveProjectedAgentRunProgressState as w, releaseAgentRunDelegatedAuthority as x, registerAgentRunSequenceResetHandler as y };
+--- a/dist/agent-events-BOSJcayE.mjs
++++ b/dist/agent-events-BOSJcayE.mjs
+@@ -0,0 +1 @@
++import { permitBensonNativeTerminalEvent } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -61 +62,2 @@
+-		routingByRun
++		routingByRun,
++		...parent?.lifecycleGeneration === lifecycleGeneration && parent.bensonRunOwnership ? { bensonRunOwnership: parent.bensonRunOwnership } : {}
+@@ -104,0 +107 @@
++	if (!permitBensonNativeTerminalEvent(event)) return;
+--- a/dist/embedded-agent-BaH7wGBd.mjs
++++ b/dist/embedded-agent-BaH7wGBd.mjs
+@@ -0,0 +1,2 @@
++import { M as getAgentEventExecutionContext } from "./agent-run-registry-DO6Dg2r0.mjs";
++import { withBensonNativeCompletion, finishBensonNativeCompletion, guardBensonNativeAgentCallbacks } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -8882 +8884 @@
+-	return withAgentRunLifecycleGeneration(lifecycleGeneration, () => runEmbeddedAgentInternal({
++	return withAgentRunLifecycleGeneration(lifecycleGeneration, () => withBensonNativeCompletion({ ...internalParamsInput, lifecycleGeneration }, () => runEmbeddedAgentInternal(guardBensonNativeAgentCallbacks({
+@@ -8887 +8889 @@
+-	}));
++	}))));
+@@ -9328,0 +9331 @@
++				result = finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, result);
+--- a/dist/cli-runner-DQ-f1RtK.mjs
++++ b/dist/cli-runner-DQ-f1RtK.mjs
+@@ -0,0 +1 @@
++import { withBensonNativeCompletion, guardBensonNativeAgentCallbacks } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -1052 +1053 @@
+-		...paramsInput,
++		...guardBensonNativeAgentCallbacks(paramsInput),
+@@ -1055 +1056 @@
+-	return withAgentRunLifecycleGeneration(lifecycleGeneration, () => isClaudeCliBackend(params.provider) && areDiagnosticsEnabledForProcess() && hasInternalDiagnosticEventListeners() ? runClaudeCliAgentTurnWithDiagnostics(params, (diagnosticLifecycle) => runCliAgentInternal(params, diagnosticLifecycle)) : runCliAgentInternal(params));
++	return withAgentRunLifecycleGeneration(lifecycleGeneration, () => withBensonNativeCompletion(params, () => isClaudeCliBackend(params.provider) && areDiagnosticsEnabledForProcess() && hasInternalDiagnosticEventListeners() ? runClaudeCliAgentTurnWithDiagnostics(params, (diagnosticLifecycle) => runCliAgentInternal(params, diagnosticLifecycle)) : runCliAgentInternal(params)));
+@@ -1131,2 +1132,2 @@
+-	const run = () => runPreparedCliAgentOwned(context, diagnosticLifecycle);
+-	return await runWithCliHistoryWriter(context.cliHistoryWriter, run);
++	const run = () => runPreparedCliAgentOwned({ ...context, params: guardBensonNativeAgentCallbacks(context.params) }, diagnosticLifecycle);
++	return withAgentRunLifecycleGeneration(context.params.lifecycleGeneration ?? captureAgentRunLifecycleGeneration(context.params.runId), () => withBensonNativeCompletion(context.params, () => runWithCliHistoryWriter(context.cliHistoryWriter, run)));
+--- a/dist/auth-profile-failure-policy-BlqvJ9aj.mjs
++++ b/dist/auth-profile-failure-policy-BlqvJ9aj.mjs
+@@ -0,0 +1 @@
++import { finalizeBensonHandledReply, markAgentRunExecutionCoverageUnknown } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -32,0 +34 @@
++		markAgentRunExecutionCoverageUnknown(params.runId);
+@@ -34,0 +37 @@
++		result = finalizeBensonHandledReply(params.runId, result);
+--- a/dist/agent-tools.before-tool-call-D6M7yTR3.mjs
++++ b/dist/agent-tools.before-tool-call-D6M7yTR3.mjs
+@@ -0,0 +1 @@
++import { recordAgentRunToolExecution } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -3599,0 +3601 @@
++			const settleNativeExecution = recordAgentRunToolExecution(ctx?.runId);
+@@ -3687,0 +3690 @@
++				settleNativeExecution();
+--- a/dist/selection-WkHO-qmO.mjs
++++ b/dist/selection-WkHO-qmO.mjs
+@@ -0,0 +1 @@
++import { beginAgentRunExecutionEvidence, publishAgentRunExecutionEvidence } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -17 +18,2 @@
+-import { l as getActivePluginRegistry } from "./runtime-B0mfNCRA.mjs";
++import { l as getActivePluginRegistry, d as getActivePluginRegistryVersion } from "./runtime-B0mfNCRA.mjs";
++import { n as pluginArrays, r as pluginMaps } from "./registry-empty--vb91VWS.mjs";
+@@ -1095,0 +1098,12 @@
++// Only the native wrapped tool surface certifies execution. Registered extensions may
++// execute outside it, even without emitting events; their coverage remains uncertain.
++function hasCompleteNativeExecutionCoverage(selection, params, registry, registryVersion) {
++	return selection.builtIn === true && !params.contextEngine && !(params.clientTools?.length > 0)
++		&& !!registry && getActivePluginRegistry() === registry
++		&& Number.isSafeInteger(registryVersion) && registryVersion >= 0
++		&& getActivePluginRegistryVersion() === registryVersion
++		&& pluginArrays.every((key) => Array.isArray(registry[key]) && registry[key].length === 0)
++		&& pluginMaps.every((key) => registry[key] instanceof Map && registry[key].size === 0)
++		&& registry.contextEngines instanceof Map && registry.contextEngines.size === 0
++		&& Array.isArray(registry.compactionProviders) && registry.compactionProviders.length === 0;
++}
+@@ -1151,0 +1166,4 @@
++	const executionRegistry = getActivePluginRegistry();
++	const executionRegistryVersion = getActivePluginRegistryVersion();
++	const executionEvidence = beginAgentRunExecutionEvidence(internalParams.admittedRunContext,
++		hasCompleteNativeExecutionCoverage(selection, internalParams, executionRegistry, executionRegistryVersion));
+@@ -1196,0 +1215,3 @@
++		publishAgentRunExecutionEvidence(internalParams.replyOperation,
++			executionEvidence.settle(result?.terminal?.kind === "ok"
++				&& hasCompleteNativeExecutionCoverage(selection, internalParams, executionRegistry, executionRegistryVersion)));

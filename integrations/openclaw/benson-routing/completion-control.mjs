@@ -1,4 +1,5 @@
-import { validateTaskResultEnvelope } from './envelope.mjs';
+import { validateTaskResultEnvelope, createCompletionAuthority, acceptAgentCompletion,
+  reconstructCompletion } from './envelope.mjs';
 
 const VERSION = 1;
 const DOMAINS = new Set(['jessica-vacuum', 'reminder-service']);
@@ -79,4 +80,20 @@ export function validateNativeCompletion({ binding, commitment, parentSession,
     childRunId: binding.childRunId, taskId: task.taskId,
     destination: binding.completionTarget, callerRunId: binding.callerRunId,
     result: normalized });
+}
+
+// R03's native terminal owner supplies this evidence. Candidate text never
+// establishes facts, identity, route, authorization or execution coverage.
+// R04 owns same-run repair; this terminal-only path makes no additional calls.
+export function finalizeNativeAgentCompletion(nativeEvidence, candidate) {
+  let validationCode = null;
+  try {
+    const authority = createCompletionAuthority({ ...nativeEvidence, origin: 'agent' });
+    return Object.freeze({ record: acceptAgentCompletion(candidate, authority), validationCode });
+  } catch (error) {
+    validationCode = /^[a-z][a-z0-9_]*$/u.test(error?.message ?? '') ?
+      error.message : 'agent_completion_invalid';
+  }
+  const authority = createCompletionAuthority({ ...nativeEvidence, origin: 'runtime' });
+  return Object.freeze({ record: reconstructCompletion(authority), validationCode });
 }

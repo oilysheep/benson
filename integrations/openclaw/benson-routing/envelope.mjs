@@ -447,7 +447,7 @@ export const COMPLETION_STATUSES = Object.freeze([
 const FACT_KEYS = ['status', 'domain', 'domainSchemaVersion', 'operation', 'verified',
   'verificationScope', 'data', 'warnings', 'error', 'effects', 'uncertainty', 'pendingContext'];
 const BINDING_KEYS = ['requestId', 'workflowId', 'runId', 'agentId', 'sessionKey',
-  'sessionId', 'generation', 'taskId', 'callerRunId', 'completionTarget', 'finality',
+  'sessionId', 'instanceId', 'lifecycleGeneration', 'taskId', 'callerRunId', 'completionTarget', 'finality',
   'authorizationId', 'deliveryPolicy'];
 const RECORD_KEYS = ['schemaVersion', 'kind', 'facts', 'results', 'userResponse',
   'binding', 'completion'];
@@ -484,9 +484,8 @@ function userResponse(value) {
 function nativeBinding(value, kind) {
   exact(value, BINDING_KEYS, 'completion_binding_shape');
   for (const key of ['requestId', 'workflowId', 'runId', 'agentId', 'sessionKey',
-    'sessionId', 'authorizationId']) if (!identifier(value[key])) fail('completion_binding_identity');
-  if (!Number.isSafeInteger(value.generation) || value.generation < 1 ||
-      (value.taskId !== null && !identifier(value.taskId)) ||
+    'sessionId', 'instanceId', 'lifecycleGeneration', 'authorizationId']) if (!identifier(value[key])) fail('completion_binding_identity');
+  if ((value.taskId !== null && !identifier(value.taskId)) ||
       (kind === 'domain-task' && value.taskId === null) ||
       (kind === 'final-workflow' && value.taskId !== null) ||
       !['CALLER', 'RESPONSE_CONTROLLER'].includes(value.completionTarget) ||
@@ -566,7 +565,8 @@ function completionShape(raw) {
     if (child.binding.completionTarget === 'RESPONSE_CONTROLLER' &&
         (results.length !== 1 || result.binding.completionTarget !== 'RESPONSE_CONTROLLER' ||
          child.binding.runId !== result.binding.runId || child.binding.agentId !== result.binding.agentId ||
-         child.binding.generation !== result.binding.generation)) fail('completion_direct_result_binding');
+         child.binding.instanceId !== result.binding.instanceId ||
+         child.binding.lifecycleGeneration !== result.binding.lifecycleGeneration)) fail('completion_direct_result_binding');
   }
   if (raw.kind === 'final-workflow' && raw.completion.outcome !== 'FAILED') {
     if (raw.facts.status === 'success' && results.some((child) =>

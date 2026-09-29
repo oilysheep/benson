@@ -257,7 +257,7 @@ function protocolFacts(changes = {}) {
 function protocolBinding(taskId = null, changes = {}) {
   return { requestId: 'r02-request', workflowId: 'r02-workflow', runId: taskId ?? 'main-final-run',
     agentId: taskId === null ? 'main' : 'jessica-vacuum', sessionKey: 'agent:main:oren', sessionId: 'r02-session',
-    generation: 1, taskId, callerRunId: taskId === null ? null : 'main-original-run',
+    instanceId: 'instance-r02', lifecycleGeneration: 'lifecycle-r02', taskId, callerRunId: taskId === null ? null : 'main-original-run',
     completionTarget: taskId === null ? 'RESPONSE_CONTROLLER' : 'CALLER', finality: taskId === null,
     authorizationId: 'native-authorization', deliveryPolicy: { eligible: taskId === null, reason: null }, ...changes };
 }
@@ -352,7 +352,7 @@ test('R02 native workflow binding, retained child authority and pending provenan
   assert.deepEqual(plain(record.results[0].facts.pendingContext), pendingContext);
   const forged = plain(record); forged.results[0].facts.pendingContext.binding.requesterId = 'foreign';
   assert.throws(() => validateCompletion(forged, authority), /evidence_mismatch/);
-  const replayed = plain(record); replayed.binding.generation++;
+  const replayed = plain(record); replayed.binding.instanceId = 'replacement-native-instance';
   assert.throws(() => validateCompletion(replayed, authority), /native_binding_mismatch/);
   assert.throws(() => protocolWorkflow([{ record: child.record, authority: {} }], {
     status: 'clarification_required', verified: false, verificationScope: [], pendingContext }), /native_completion_authority_required/);
