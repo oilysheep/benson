@@ -218,3 +218,171 @@ test("Reminder pending continuation keeps exact context and rejects foreign or e
   assert.throws(() => assertPendingContextBinding(normalized.pendingContext,
     trustedLegacy.pendingBinding, new Date("2026-09-25T20:00:00Z")), /pending_binding_or_expiry/);
 });
+
+// R02: new consumers use only this family; legacy v1/v2 readers above are retained
+// for an explicit future cutover, never silently promoted to the new protocol.
+import { COMPLETION_SCHEMA_VERSION, createCompletionAuthority, acceptAgentCompletion,
+  reconstructCompletion, validateCompletion, COMPLETION_STATUSES } from '../envelope.mjs';
+
+const newFacts = (changes = {}) => ({ status: 'success', domain: 'jessica-vacuum',
+  domainSchemaVersion: '1', operation: 'clean', verified: true,
+  verificationScope: ['command_started'], data: { operationId: 'op-1', started: true },
+  warnings: [], error: null, effects: [{ kind: 'command_started', operationId: 'op-1' }],
+  uncertainty: [{ kind: 'physical_completion_not_established' }], pendingContext: null, ...changes });
+const newBinding = (changes = {}) => ({ requestId: 'request-r02', workflowId: 'workflow-r02',
+  runId: 'run-r02', agentId: 'jessica-vacuum', sessionKey: 'agent:main:oren',
+  sessionId: 'session-r02', generation: 1, taskId: 'task-r02', callerRunId: 'caller-r02',
+  completionTarget: 'CALLER', finality: false, authorizationId: 'authorization-r02',
+  deliveryPolicy: { eligible: false, reason: null }, ...changes });
+const unavailableResponse = { state: 'unavailable', reason: {
+  code: 'OWNER_MESSAGE_UNAVAILABLE', detail: 'Owner did not retain wording.' } };
+const nativeEvidence = (changes = {}) => ({ kind: 'domain-task', binding: newBinding(),
+  knownFacts: newFacts(), results: [], coverage: 'complete', gaps: [], origin: 'agent', ...changes });
+const proposal = (changes = {}) => ({ schemaVersion: COMPLETION_SCHEMA_VERSION,
+  kind: 'domain-task', facts: newFacts(), userResponse: { state: 'usable', text: 'Cleaning started.', language: 'en' },
+  ...changes });
+
+test('R02 discriminants, required response state and unknown versions fail closed', () => {
+  const authority = createCompletionAuthority(nativeEvidence());
+  for (const userResponse of [null, undefined, {}, { state: 'usable', text: '', language: 'en' },
+    { state: 'usable', text: '   ', language: 'he' }, { state: 'unavailable' },
+    { state: 'unavailable', reason: { code: 'bad code', detail: 'reason' } },
+    { state: 'usable', text: 'x'.repeat(4097), language: 'en' },
+    { state: 'usable', text: 'x', language: 'xx' }, { state: 'missing' }]) {
+    assert.throws(() => acceptAgentCompletion(proposal({ userResponse }), authority));
+  }
+  const missing = proposal(); delete missing.userResponse;
+  assert.throws(() => acceptAgentCompletion(missing, authority), /agent_completion_shape/);
+  for (const schemaVersion of [1, 2, 4, '3', null]) {
+    assert.throws(() => acceptAgentCompletion(proposal({ schemaVersion }), authority), /version_or_kind/);
+  }
+  for (const kind of ['response', 'task', null]) {
+    assert.throws(() => acceptAgentCompletion(proposal({ kind }), authority), /version_or_kind/);
+  }
+  const accepted = acceptAgentCompletion(proposal({ userResponse: unavailableResponse }), authority);
+  assert.equal(accepted.completion.outcome, 'NORMAL');
+  assert.equal(accepted.facts.status, 'success');
+  assert.equal(accepted.userResponse.state, 'unavailable');
+  assert.ok(Object.isFrozen(accepted.facts.data));
+  assert.deepEqual(plain(validateCompletion(plain(accepted), authority)), plain(accepted));
+});
+
+test('R02 agent payload and serialized objects cannot author native authority or outcome', () => {
+  const authority = createCompletionAuthority(nativeEvidence());
+  for (const field of ['binding', 'completion', 'provenance', 'taskId', 'results',
+    'completionTarget', 'authorizationId', 'deliveryPolicy', 'messageCandidate']) {
+    assert.throws(() => acceptAgentCompletion(proposal({ [field]: 'forged' }), authority), /agent_completion_shape/);
+  }
+  for (const fake of [nativeEvidence(), {}, JSON.parse(JSON.stringify(authority))]) {
+    assert.throws(() => acceptAgentCompletion(proposal(), fake), /native_completion_authority_required/);
+  }
+  const accepted = acceptAgentCompletion(proposal(), authority);
+  for (const field of ['requestId', 'workflowId', 'runId', 'agentId', 'sessionId', 'sessionKey',
+    'generation', 'taskId', 'callerRunId', 'authorizationId']) {
+    const raw = plain(accepted); raw.binding[field] = field === 'generation' ? 2 : 'forged';
+    assert.throws(() => validateCompletion(raw, authority), /native_binding_mismatch/);
+  }
+  const raw = plain(accepted); raw.completion.outcome = 'RECOVERED';
+  assert.throws(() => validateCompletion(raw, authority), /evidence_insufficient/);
+  assert.throws(() => acceptAgentCompletion(proposal({ facts: newFacts({ data: { physicallyCompleted: true } }) }),
+    authority), /evidence_mismatch/);
+  assert.throws(() => reconstructCompletion(authority), /origin_mismatch/);
+});
+
+test('R02 domain version, collection bounds and JSON safety remain strict', () => {
+  for (const domainSchemaVersion of ['2', 'future', null]) {
+    assert.throws(() => createCompletionAuthority(nativeEvidence({ knownFacts: newFacts({ domainSchemaVersion }) })),
+      /domain_version/);
+  }
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ kind: 'other' })), /native_evidence_invalid/);
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ binding: newBinding({ taskId: null }) })), /binding_invalid/);
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ binding: newBinding({ callerRunId: null }) })), /binding_invalid/);
+  for (const field of ['warnings', 'effects', 'uncertainty']) {
+    createCompletionAuthority(nativeEvidence({ knownFacts: newFacts({ [field]: Array.from({ length: 64 }, () => ({ fact: 'known' })) }) }));
+    assert.throws(() => createCompletionAuthority(nativeEvidence({ knownFacts: newFacts({
+      [field]: Array.from({ length: 65 }, () => ({ fact: 'known' })) }) })));
+  }
+  for (const data of [() => {}, NaN, JSON.parse('{"__proto__":{"forged":true}}'),
+    { text: 'x'.repeat(16385) }, Array(1), Object.assign([], { custom: 'lost' }),
+    { [Symbol('lost')]: true }, Object.defineProperty({}, 'lost', { value: true }),
+    Object.defineProperty({}, 'getter', { enumerable: true, get() { throw new Error('getter_executed'); } }), Array(257).fill(null), Object.fromEntries(Array.from({ length: 257 }, (_, i) => [i, 1]))]) {
+    assert.throws(() => createCompletionAuthority(nativeEvidence({ knownFacts: newFacts({ data }) })));
+  }
+  let deep = null; for (let i = 0; i < 20; i++) deep = { child: deep };
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ knownFacts: newFacts({ data: deep }) })), /too_deep/);
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ knownFacts: newFacts({
+    data: Array.from({ length: 20 }, () => 'x'.repeat(16384)) }) })), /bytes_exceeded/);
+});
+
+test('R02 business statuses are independent of runtime finalization outcomes', () => {
+  const cases = {
+    success: newFacts(),
+    failure: newFacts({ status: 'failure', verified: false, verificationScope: [], error: { code: 'DEVICE_UNAVAILABLE' } }),
+    partial: newFacts({ status: 'partial', verified: false, verificationScope: [], error: { code: 'ROOM_FAILED' } }),
+    unknown: newFacts({ status: 'unknown', verified: 'unknown', verificationScope: [] }),
+    not_applicable: newFacts({ status: 'not_applicable', verified: 'not_applicable', verificationScope: [], effects: [] }),
+    clarification_required: newFacts({ status: 'clarification_required', verified: false, verificationScope: [], effects: [],
+      pendingContext: { schemaVersion: 1, value: { room: 'ambiguous', evidenceId: 'native-evidence-1' },
+        binding: { requesterId: 'oren', conversationId: 'agent:main:oren' }, expiresAt: '2026-09-29T12:00:00Z' } }),
+  };
+  for (const status of COMPLETION_STATUSES) {
+    const facts = cases[status];
+    const normalAuthority = createCompletionAuthority(nativeEvidence({ knownFacts: facts }));
+    const normal = acceptAgentCompletion(proposal({ facts }), normalAuthority);
+    const recoveryAuthority = createCompletionAuthority(nativeEvidence({ knownFacts: facts, origin: 'runtime' }));
+    const recovered = reconstructCompletion(recoveryAuthority);
+    const failedAuthority = createCompletionAuthority(nativeEvidence({ knownFacts: facts, origin: 'runtime', coverage: 'incomplete' }));
+    const failed = reconstructCompletion(failedAuthority);
+    for (const [record, authority, outcome] of [[normal, normalAuthority, 'NORMAL'],
+      [recovered, recoveryAuthority, 'RECOVERED'], [failed, failedAuthority, 'FAILED']]) {
+      assert.equal(record.facts.status, status);
+      assert.equal(record.completion.outcome, outcome);
+      assert.deepEqual(plain(record.facts), plain(facts));
+      assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+      if (outcome !== 'NORMAL') {
+        const injected = plain(record); injected.userResponse = proposal().userResponse;
+        assert.throws(() => validateCompletion(injected, authority), /runtime_response_mismatch/);
+      }
+    }
+  }
+});
+
+test('R02 missing meaning produces an evidence-preserving FAILED report, no guesses', () => {
+  const knownFacts = newFacts(); delete knownFacts.data;
+  const native = nativeEvidence({ knownFacts, origin: 'runtime' });
+  const authority = createCompletionAuthority(native);
+  native.knownFacts.effects.length = 0; // Native input is copied before any later change.
+  const failed = reconstructCompletion(authority);
+  assert.equal(failed.completion.outcome, 'FAILED');
+  assert.equal(failed.facts.status, 'success');
+  assert.equal(failed.facts.data, null);
+  assert.equal(failed.facts.effects.length, 1);
+  assert.ok(failed.completion.gaps.some((gap) => gap.path === 'facts.data'));
+  const forged = plain(failed); forged.completion = { outcome: 'RECOVERED', gaps: [] };
+  assert.throws(() => validateCompletion(forged, authority), /evidence_insufficient/);
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ knownFacts })), /evidence_insufficient/);
+  const emptyAuthority = createCompletionAuthority(nativeEvidence({ knownFacts: {}, origin: 'runtime', coverage: 'incomplete' }));
+  const empty = reconstructCompletion(emptyAuthority);
+  assert.equal(empty.facts.status, 'unknown');
+  assert.equal(empty.facts.domain, null);
+  assert.equal(empty.facts.verified, 'unknown');
+  assert.equal(empty.completion.outcome, 'FAILED');
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ binding: newBinding({ runId: null }), origin: 'runtime' })), /binding_identity/);
+});
+
+test('R02 retained legacy domain facts migrate only with explicit response and native evidence', () => {
+  for (const entry of accepted) {
+    const legacy = result(entry.result, `migration-${entry.id}`);
+    const facts = { status: legacy.status, domain: legacy.domain, domainSchemaVersion: legacy.domainSchemaVersion,
+      operation: legacy.operation, verified: legacy.verified, verificationScope: legacy.verified ? ['legacy_tool_verification'] : [],
+      data: legacy.data, warnings: legacy.warnings, error: legacy.error, effects: [], uncertainty: [], pendingContext: legacy.pendingContext };
+    const authority = createCompletionAuthority(nativeEvidence({ knownFacts: facts,
+      binding: newBinding({ taskId: legacy.taskId, agentId: legacy.domain === 'reminder' ? 'reminder-service' : legacy.domain }) }));
+    assert.throws(() => validateCompletion(legacy, authority), /completion_shape/);
+    assert.throws(() => acceptAgentCompletion({ schemaVersion: 3, kind: 'domain-task', facts }, authority), /agent_completion_shape/);
+    const migrated = acceptAgentCompletion(proposal({ facts, userResponse: unavailableResponse }), authority);
+    for (const key of ['status', 'domain', 'domainSchemaVersion', 'operation', 'verified', 'data', 'warnings', 'error', 'pendingContext']) {
+      assert.deepEqual(plain(migrated.facts[key]), plain(legacy[key]), `${entry.id}:${key}`);
+    }
+  }
+});
