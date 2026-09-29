@@ -90,6 +90,53 @@ The closure record belongs in the same PR as the stage implementation and is not
 a work log or transcript. PR workflow does not replace required rollback points,
 runtime checkpoints, validation, acceptance, recovery, or snapshots.
 
+### Manual independent pre-merge review
+
+When Oren explicitly requests a pre-merge review, run a fresh independent
+Codex process using the configured `reviewer` profile from the target
+checkout/worktree. Reviews are manual and must not start automatically.
+
+When the request is made from an active Builder Codex session, the Builder must
+launch that independent reviewer process itself, wait for it to finish, and
+return the reviewer report to Oren. The Builder must not substitute its own
+review or pass its reasoning/session context to the reviewer.
+
+Use the PR plus the stage, capability, or domain named by Oren as the review
+target. The reviewer must independently establish the minimum sufficient
+authoritative context for that target:
+
+- inspect the PR diff against its merge base first to identify the affected
+  owners and surfaces;
+- locate the canonical plan or document that owns the target rather than
+  assuming a fixed Benson-wide plan;
+- read the relevant target stage/section and its dependencies, validation,
+  acceptance, rollback, and stop/approval conditions;
+- read only the canonical architecture sections needed by that target or by
+  concrete questions raised by the diff;
+- when domain code is affected, read the applicable domain-owned canonical
+  plans, contracts, and nested `AGENTS.md` files as relevant;
+- inspect the affected surrounding code and the tests that provide acceptance
+  evidence.
+
+Do not broadly load unrelated plans, domains, architecture sections, historical
+documents, or builder-session reasoning. Builder summaries and passing tests
+are evidence, not authority.
+
+If the PR makes claims about current runtime state or runtime acceptance, apply
+the repository's normal current-state evidence precedence rather than treating
+historical plans or conversations as current proof.
+
+The reviewer must remain read-only and must not fix findings, modify the PR,
+commit, push, merge, or start the next stage.
+
+The reviewer must return PASS or BLOCKED, concrete findings, acceptance
+criteria actually established, remaining risks or unproven claims, and merge
+readiness.
+
+If the configured `reviewer` profile cannot be launched, or the canonical
+owner for the review target cannot be established reliably, report that and
+stop. Do not substitute a review from the builder session.
+
 ## Architecture guardrails
 
 Follow the canonical architecture rather than restating it here.
