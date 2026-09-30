@@ -37,6 +37,7 @@ async function fixture(agentId = 'main', { coverage = true, scheduled = false, d
   const authority = registry.s(admitted.operationalRunInstance);
   assert.equal(registry.O(authority), true);
   const context = registry.c(runId);
+  registry.bindBensonNativeManagedRun(admitted);
   const binding = { requestId: `fixture-request-${sequence}`, workflowId: `fixture-workflow-${sequence}`,
     runId, agentId, sessionKey: domain ? 'agent:main:r03-caller' : params.sessionKey,
     sessionId: domain ? 'r03-caller-session' : params.sessionId,
@@ -74,6 +75,49 @@ function entry(kind, execute) {
     ...common, isClaudeCliBackend: () => false, runCliAgentInternal: execute,
   });
 }
+
+
+nativeTest('ordinary native embedded and CLI runs retain raw success, callbacks and errors', async () => {
+  for (const kind of ['embedded', 'cli']) {
+    const runId = 'r03-native-unmanaged-' + ++sequence;
+    const params = { runId, agentId: 'ordinary-agent', sessionKey: 'agent:ordinary-agent:fixture',
+      sessionId: 'ordinary-session', lifecycleGeneration: registry.d() };
+    registry._(runId, params);
+    params.preparedRunAdmission = admission.l({}, runId, params.agentId, 'ordinary.fixture');
+    await params.preparedRunAdmission.admit('embedded');
+    const seen = [];
+    params.onAgentEvent = event => seen.push(event);
+    params.onBlockReply = reply => seen.push(reply);
+    assert.equal(registry.guardBensonNativeAgentCallbacks(params), params);
+    const plainResult = { payloads: [{ text: 'ordinary native final' }],
+      meta: { finalAssistantRawText: 'ordinary native final' } };
+    const run = entry(kind, async received => {
+      received.onAgentEvent?.({ runId, stream: 'assistant', data: { text: 'ordinary progress' } });
+      received.onBlockReply?.({ text: 'ordinary block' });
+      return plainResult;
+    });
+    assert.equal(await run(params), plainResult);
+    assert.deepEqual(seen.map(item => item.data?.text ?? item.text),
+      ['ordinary progress', 'ordinary block']);
+    assert.equal(registry.c(runId).bensonCompletionBoundary, undefined);
+    const failure = new Error('ordinary native failure');
+    await assert.rejects(entry(kind, async () => { throw failure; })(params),
+      error => error === failure);
+    assert.equal(failure.bensonCompletion, undefined);
+    assert.equal(registry.c(runId).bensonCompletionBoundary, undefined);
+  }
+});
+
+nativeTest('ordinary pre-boundary native failures retain their original error', async () => {
+  for (const kind of ['embedded', 'cli']) {
+    const error = new Error('native admission failed');
+    let reached = 0;
+    const run = entry(kind, async () => { reached++; throw error; });
+    await assert.rejects(run({ runId: 'r03-unmanaged-unadmitted-' + ++sequence,
+      agentId: 'ordinary-agent' }), actual => actual === error);
+    assert.equal(reached, 1);
+  }
+});
 
 for (const kind of ['embedded', 'cli']) {
   for (const agentId of ['main', 'jessica-vacuum', 'reminder-service', 'future-fixture']) {
@@ -174,7 +218,7 @@ nativeTest('yield/wait is native nonterminal suspension, never canonical complet
 
 nativeTest('embedded native suspension transfers continuation without terminal settlement or publication', async () => {
   const source = readFileSync(join(root, 'dist', 'embedded-agent-BaH7wGBd.mjs'), 'utf8');
-  const start = source.indexOf('result = finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, result);');
+  const start = source.indexOf('const bensonOwner = getAgentEventExecutionContext().getStore().bensonRunOwnership;');
   const end = source.indexOf('\n\t\t\t} catch (error)', start);
   assert.ok(start > 0 && end > start, 'native terminal owner must be extractable');
   const actions = [];
@@ -212,6 +256,9 @@ nativeTest('embedded native suspension transfers continuation without terminal s
       assert.equal(observed[0].data.completionOutcome, 'NORMAL');
     } finally { off(); }
   }
+  const ordinary = { payloads: [{ text: 'ordinary yielded text' }], meta: { yielded: true } };
+  await events.y(registry.d(), () => nativeTerminal(ordinary));
+  assert.deepEqual(actions.splice(0), ['terminal-receipt', 'terminal-settlement', 'terminal-publication']);
 });
 
 nativeTest('native publication gate scopes completion only to Benson-managed runs', async () => {
@@ -277,8 +324,22 @@ nativeTest('missing trusted binding holds output instead of inventing a route; a
   const f = await fixture(); f.attempt.settle(true);
   const fake = { ...f.proposal, binding: f.context.bensonCompletionEvidence.binding };
   delete f.context.bensonCompletionEvidence;
+  assert.equal(events.s({ runId: f.params.runId, stream: 'assistant',
+    data: { text: 'raw managed pre-boundary' } }), false);
+  assert.equal(events.s({ runId: f.params.runId, stream: 'lifecycle',
+    data: { phase: 'error' } }), false);
   await assert.rejects(registry.withBensonNativeCompletion(f.params, async () => f.result(fake)), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
   assert.equal(f.context.bensonCompletionBoundary.record, null);
+});
+
+
+nativeTest('ordinary handled reply retains native hook result without a Benson owner', async () => {
+  const runId = 'r03-ordinary-handled-' + ++sequence;
+  const result = { handled: true, reply: { text: 'ordinary hook result' } };
+  registry._(runId, { agentId: 'ordinary-agent', sessionKey: 'ordinary:fixture',
+    sessionId: 'ordinary-session' });
+  assert.equal(registry.finalizeBensonHandledReply(runId, result), result);
+  assert.equal(registry.c(runId).bensonCompletionBoundary, undefined);
 });
 
 nativeTest('provider schema hints cannot bypass deterministic finalization', async () => {
@@ -401,11 +462,40 @@ nativeTest('exported prepared CLI execution also inherits the native completion 
     withAgentRunLifecycleGeneration: events.y, captureAgentRunLifecycleGeneration: () => registry.d(),
     withBensonNativeCompletion: registry.withBensonNativeCompletion,
     guardBensonNativeAgentCallbacks: registry.guardBensonNativeAgentCallbacks,
+    isBensonNativeManagedRun: registry.isBensonNativeManagedRun,
     runPreparedCliAgentOwned: async () => f.result('plain prepared CLI answer'),
     runWithCliHistoryWriter: async (_writer, run) => run(),
   });
   const result = await prepared({ params: f.params });
   assert.equal(result.meta.bensonCompletion.completion.outcome, 'RECOVERED');
+});
+
+
+nativeTest('ordinary prepared CLI keeps original context, raw result and failure', async () => {
+  const runId = 'r03-ordinary-prepared-cli-' + ++sequence;
+  const params = { runId, agentId: 'ordinary-cli', sessionKey: 'agent:ordinary-cli:fixture',
+    sessionId: 'ordinary-cli-session', lifecycleGeneration: registry.d() };
+  registry._(runId, params);
+  const context = { params, cliHistoryWriter: {} };
+  const raw = { payloads: [{ text: 'ordinary prepared CLI final' }], meta: {} };
+  const failure = new Error('ordinary prepared CLI failure');
+  let next = () => raw;
+  const seen = [];
+  const prepared = nativeFunction('cli-runner-DQ-f1RtK.mjs', 'runPreparedCliAgent', {
+    isBensonNativeManagedRun: registry.isBensonNativeManagedRun,
+    withAgentRunLifecycleGeneration: () => { throw new Error('ordinary CLI entered Benson lifecycle'); },
+    captureAgentRunLifecycleGeneration: () => { throw new Error('ordinary CLI captured Benson lifecycle'); },
+    withBensonNativeCompletion: () => { throw new Error('ordinary CLI entered Benson gate'); },
+    guardBensonNativeAgentCallbacks: () => { throw new Error('ordinary CLI guarded native callbacks'); },
+    runPreparedCliAgentOwned: async actual => { assert.equal(actual, context); return next(); },
+    runWithCliHistoryWriter: async (writer, run) => { assert.equal(writer, context.cliHistoryWriter);
+      seen.push('history'); return run(); },
+  });
+  assert.equal(await prepared(context), raw);
+  next = () => { throw failure; };
+  await assert.rejects(prepared(context), error => error === failure);
+  assert.deepEqual(seen, ['history', 'history']);
+  assert.equal(registry.c(runId).bensonCompletionBoundary, undefined);
 });
 
 nativeTest('late native callbacks cannot reuse completion after run/session replacement', async () => {
@@ -606,6 +696,93 @@ nativeTest('ACP native admission cannot persist, publish, or deliver raw termina
     assert.equal(liveAssistant.length, 0, 'raw ACP text reached the user-visible event bus');
     offAssistant();
     f.attempt.settle(true);
+  }
+});
+
+
+nativeTest('ordinary ACP preserves native streaming, transcript, result ordering and error', async () => {
+  for (const failed of [false, true]) {
+    const runId = 'r03-ordinary-acp-' + ++sequence;
+    const params = { runId, agentId: 'ordinary-acp', sessionAgentId: 'ordinary-acp',
+      sessionKey: 'agent:ordinary-acp:fixture', sessionId: 'ordinary-acp-session',
+      lifecycleGeneration: registry.d(), opts: {}, cfg: {},
+      acpResolution: { meta: { agent: 'ordinary-acp' } }, trackInternalModelRunTarget: () => {} };
+    registry._(runId, params);
+    params.preparedRunAdmission = admission.l({}, runId, params.agentId, 'ordinary.acp');
+    const admitted = await params.preparedRunAdmission.admit('acp');
+    const observed = [];
+    const raw = 'RAW_ORDINARY_ACP';
+    const failure = new Error('ordinary ACP failure');
+    const runtime = {
+      createAcpToolLifecycleTracker: () => ({}), emitAcpLifecycleStart: () => {},
+      createAcpVisibleTextAccumulator: () => {
+        let value = '';
+        return { consume: chunk => { value += chunk; return { text: value, delta: chunk }; },
+          finalize: () => value.trim(), finalizeRaw: () => value,
+          finalizeReplySnapshot: () => ({ disposition: 'visible', text: value }) };
+      },
+      emitAcpRuntimeEvent: () => {},
+      emitAcpAssistantDelta: value => {
+        assert.equal(events.s({ runId, stream: 'assistant',
+          data: { text: value.text, delta: value.delta } }), true);
+        observed.push('delta');
+      },
+      resolveAcpLifecycleEndFields: () => ({}),
+      buildAcpResult: value => {
+        observed.push('build');
+        return { payloads: [{ text: value.payloadText }],
+          meta: { finalAssistantRawText: value.payloadText, terminalReply: value.terminalReply } };
+      },
+      persistAcpTurnTranscript: async value => {
+        assert.equal(value.finalText, raw);
+        observed.push('transcript'); return { sessionEntry: {} };
+      },
+      emitAcpLifecycleEnd: value => {
+        assert.equal(value.terminalReply.text, raw);
+        observed.push('end');
+      },
+      emitAcpLifecycleError: () => observed.push('error')
+    };
+    const acp = nativeFunction('agent-command-Dyd2gex-.mjs', 'runAcpAgentCommand', {
+      Date, Error, getInstallationTarget: () => undefined,
+      loadAttemptExecutionRuntime: async () => runtime,
+      isSubagentCoordinationInputProvenance: () => false,
+      registerAgentRunContext: registry._,
+      loadAcpPolicyRuntime: async () => ({ resolveAcpDispatchPolicyError: () => undefined,
+        resolveAcpAgentPolicyError: () => undefined }),
+      normalizeAgentId: value => value, resolveInlineAgentImageAttachments: () => [],
+      assertAgentRunLifecycleGenerationCurrent: () => {},
+      createLazyAcpElicitationHandler: () => undefined,
+      getAdmittedRunDelegatedAuthority: () => registry.s(admitted.operationalRunInstance),
+      isAgentRunRestartAbortReason: () => false,
+      loadAcpRuntimeErrorsRuntime: async () => ({ toAcpRuntimeError: ({ error }) => error }),
+      loadAcpSessionIdentifiersRuntime: async () => ({ resolveAcpSessionCwd: () => undefined }),
+      buildAgentRunTerminalOutcomeFromLifecycleEvent: () => ({}),
+      applyAgentRunAbortMetadata: value => value,
+      loadDeliveryRuntime: async () => ({ deliverAgentCommandResult: async value => {
+        observed.push('delivery'); return value.result;
+      } }),
+      classifyAgentRunTerminalOutcome: () => 'success', recordAgentRunTerminalOutcome: value => value,
+      beginAgentRunExecutionEvidence: registry.beginAgentRunExecutionEvidence,
+      finishBensonNativeCompletion: registry.finishBensonNativeCompletion,
+      getAgentEventExecutionContext: registry.M
+    });
+    params.acpManager = { runTurn: async callbacks => {
+      callbacks.onEvent({ type: 'text_delta', text: raw });
+      if (failed) throw failure;
+      callbacks.onEvent({ type: 'done', status: 'success', stopReason: 'end_turn' });
+    } };
+    const run = () => events.y(registry.d(), () => registry.withBensonNativeCompletion(params, () => acp(params)));
+    if (failed) {
+      await assert.rejects(run(), error => error === failure);
+      assert.deepEqual(observed, ['delta', 'error']);
+    } else {
+      const result = await run();
+      assert.equal(result.payloads[0].text, raw);
+      assert.equal(result.meta.bensonCompletion, undefined);
+      assert.deepEqual(observed, ['delta', 'transcript', 'end', 'build', 'delivery']);
+    }
+    assert.equal(registry.c(runId).bensonCompletionBoundary, undefined);
   }
 });
 
