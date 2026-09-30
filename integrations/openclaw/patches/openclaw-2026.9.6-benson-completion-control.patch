@@ -828,3 +828,172 @@
 +		publishAgentRunExecutionEvidence(internalParams.replyOperation,
 +			executionEvidence.settle(result?.terminal?.kind === "ok"
 +				&& hasCompleteNativeExecutionCoverage(selection, internalParams, executionRegistry, executionRegistryVersion)));
+# R03: trusted native admission provenance for initial, child and scheduled runs.
+--- a/dist/agent-run-registry-DO6Dg2r0.mjs
++++ b/dist/agent-run-registry-DO6Dg2r0.mjs
+@@ -672 +672,17 @@
+-function bindBensonNativeManagedRun(admitted) {
++const bensonInitialAdmission = new AsyncLocalStorage();
++function withBensonNativeInitialAdmission(provenance, run) {
++  if (!provenance) return run();
++  if (provenance.kind !== "initial" || !provenance.sessionKey) throw bensonCompletionBlocked();
++  return bensonInitialAdmission.run(Object.freeze({ ...provenance }), run);
++}
++function readBensonNativeInitialAdmission(sessionKey) {
++  const provenance = bensonInitialAdmission.getStore();
++  return provenance?.sessionKey === sessionKey ? provenance : void 0;
++}
++function isBensonNativeManagedAuthority(instance, authority) {
++  const context = instance?.runId && getAgentRunContext(instance.runId);
++  return !!(context && authority && context.bensonManagedCompletionAuthority === authority &&
++    getActiveAgentRunDelegatedAuthority(instance) === authority &&
++    authority.operationalRunInstance.instanceId === instance.instanceId);
++}
++function bindBensonNativeManagedRun(admitted, provenance) {
+@@ -676 +692,7 @@
+-  if (!authority || context?.delegatedAuthority !== authority) throw bensonCompletionBlocked();
++  if (!authority || context?.delegatedAuthority !== authority || !provenance ||
++      (provenance.kind === "initial" && provenance.sessionKey !== context.sessionKey) ||
++      (provenance.kind === "child" && (!provenance.parentRunId || !provenance.parentInstanceId ||
++        !provenance.parentLifecycleGeneration || provenance.parentRunId === instance.runId)) ||
++      (provenance.kind === "scheduled" && (!provenance.jobId || provenance.schemaVersion !== 1)) ||
++      !["initial", "child", "scheduled"].includes(provenance.kind)) throw bensonCompletionBlocked();
++  context.bensonRunProvenance = Object.freeze({ ...provenance });
+@@ -678,0 +701,13 @@
++function bindBensonNativeInitialRun(admitted, sessionKey) {
++  const provenance = readBensonNativeInitialAdmission(sessionKey);
++  if (provenance) bindBensonNativeManagedRun(admitted, provenance);
++}
++function bindBensonNativeChildRun(admitted, identity, verifiedSpawnLineage) {
++  const parent = identity?.operationalRunInstance;
++  const authority = parent && getActiveAgentRunDelegatedAuthority(parent);
++  if (!isBensonNativeManagedRun({ runId: parent?.runId })) return false;
++  if (!verifiedSpawnLineage || !isBensonNativeManagedAuthority(parent, authority)) throw bensonCompletionBlocked();
++  bindBensonNativeManagedRun(admitted, { kind: "child", parentRunId: parent.runId,
++    parentInstanceId: parent.instanceId, parentLifecycleGeneration: authority.lifecycleGeneration });
++  return true;
++}
+@@ -828 +863 @@
+-export { beginAgentRunExecutionEvidence, recordAgentRunToolExecution, markAgentRunExecutionCoverageUnknown, publishAgentRunExecutionEvidence, bindBensonNativeManagedRun, isBensonNativeManagedRun, beginBensonNativeCompletion, finishBensonNativeCompletion, withBensonNativeCompletion, guardBensonNativeAgentCallbacks, finalizeBensonHandledReply, permitBensonNativeTerminalEvent, bumpAgentRunIndexVersion as A, resolveProjectedAgentRunModel as C, sweepStaleRunContexts as D, rotateAgentRunRegistryLifecycleGeneration as E, getAgentEventExecutionContext as M, recordAgentEventRouting as N, validateAgentRunDelegatedAuthority as O, resetAgentRunRegistryForTest as S, retainQueuedAgentRunContext as T, registerAgentRunContext as _, clearAgentRunContext as a, releaseAgentRunContext as b, getAgentRunContext as c, getAgentRunLifecycleGeneration as d, hasAgentRunContextExecutionOwner as f, recordCronNextCheckProposal as g, recordAgentRunModel as h, claimAgentRunDelegatedAuthority as i, iterateProjectedAgentRunSessionKeys as j, recordAgentRunOutputTokens as k, getAgentRunContextOwnerStatus as l, listAgentRunsForSession as m, claimAgentRunApprovalAuthority as n, consumeCronNextCheckProposal as o, hasLiveAgentRunContext as p, claimAgentRunContext as r, getActiveAgentRunDelegatedAuthority as s, buildProjectedAgentRunIndex as t, getAgentRunContextOwnership as u, registerAgentRunDelegatedAuthorityClosedHandler as v, resolveProjectedAgentRunProgressState as w, releaseAgentRunDelegatedAuthority as x, registerAgentRunSequenceResetHandler as y };
++export { beginAgentRunExecutionEvidence, recordAgentRunToolExecution, markAgentRunExecutionCoverageUnknown, publishAgentRunExecutionEvidence, bindBensonNativeManagedRun, withBensonNativeInitialAdmission, readBensonNativeInitialAdmission, bindBensonNativeInitialRun, bindBensonNativeChildRun, isBensonNativeManagedAuthority, isBensonNativeManagedRun, beginBensonNativeCompletion, finishBensonNativeCompletion, withBensonNativeCompletion, guardBensonNativeAgentCallbacks, finalizeBensonHandledReply, permitBensonNativeTerminalEvent, bumpAgentRunIndexVersion as A, resolveProjectedAgentRunModel as C, sweepStaleRunContexts as D, rotateAgentRunRegistryLifecycleGeneration as E, getAgentEventExecutionContext as M, recordAgentEventRouting as N, validateAgentRunDelegatedAuthority as O, resetAgentRunRegistryForTest as S, retainQueuedAgentRunContext as T, registerAgentRunContext as _, clearAgentRunContext as a, releaseAgentRunContext as b, getAgentRunContext as c, getAgentRunLifecycleGeneration as d, hasAgentRunContextExecutionOwner as f, recordCronNextCheckProposal as g, recordAgentRunModel as h, claimAgentRunDelegatedAuthority as i, iterateProjectedAgentRunSessionKeys as j, recordAgentRunOutputTokens as k, getAgentRunContextOwnerStatus as l, listAgentRunsForSession as m, claimAgentRunApprovalAuthority as n, consumeCronNextCheckProposal as o, hasLiveAgentRunContext as p, claimAgentRunContext as r, getActiveAgentRunDelegatedAuthority as s, buildProjectedAgentRunIndex as t, getAgentRunContextOwnership as u, registerAgentRunDelegatedAuthorityClosedHandler as v, resolveProjectedAgentRunProgressState as w, releaseAgentRunDelegatedAuthority as x, registerAgentRunSequenceResetHandler as y };
+--- a/dist/agent-runner.runtime-DH-TOu7I.mjs
++++ b/dist/agent-runner.runtime-DH-TOu7I.mjs
+@@ -46 +46 @@
+-import { _ as registerAgentRunContext, a as clearAgentRunContext } from "./agent-run-registry-DO6Dg2r0.mjs";
++import { _ as registerAgentRunContext, a as clearAgentRunContext, bindBensonNativeInitialRun } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -3593,0 +3594 @@
++            bindBensonNativeInitialRun(context, params.sessionKey);
+--- a/dist/agent-turn-service-BfYSuxip.mjs
++++ b/dist/agent-turn-service-BfYSuxip.mjs
+@@ -31 +31 @@
+-import { O as validateAgentRunDelegatedAuthority, a as clearAgentRunContext, c as getAgentRunContext, r as claimAgentRunContext } from "./agent-run-registry-DO6Dg2r0.mjs";
++import { O as validateAgentRunDelegatedAuthority, a as clearAgentRunContext, c as getAgentRunContext, r as claimAgentRunContext, bindBensonNativeChildRun } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -3538,0 +3539,2 @@
++                                if (agentRuntimeIdentity) bindBensonNativeChildRun(admittedRunContext,
++                                  agentRuntimeIdentity, !!executionIdentitySpawnFacts);
+--- a/dist/cron-DcDJigA2.mjs
++++ b/dist/cron-DcDJigA2.mjs
+@@ -4,0 +5 @@
++import { s as getActiveAgentRunDelegatedAuthority, isBensonNativeManagedRun, isBensonNativeManagedAuthority } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -1038,0 +1040,9 @@
++        const parentInstance = client?.internal?.agentRuntimeIdentity?.operationalRunInstance;
++        const parentManaged = isBensonNativeManagedRun({ runId: parentInstance?.runId });
++        const parentAuthority = parentInstance && getActiveAgentRunDelegatedAuthority(parentInstance);
++        if (parentManaged && (context.validateAgentRuntimeApprovalAuthority?.(client.internal.agentRuntimeIdentity) !== true ||
++            !isBensonNativeManagedAuthority(parentInstance, parentAuthority)))
++          throw new Error("Benson scheduled creator admission is not current");
++        const bensonRunProvenance = parentManaged ? { kind: "scheduled", schemaVersion: 1,
++          creatorRunId: parentInstance.runId, creatorInstanceId: parentInstance.instanceId,
++          creatorLifecycleGeneration: parentAuthority.lifecycleGeneration } : void 0;
+@@ -1109,0 +1120 @@
++                ...bensonRunProvenance ? { bensonRunProvenance } : {},
+--- a/dist/dispatch-from-config-Cu599NRF.mjs
++++ b/dist/dispatch-from-config-Cu599NRF.mjs
+@@ -0,0 +1 @@
++import { withBensonNativeInitialAdmission } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -608,0 +610,17 @@
++// Benson's native external ingress marks owned runs independently of routing
++// eligibility or agent identity. The overlay is staged and not installed here.
++function resolveBensonNativeInitialAdmission(state) {
++  const ctx = state.ctx;
++  if (!state.allowInboundHandlers || ctx.InboundAccessAuthorized !== true ||
++      classifySessionStateActor({ inputProvenance: ctx.InputProvenance }).actorType !== "human" ||
++      ctx.InputProvenance?.kind && ctx.InputProvenance.kind !== "external_user" ||
++      ctx.InternalTurnSource || ctx.ParentSessionKey || state.pluginOwnedBinding ||
++      ctx.InboundEventKind && ctx.InboundEventKind !== "message" ||
++      ctx.CommandTurn?.kind !== "normal" || /^\s*\//u.test(ctx.commandText ?? "") ||
++      state.inboundDedupeClaim.status !== "claimed" || state.inboundDedupeClaim.recovered ||
++      !state.getDispatchReplyOperation() || state.isPreDispatchOperationAborted()) return;
++  const sessionKey = state.sessionStoreEntry.sessionKey ?? state.sessionKey;
++  if (!sessionKey) throw new Error("Benson initial admission has no native session identity");
++  return Object.freeze({ kind: "initial", sessionKey,
++    sourceTurnId: readChannelSourceTurnId(ctx) ?? null });
++}
+@@ -1437 +1455,3 @@
+-	const replyResult = await runWithDispatchLifecycleAdmission(async () => await runWithDispatchAbortSignal(getDispatchAbortSignal(), () => state.traceReplyPhase("reply.run_reply_resolver", async () => {
++	const initialProvenance = resolveBensonNativeInitialAdmission(state);
++  const replyResult = await withBensonNativeInitialAdmission(initialProvenance,
++    () => runWithDispatchLifecycleAdmission(async () => await runWithDispatchAbortSignal(getDispatchAbortSignal(), () => state.traceReplyPhase("reply.run_reply_resolver", async () => {
+@@ -1636 +1656 @@
+-	});
++}));
+--- a/dist/public-job-C0Jx9vVK.mjs
++++ b/dist/public-job-C0Jx9vVK.mjs
+@@ -4 +4 @@
+-	const { skillLibrarySelections: _skillLibrarySelections, createdActor: _createdActor, toolsAllowProvenance: _toolsAllowProvenance, toolsAllowExecTarget: _toolsAllowExecTarget, toolsAllowExecTargetRequirement: _toolsAllowExecTargetRequirement, runtimeAuthority: _runtimeAuthority, runtimeAuthorityRecoveryRequired: _runtimeAuthorityRecoveryRequired, ...publicJob } = job;
++	const { bensonRunProvenance: _bensonRunProvenance, skillLibrarySelections: _skillLibrarySelections, createdActor: _createdActor, toolsAllowProvenance: _toolsAllowProvenance, toolsAllowExecTarget: _toolsAllowExecTarget, toolsAllowExecTargetRequirement: _toolsAllowExecTargetRequirement, runtimeAuthority: _runtimeAuthority, runtimeAuthorityRecoveryRequired: _runtimeAuthorityRecoveryRequired, ...publicJob } = job;
+--- a/dist/run-executor.runtime-tV449fsh.mjs
++++ b/dist/run-executor.runtime-tV449fsh.mjs
+@@ -8 +8 @@
+-import { _ as registerAgentRunContext } from "./agent-run-registry-DO6Dg2r0.mjs";
++import { _ as registerAgentRunContext, bindBensonNativeManagedRun } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -73 +73,11 @@
+-		onAdmitted: (admitted) => bindGatewayContextResolver(admitted, resolveGatewayContext)
++		onAdmitted: (admitted) => {
++            const provenance = params.job?.bensonRunProvenance;
++            if (provenance !== void 0) {
++              if (provenance.kind !== "scheduled" || provenance.schemaVersion !== 1 ||
++                  params.job.id !== params.jobId || !provenance.creatorRunId ||
++                  !provenance.creatorInstanceId || !provenance.creatorLifecycleGeneration)
++                throw new Error("Benson scheduled provenance is invalid");
++              bindBensonNativeManagedRun(admitted, { ...provenance, jobId: params.jobId });
++            }
++            bindGatewayContextResolver(admitted, resolveGatewayContext);
++          }
+@@ -257,0 +268 @@
++            job: params.job,
+--- a/dist/service-C-O17TZr.mjs
++++ b/dist/service-C-O17TZr.mjs
+@@ -4097,0 +4098 @@
++            if (opts?.bensonRunProvenance) nextJob.bensonRunProvenance = structuredClone(opts.bensonRunProvenance);
+@@ -4129 +4130,2 @@
+-			if (isDeepStrictEqual(declarativeFields(existing, includeEnabled), declarativeFields(nextJob, includeEnabled))) return {
++			if (isDeepStrictEqual(declarativeFields(existing, includeEnabled), declarativeFields(nextJob, includeEnabled)) &&
++              isDeepStrictEqual(existing.bensonRunProvenance, nextJob.bensonRunProvenance)) return {
+@@ -4163,0 +4166,2 @@
++		delete job.bensonRunProvenance; // Never accept a model/client-authored ownership field.
++        if (opts?.bensonRunProvenance) job.bensonRunProvenance = structuredClone(opts.bensonRunProvenance);
+--- a/dist/sessions-spawn-tool-AW-VALLJ.mjs
++++ b/dist/sessions-spawn-tool-AW-VALLJ.mjs
+@@ -117,0 +118 @@
++import { s as getActiveAgentRunDelegatedAuthority, isBensonNativeManagedRun, isBensonNativeManagedAuthority } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -2773,0 +2775,6 @@
++    const managedRequester = isBensonNativeManagedRun({ runId: ctx.requesterTurnRunId }) ||
++      isBensonNativeManagedRun({ runId: gatewayCaller?.operationalRunInstance?.runId });
++    if (managedRequester && (gatewayCaller?.operationalRunInstance?.runId !== ctx.requesterTurnRunId ||
++      !isBensonNativeManagedAuthority(gatewayCaller.operationalRunInstance,
++        getActiveAgentRunDelegatedAuthority(gatewayCaller.operationalRunInstance))))
++      throw new Error("Benson child parent admission is not current");
+@@ -3010 +3017 @@
+-					enabled: isExecutionIdentityCollectionEnabled(cfg),
++					enabled: isExecutionIdentityCollectionEnabled(cfg) || managedRequester,
+--- a/dist/subagent-spawn-cleanup-CiRG0ghp.mjs
++++ b/dist/subagent-spawn-cleanup-CiRG0ghp.mjs
+@@ -13 +13 @@
+-import { s as getActiveAgentRunDelegatedAuthority } from "./agent-run-registry-DO6Dg2r0.mjs";
++import { s as getActiveAgentRunDelegatedAuthority, isBensonNativeManagedAuthority } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -358,0 +359,4 @@
++    const bensonParent = gatewayCaller?.operationalRunInstance &&
++      isBensonNativeManagedAuthority(gatewayCaller.operationalRunInstance,
++        getActiveAgentRunDelegatedAuthority(gatewayCaller.operationalRunInstance));
++    if (bensonParent && !sessionSpawnContext) throw new Error("Benson child requires native spawn lineage");

@@ -37,7 +37,8 @@ async function fixture(agentId = 'main', { coverage = true, scheduled = false, d
   const authority = registry.s(admitted.operationalRunInstance);
   assert.equal(registry.O(authority), true);
   const context = registry.c(runId);
-  registry.bindBensonNativeManagedRun(admitted);
+  registry.bindBensonNativeManagedRun(admitted, { kind: scheduled ? 'scheduled' : 'initial',
+    ...(scheduled ? { schemaVersion: 1, jobId: `fixture-job-${sequence}` } : { sessionKey: params.sessionKey }) });
   const binding = { requestId: `fixture-request-${sequence}`, workflowId: `fixture-workflow-${sequence}`,
     runId, agentId, sessionKey: domain ? 'agent:main:r03-caller' : params.sessionKey,
     sessionId: domain ? 'r03-caller-session' : params.sessionId,
@@ -76,6 +77,119 @@ function entry(kind, execute) {
   });
 }
 
+
+nativeTest('native initial admission binds only an authorized channel-scoped run before execution', async () => {
+  const dispatch = readFileSync(join(root, 'dist', 'dispatch-from-config-Cu599NRF.mjs'), 'utf8');
+  const runner = readFileSync(join(root, 'dist', 'agent-runner.runtime-DH-TOu7I.mjs'), 'utf8');
+  assert.match(dispatch, /withBensonNativeInitialAdmission\(initialProvenance/u);
+  const resolve = nativeFunction('dispatch-from-config-Cu599NRF.mjs',
+    'resolveBensonNativeInitialAdmission', {
+      classifySessionStateActor: () => ({ actorType: 'human' }),
+      readChannelSourceTurnId: () => 'source-native'
+    });
+  const state = { allowInboundHandlers: true,
+    ctx: { InboundAccessAuthorized: true, CommandTurn: { kind: 'normal' }, InboundEventKind: 'message' },
+    pluginOwnedBinding: false, inboundDedupeClaim: { status: 'claimed', recovered: false },
+    getDispatchReplyOperation: () => ({ id: 'native-operation' }),
+    isPreDispatchOperationAborted: () => false,
+    sessionStoreEntry: { sessionKey: 'agent:future-agent:channel' }, sessionAgentId: 'unrelated-identity' };
+  assert.equal(resolve(state).kind, 'initial');
+  assert.equal(resolve({ ...state, sessionAgentId: 'another-future-agent' }).sessionKey,
+    'agent:future-agent:channel');
+  for (const ctx of [{ ...state.ctx, InboundAccessAuthorized: false },
+    { ...state.ctx, InternalTurnSource: 'agent' },
+    { ...state.ctx, InputProvenance: { kind: 'internal' } },
+    { ...state.ctx, CommandTurn: { kind: 'command' } }])
+    assert.equal(resolve({ ...state, ctx }), undefined);
+  assert.equal(resolve({ ...state, pluginOwnedBinding: true }), undefined);
+  assert.match(runner, /onAdmitted: \(context\) => \{[^]*?bindBensonNativeInitialRun\(context, params\.sessionKey\)/u);
+  const create = (sessionKey) => {
+    const runId = 'r03-initial-provenance-' + ++sequence;
+    registry._(runId, { sessionKey, agentId: 'future-agent', lifecycleGeneration: registry.d() });
+    return admission.c({ cfg: {}, operationalRunInstance: admission.a(runId),
+      facts: { runId, agentId: 'future-agent', ingress: { kind: 'channel', boundary: 'auto-reply.agent-runner', state: 'present' } },
+      onAdmitted: context => registry.bindBensonNativeInitialRun(context, sessionKey) });
+  };
+  const key = 'agent:future-agent:managed-' + sequence;
+  const managed = create(key);
+  const admitted = await registry.withBensonNativeInitialAdmission({ kind: 'initial', sessionKey: key },
+    () => managed.admit('embedded'));
+  assert.equal(registry.isBensonNativeManagedRun({ runId: admitted.operationalRunInstance.runId }), true);
+  assert.equal(registry.c(admitted.operationalRunInstance.runId).bensonRunProvenance.kind, 'initial');
+  const ordinary = create('agent:ordinary:unmanaged-' + sequence);
+  const plain = await ordinary.admit('embedded');
+  assert.equal(registry.isBensonNativeManagedRun({ runId: plain.operationalRunInstance.runId }), false);
+  const mismatched = create('agent:ordinary:mismatch-' + sequence);
+  const mismatch = await registry.withBensonNativeInitialAdmission({ kind: 'initial', sessionKey: key },
+    () => mismatched.admit('embedded'));
+  assert.equal(registry.isBensonNativeManagedRun({ runId: mismatch.operationalRunInstance.runId }), false);
+});
+
+nativeTest('native child admission inherits only authenticated live managed parent lineage', async () => {
+  const spawn = readFileSync(join(root, 'dist', 'sessions-spawn-tool-AW-VALLJ.mjs'), 'utf8');
+  const gateway = readFileSync(join(root, 'dist', 'agent-turn-service-BfYSuxip.mjs'), 'utf8');
+  assert.match(spawn, /enabled: isExecutionIdentityCollectionEnabled\(cfg\) \|\| managedRequester/u);
+  assert.match(gateway, /onAdmittedRunContext: \(admittedRunContext\) => \{[^]*?bindBensonNativeChildRun\(admittedRunContext/u);
+  const parent = await fixture('future-parent');
+  const createChild = (identity, verified) => {
+    const runId = 'r03-child-provenance-' + ++sequence;
+    registry._(runId, { sessionKey: 'agent:future-child:' + sequence, agentId: 'future-child', lifecycleGeneration: registry.d() });
+    return admission.c({ cfg: {}, operationalRunInstance: admission.a(runId),
+      facts: { runId, agentId: 'future-child', ingress: { kind: 'subagent', boundary: 'sessions_spawn.subagent', state: 'present' } },
+      onAdmitted: context => registry.bindBensonNativeChildRun(context, identity, verified) });
+  };
+  const identity = { operationalRunInstance: parent.admitted.operationalRunInstance };
+  const child = await createChild(identity, true).admit('embedded');
+  assert.equal(registry.c(child.operationalRunInstance.runId).bensonRunProvenance.parentRunId, parent.params.runId);
+  await assert.rejects(createChild(identity, false).admit('embedded'), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+  parent.params.preparedRunAdmission.close();
+  await assert.rejects(createChild(identity, true).admit('embedded'), { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+  const plainParent = await admission.l({}, 'r03-plain-parent-' + ++sequence, 'ordinary', 'fixture').admit('embedded');
+  const plainChild = await createChild({ operationalRunInstance: plainParent.operationalRunInstance }, true).admit('embedded');
+  assert.equal(registry.isBensonNativeManagedRun({ runId: plainChild.operationalRunInstance.runId }), false);
+});
+
+nativeTest('scheduled provenance is persisted by the native owner and binds only matching agent jobs', async () => {
+  const gateway = readFileSync(join(root, 'dist', 'cron-DcDJigA2.mjs'), 'utf8');
+  const service = readFileSync(join(root, 'dist', 'service-C-O17TZr.mjs'), 'utf8');
+  const executor = readFileSync(join(root, 'dist', 'run-executor.runtime-tV449fsh.mjs'), 'utf8');
+  assert.match(gateway, /validateAgentRuntimeApprovalAuthority[^]*?bensonRunProvenance/u);
+  assert.match(service, /delete job\.bensonRunProvenance;[^]*?opts\?\.bensonRunProvenance/u);
+  assert.match(executor, /onAdmitted: \(admitted\) => \{[^]*?bindBensonNativeManagedRun\(admitted, \{ \.\.\.provenance, jobId: params\.jobId \}\)/u);
+  const rowCodec = await load('row-codec-mXerryYi.mjs');
+  const now = Date.now();
+  const storedJob = { id: 'r03-scheduled-provenance', agentId: 'future', name: 'scheduled',
+    enabled: true, createdAtMs: now, updatedAtMs: now,
+    schedule: { kind: 'every', everyMs: 60000 }, sessionTarget: 'isolated',
+    payload: { kind: 'agentTurn', message: 'test' }, delivery: { mode: 'none' }, state: {},
+    bensonRunProvenance: { kind: 'scheduled', schemaVersion: 1, creatorRunId: 'creator',
+      creatorInstanceId: 'instance', creatorLifecycleGeneration: 'generation' } };
+  const persisted = rowCodec.c(storedJob);
+  assert.deepEqual(plain(persisted.bensonRunProvenance), storedJob.bensonRunProvenance);
+  const publicJob = await load('public-job-C0Jx9vVK.mjs');
+  assert.equal(Object.hasOwn(publicJob.t(persisted), 'bensonRunProvenance'), false);
+  const prepare = nativeFunction('run-executor.runtime-tV449fsh.mjs',
+    'prepareCronPromptRunAdmission', {
+      createOperationalRunInstanceRef: admission.a,
+      getPluginRuntimeGatewayRequestScope: () => undefined,
+      prepareAgentRunAdmission: admission.c,
+      bindBensonNativeManagedRun: registry.bindBensonNativeManagedRun,
+      bindGatewayContextResolver: () => {},
+      revokeMessageActionTurnCapability: () => {},
+      isRuntimeToolAllowed: () => false
+    });
+  const runId = 'r03-real-cron-admission-' + ++sequence;
+  registry._(runId, { sessionKey: 'agent:future:cron-' + sequence,
+    agentId: 'future', lifecycleGeneration: registry.d() });
+  const prepared = prepare({ cfg: {}, runId, job: persisted, jobId: persisted.id,
+    agentId: 'future', sessionKey: 'agent:future:cron-' + sequence });
+  const admitted = await prepared.preparedRunAdmission.admit('embedded');
+  assert.equal(registry.c(admitted.operationalRunInstance.runId).bensonRunProvenance.jobId, persisted.id);
+  prepared.close();
+  const f = await fixture('scheduled-future', { scheduled: true });
+  assert.throws(() => registry.bindBensonNativeManagedRun(f.admitted, { kind: 'scheduled', schemaVersion: 1 }),
+    { code: 'ERR_BENSON_COMPLETION_BLOCKED' });
+});
 
 nativeTest('ordinary native embedded and CLI runs retain raw success, callbacks and errors', async () => {
   for (const kind of ['embedded', 'cli']) {
