@@ -440,7 +440,7 @@
 @@ -0,0 +1,2 @@
 +import { finalizeNativeAgentCompletion } from "file:///home/oa/projects/benson/integrations/openclaw/benson-routing/completion-control.mjs";
 +import { n as recordModelFallbackStop } from "./model-fallback-stop-B0RY23Zf.mjs";
-@@ -610 +612,192 @@
+@@ -610 +612,197 @@
 -export { bumpAgentRunIndexVersion as A, resolveProjectedAgentRunModel as C, sweepStaleRunContexts as D, rotateAgentRunRegistryLifecycleGeneration as E, getAgentEventExecutionContext as M, recordAgentEventRouting as N, validateAgentRunDelegatedAuthority as O, resetAgentRunRegistryForTest as S, retainQueuedAgentRunContext as T, registerAgentRunContext as _, clearAgentRunContext as a, releaseAgentRunContext as b, getAgentRunContext as c, getAgentRunLifecycleGeneration as d, hasAgentRunContextExecutionOwner as f, recordCronNextCheckProposal as g, recordAgentRunModel as h, claimAgentRunDelegatedAuthority as i, iterateProjectedAgentRunSessionKeys as j, recordAgentRunOutputTokens as k, getAgentRunContextOwnerStatus as l, listAgentRunsForSession as m, claimAgentRunApprovalAuthority as n, consumeCronNextCheckProposal as o, hasLiveAgentRunContext as p, claimAgentRunContext as r, getActiveAgentRunDelegatedAuthority as s, buildProjectedAgentRunIndex as t, getAgentRunContextOwnership as u, registerAgentRunDelegatedAuthorityClosedHandler as v, resolveProjectedAgentRunProgressState as w, releaseAgentRunDelegatedAuthority as x, registerAgentRunSequenceResetHandler as y };
 +// Native execution evidence belongs to the admitted run context, never progress events.
 +function getOrCreateRunExecutionEvidence(context) {
@@ -618,15 +618,20 @@
 +  return { ...result, reply: final.payloads[0] };
 +}
 +function permitBensonNativeTerminalEvent(event) {
-+  if (event.stream !== "lifecycle" || !["end", "error"].includes(event.data?.phase)) return true;
 +  const context = getAgentRunContext(event.runId);
 +  const captured = getAgentEventExecutionContext().getStore()?.bensonRunOwnership;
 +  const boundary = context?.bensonCompletionBoundary;
++  // Admission-owned evidence and a captured owner also fence pre-boundary events.
++  // Unmanaged native runs keep their native publication semantics.
++  if (!boundary && !context?.bensonCompletionEvidence && captured?.runId !== event.runId) return true;
++  // Assistant events contain provisional model output, never canonical completion.
++  if (event.stream === "assistant") return false;
++  if (event.stream !== "lifecycle" || !["end", "error"].includes(event.data?.phase)) return true;
 +  if (!boundary || captured?.runId === event.runId && (captured.context !== context || captured.boundary !== boundary) ||
 +      event.lifecycleGeneration && event.lifecycleGeneration !== context.lifecycleGeneration ||
 +      boundary.lifecycleGeneration !== getAgentRunLifecycleGeneration() ||
 +      context.delegatedAuthority && context.delegatedAuthority.operationalRunInstance !== boundary.instance) return false;
-+  if (boundary.nonterminal) return true;
++  if (boundary.nonterminal) return false;
 +  if (!boundary.record || boundary.record.binding.agentId !== context.agentId || boundary.terminalSessionId !== context.sessionId ||
 +      boundary.terminalSessionKey !== context.sessionKey) return false;
 +  event.data = { ...event.data, completionProtocolVersion: 3, completionOutcome: boundary.record.completion.outcome };
@@ -649,6 +654,9 @@
 @@ -0,0 +1,2 @@
 +import { M as getAgentEventExecutionContext } from "./agent-run-registry-DO6Dg2r0.mjs";
 +import { withBensonNativeCompletion, finishBensonNativeCompletion, guardBensonNativeAgentCallbacks } from "./agent-run-registry-DO6Dg2r0.mjs";
+@@ -198 +200 @@
+-import { a as resolveSessionPlacementSandbox, c as settleFailedRequesterRun, d as resolveEmbeddedRunLaneTimeoutMs, f as resolveEmbeddedRunSessionLanePolicy, l as settleRequesterRun, m as withEmbeddedRunLaneTimeout, p as shouldNoteLaneWait, s as withSessionPlacementTurnAdmission, u as EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS } from "./session-placement-admission-BJtGChb8.mjs";
++import { a as resolveSessionPlacementSandbox, b as retainRequesterContinuation, c as settleFailedRequesterRun, d as resolveEmbeddedRunLaneTimeoutMs, f as resolveEmbeddedRunSessionLanePolicy, l as settleRequesterRun, m as withEmbeddedRunLaneTimeout, p as shouldNoteLaneWait, s as withSessionPlacementTurnAdmission, u as EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS } from "./session-placement-admission-BJtGChb8.mjs";
 @@ -2891 +2893,5 @@
 -			})) throw new Error(`Could not record superseded writer outcome: ${previousWriterRunId}`);
 +			})) {
@@ -662,10 +670,34 @@
 @@ -8887 +8893 @@
 -	}));
 +	}))));
-@@ -9328,0 +9335 @@
+@@ -9328,0 +9335,8 @@
 +				result = finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, result);
-@@ -9340,0 +9348 @@
++				if (result.meta?.yielded === true || result.meta?.continuationPending === true) {
++					if (result.meta.executionTrace?.runner !== "cli" && params.isFinalFallbackAttempt === void 0) retainRequesterContinuation(params, result, () => {
++						throwIfAborted();
++						params.preparedRunAdmission?.assertSourceCurrent();
++					});
++					return result;
++				}
+@@ -9340,0 +9355 @@
 +				finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, { meta: { aborted: error?.name === "AbortError" } }, null);
+--- a/dist/session-placement-admission-BJtGChb8.mjs
++++ b/dist/session-placement-admission-BJtGChb8.mjs
+@@ -84 +84 @@
+-function settleRequesterRun(params, result, assertCurrent) {
++function advanceRequesterRunOwnership(params, result, assertCurrent) {
+@@ -118,0 +119,8 @@
++function settleRequesterRun(params, result, assertCurrent) {
++	return advanceRequesterRunOwnership(params, result, assertCurrent);
++}
++/** Preserves native child handoff without declaring the requesting turn terminal. */
++function retainRequesterContinuation(params, result, assertCurrent) {
++	if (result.meta?.yielded !== true && result.meta?.continuationPending !== true) throw new Error("requester continuation requires a native suspension");
++	return advanceRequesterRunOwnership(params, result, assertCurrent);
++}
+@@ -256 +264 @@
+-export { resolveSessionPlacementSandbox as a, settleFailedRequesterRun as c, resolveEmbeddedRunLaneTimeoutMs as d, resolveEmbeddedRunSessionLanePolicy as f, resolveSessionPlacementRuntimeOverride as i, settleRequesterRun as l, withEmbeddedRunLaneTimeout as m, installSessionPlacementAdmissionProvider as n, withLocalSessionPlacementTurnSettlement as o, shouldNoteLaneWait as p, recoverTerminalSessionPlacementTurn as r, withSessionPlacementTurnAdmission as s, captureSessionPlacementCompactionSuccessorAssertion as t, EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS as u };
++export { resolveSessionPlacementSandbox as a, settleFailedRequesterRun as c, resolveEmbeddedRunLaneTimeoutMs as d, resolveEmbeddedRunSessionLanePolicy as f, resolveSessionPlacementRuntimeOverride as i, settleRequesterRun as l, retainRequesterContinuation as b, withEmbeddedRunLaneTimeout as m, installSessionPlacementAdmissionProvider as n, withLocalSessionPlacementTurnSettlement as o, shouldNoteLaneWait as p, recoverTerminalSessionPlacementTurn as r, withSessionPlacementTurnAdmission as s, captureSessionPlacementCompactionSuccessorAssertion as t, EMBEDDED_RUN_LANE_TIMEOUT_GRACE_MS as u };
 --- a/dist/cli-runner-DQ-f1RtK.mjs
 +++ b/dist/cli-runner-DQ-f1RtK.mjs
 @@ -0,0 +1 @@

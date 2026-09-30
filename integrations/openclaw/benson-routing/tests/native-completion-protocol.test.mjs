@@ -172,15 +172,84 @@ nativeTest('yield/wait is native nonterminal suspension, never canonical complet
   }
 });
 
+nativeTest('embedded native suspension transfers continuation without terminal settlement or publication', async () => {
+  const source = readFileSync(join(root, 'dist', 'embedded-agent-BaH7wGBd.mjs'), 'utf8');
+  const start = source.indexOf('result = finishBensonNativeCompletion(getAgentEventExecutionContext().getStore().bensonRunOwnership, result);');
+  const end = source.indexOf('\n\t\t\t} catch (error)', start);
+  assert.ok(start > 0 && end > start, 'native terminal owner must be extractable');
+  const actions = [];
+  const nativeTerminal = new vm.Script('(async (result) => { ' + source.slice(start, end) + ' })').runInNewContext({
+    getAgentEventExecutionContext: registry.M,
+    finishBensonNativeCompletion: registry.finishBensonNativeCompletion,
+    retainRequesterContinuation: (_params, result, assertCurrent) => {
+      assertCurrent(); assert.ok(result.meta.yielded || result.meta.continuationPending);
+      actions.push('continuation');
+    },
+    settleRequesterRun: () => actions.push('terminal-settlement'),
+    refresh: { mergeTerminalReceipt: () => actions.push('terminal-receipt') },
+    terminal: { emit: () => actions.push('terminal-publication'), getDeferredError: () => undefined },
+    params: { isFinalFallbackAttempt: undefined, preparedRunAdmission: { assertSourceCurrent: () => {} } },
+    throwIfAborted: () => {}, resolveAgentLifecycleTerminalMetadata: () => ({})
+  });
+  for (const field of ['yielded', 'continuationPending']) {
+    const f = await fixture(); f.attempt.settle(true);
+    const observed = []; const off = events.f(event => {
+      if (event.runId === f.params.runId) observed.push(event);
+    });
+    try {
+      const result = { payloads: [], meta: { [field]: true } };
+      assert.equal(await registry.withBensonNativeCompletion(f.params, () => nativeTerminal(result)), result);
+      assert.deepEqual(actions.splice(0), ['continuation']);
+      assert.equal(f.context.bensonCompletionBoundary.record, null);
+      for (const phase of ['end', 'error']) assert.equal(events.s({ runId: f.params.runId,
+        stream: 'lifecycle', data: { phase } }), false);
+      assert.equal(observed.length, 0);
+      const owner = registry.beginBensonNativeCompletion(f.params);
+      registry.finishBensonNativeCompletion(owner, f.result());
+      assert.equal(events.s({ runId: f.params.runId, stream: 'lifecycle',
+        data: { phase: 'end' } }), true);
+      assert.equal(observed.length, 1);
+      assert.equal(observed[0].data.completionOutcome, 'NORMAL');
+    } finally { off(); }
+  }
+});
+
+nativeTest('native publication gate scopes completion only to Benson-managed runs', async () => {
+  const unmanagedRunId = 'r03-unmanaged-' + ++sequence;
+  registry._(unmanagedRunId, { agentId: 'native-fixture', sessionKey: 'native:fixture', sessionId: 'native-session' });
+  const seen = []; const off = events.f(event => { if (event.runId === unmanagedRunId) seen.push(event); });
+  try {
+    assert.equal(events.s({ runId: unmanagedRunId, stream: 'assistant', data: { text: 'native text' } }), true);
+    for (const phase of ['end', 'error']) assert.equal(events.s({ runId: unmanagedRunId,
+      stream: 'lifecycle', data: { phase } }), true);
+    assert.deepEqual(seen.map(event => event.stream === 'assistant' ? 'assistant' : event.data.phase),
+      ['assistant', 'end', 'error']);
+    assert.equal(events.s({ runId: 'r03-unregistered-' + ++sequence, stream: 'lifecycle',
+      data: { phase: 'error' } }), true);
+  } finally { off(); }
+  const managed = await fixture();
+  assert.equal(managed.context.bensonCompletionBoundary, undefined);
+  assert.equal(events.s({ runId: managed.params.runId, stream: 'assistant',
+    data: { text: 'provisional Benson text' } }), false);
+  assert.equal(events.s({ runId: managed.params.runId, stream: 'lifecycle',
+    data: { phase: 'error' } }), false);
+  assert.equal(events.s({ runId: managed.params.runId, stream: 'lifecycle',
+    data: { phase: 'start', startedAt: Date.now() } }), true);
+  managed.attempt.settle(true);
+});
+
 nativeTest('native publication rejects pre-finalization terminal through all public/audit emitter paths', async () => {
   const f = await fixture(); f.attempt.settle(true); registry.x(f.authority);
   const owner = registry.beginBensonNativeCompletion(f.params);
   const seen = []; const off = events.f(event => seen.push(event)); const offAudit = events.d(event => seen.push(event));
   try {
     const emit = () => ({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end', endedAt: Date.now() } });
+    const raw = () => ({ runId: f.params.runId, stream: 'assistant', data: { text: 'RAW_PRE_ACCEPTANCE' } });
+    events.s(raw()); events.o(raw(), f.context); events.r(raw());
     events.s(emit()); events.o(emit(), f.context); events.r(emit());
     assert.equal(seen.length, 0);
     registry.finishBensonNativeCompletion(owner, f.result());
+    events.s(raw()); events.o(raw(), f.context); events.r(raw());
     events.s(emit()); events.o(emit(), f.context); events.r(emit());
     assert.equal(seen.length, 3);
     for (const event of seen) assert.equal(event.data.completionOutcome, 'NORMAL');
@@ -303,9 +372,11 @@ nativeTest('native callback boundary blocks early terminal/prose block callbacks
   const owner = registry.beginBensonNativeCompletion(f.params); const seen = [];
   const guarded = registry.guardBensonNativeAgentCallbacks({ ...f.params,
     onAgentEvent: event => seen.push(event), onBlockReply: payload => seen.push(payload) });
+  guarded.onAgentEvent({ runId: f.params.runId, stream: 'assistant', data: { text: 'RAW_CALLBACK_FIXTURE' } });
   guarded.onAgentEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } });
   guarded.onBlockReply({ text: 'RAW_CALLBACK_FIXTURE' }); assert.equal(seen.length, 0);
   const result = registry.finishBensonNativeCompletion(owner, f.result());
+  guarded.onAgentEvent({ runId: f.params.runId, stream: 'assistant', data: { text: 'RAW_CALLBACK_FIXTURE' } });
   guarded.onAgentEvent({ runId: f.params.runId, stream: 'lifecycle', data: { phase: 'end' } });
   guarded.onBlockReply({ text: 'RAW_CALLBACK_FIXTURE' }); assert.equal(seen.length, 2);
   assert.equal(seen[0].data.completionOutcome, 'NORMAL');
@@ -446,7 +517,10 @@ nativeTest('ACP native admission cannot persist, publish, or deliver raw termina
   assert.match(source, /return await withBensonNativeCompletion\([^\n]+runAcpAgentCommand\(/u);
   for (const failureName of [null, 'Error', 'TimeoutError', 'AbortError']) {
     const f = await fixture();
-    const writes = []; const eventsSeen = []; let text = '';
+    const writes = []; const eventsSeen = []; const liveAssistant = []; let text = '';
+    const offAssistant = events.f(event => {
+      if (event.runId === f.params.runId && event.stream === 'assistant') liveAssistant.push(event);
+    });
     const runtime = {
       createAcpToolLifecycleTracker: () => ({}), emitAcpLifecycleStart: () => {},
       createAcpVisibleTextAccumulator: () => {
@@ -455,7 +529,10 @@ nativeTest('ACP native admission cannot persist, publish, or deliver raw termina
           finalize: () => value.trim(), finalizeRaw: () => value,
           finalizeReplySnapshot: () => ({ disposition: 'visible', text: value }) };
       },
-      emitAcpRuntimeEvent: () => {}, emitAcpAssistantDelta: () => {},
+      emitAcpRuntimeEvent: () => {}, emitAcpAssistantDelta: params => {
+        assert.equal(events.s({ runId: params.runId, stream: 'assistant',
+          data: { text: params.text, delta: params.delta } }), false);
+      },
       resolveAcpLifecycleEndFields: () => ({}),
       buildAcpResult: params => ({ payloads: [{ text: params.payloadText }], meta: { terminalReply: params.terminalReply } }),
       persistAcpTurnTranscript: async params => {
@@ -502,9 +579,9 @@ nativeTest('ACP native admission cannot persist, publish, or deliver raw termina
       opts: {}, cfg: {}, acpResolution: { meta: { agent: 'main' } },
       trackInternalModelRunTarget: () => {},
       acpManager: { runTurn: async callbacks => {
-        if (failureName) { const error = new Error('fixture ACP failure'); error.name = failureName; throw error; }
         text = 'RAW_ACP_FINAL';
         callbacks.onEvent({ type: 'text_delta', text });
+        if (failureName) { const error = new Error('fixture ACP failure'); error.name = failureName; throw error; }
         callbacks.onEvent({ type: 'done', status: 'success', stopReason: 'end_turn' });
       } } };
     const run = () => registry.withBensonNativeCompletion({ ...params, agentId: 'main' }, () => acp(params));
@@ -526,6 +603,8 @@ nativeTest('ACP native admission cannot persist, publish, or deliver raw termina
       assert.equal(result.meta.terminalReply.text.includes(text), false);
       assert.deepEqual(JSON.parse(result.payloads[0].text), plain(result.meta.bensonCompletion));
     }
+    assert.equal(liveAssistant.length, 0, 'raw ACP text reached the user-visible event bus');
+    offAssistant();
     f.attempt.settle(true);
   }
 });
