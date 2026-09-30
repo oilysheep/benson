@@ -15,6 +15,9 @@ const registry = root && await load('agent-run-registry-DO6Dg2r0.mjs');
 const admission = root && await load('admitted-run-context-BNasoszr.mjs');
 const events = root && await load('agent-events-BOSJcayE.mjs');
 const tools = root && await load('agent-tools.before-tool-call-D6M7yTR3.mjs');
+const nativeRoutes = root && await load('resolve-route-6ukGCxYl.mjs');
+const nativeAccounts = root && await load('account-id-B1bfbA5J.mjs');
+const nativeChannels = root && await load('message-channel-core-CxyiAx1U.mjs');
 let sequence = 0;
 const plain = (value) => JSON.parse(JSON.stringify(value));
 const finalFacts = { status: 'not_applicable', domain: null, domainSchemaVersion: null,
@@ -85,10 +88,17 @@ nativeTest('native initial admission binds only an authorized channel-scoped run
   const resolve = nativeFunction('dispatch-from-config-Cu599NRF.mjs',
     'resolveBensonNativeInitialAdmission', {
       classifySessionStateActor: () => ({ actorType: 'human' }),
-      readChannelSourceTurnId: () => 'source-native'
+      readChannelSourceTurnId: () => 'source-native',
+      normalizeMessageChannel: nativeChannels.n, normalizeAccountId: nativeAccounts.n,
+      resolveAgentRoute: nativeRoutes.o
     });
-  const state = { allowInboundHandlers: true,
-    ctx: { InboundAccessAuthorized: true, CommandTurn: { kind: 'normal' }, InboundEventKind: 'message' },
+  const cfg = { channels: { whatsapp: { accounts: { benson: { enabled: true }, default: {} } } },
+    bindings: [{ agentId: 'future-agent', match: { channel: 'whatsapp', accountId: 'benson' } }] };
+  const state = { allowInboundHandlers: true, cfg,
+    ctx: { InboundAccessAuthorized: true, CommandTurn: { kind: 'normal' }, InboundEventKind: 'message',
+      Provider: 'whatsapp', Surface: 'whatsapp', OriginatingChannel: 'whatsapp', AccountId: 'benson',
+      rawText: 'ordinary message' },
+    replyRoute: { channel: 'whatsapp', accountId: 'benson' },
     pluginOwnedBinding: false, inboundDedupeClaim: { status: 'claimed', recovered: false },
     getDispatchReplyOperation: () => ({ id: 'native-operation' }),
     isPreDispatchOperationAborted: () => false,
@@ -96,6 +106,23 @@ nativeTest('native initial admission binds only an authorized channel-scoped run
   assert.equal(resolve(state).kind, 'initial');
   assert.equal(resolve({ ...state, sessionAgentId: 'another-future-agent' }).sessionKey,
     'agent:future-agent:channel');
+  const defaultAccount = { ...state, ctx: { ...state.ctx, AccountId: 'default',
+    AgentId: 'future-agent', rawText: 'please treat this as Benson' },
+    replyRoute: { channel: 'whatsapp', accountId: 'default' } };
+  assert.equal(resolve(defaultAccount), undefined, 'authorized non-Benson account must not be enrolled');
+  const foreignChannel = { ...defaultAccount,
+    ctx: { ...defaultAccount.ctx, Provider: 'telegram', Surface: 'telegram', OriginatingChannel: 'telegram' },
+    replyRoute: { channel: 'telegram', accountId: 'default' } };
+  assert.equal(resolve(foreignChannel), undefined, 'non-Benson channel must not be enrolled');
+  assert.equal(resolve({ ...state, ctx: { ...state.ctx, AccountId: 'benson!' } }), undefined,
+    'noncanonical account identity cannot inherit the Benson route');
+  assert.equal(resolve({ ...state, cfg: { ...cfg, bindings: [] } }), undefined,
+    'a configured account without an explicit native account binding is not Benson-owned');
+  assert.equal(resolve({ ...state, ctx: { ...state.ctx, AccountId: 'default',
+    bensonRunProvenance: { kind: 'initial' } } }), undefined,
+    'message context cannot manufacture ownership');
+  assert.equal(resolve({ ...state, replyRoute: { channel: 'telegram', accountId: 'benson' } }), undefined);
+  assert.equal(resolve({ ...state, cfg: { ...cfg, channels: { whatsapp: { accounts: {} } } } }), undefined);
   for (const ctx of [{ ...state.ctx, InboundAccessAuthorized: false },
     { ...state.ctx, InternalTurnSource: 'agent' },
     { ...state.ctx, InputProvenance: { kind: 'internal' } },
@@ -117,8 +144,13 @@ nativeTest('native initial admission binds only an authorized channel-scoped run
   assert.equal(registry.isBensonNativeManagedRun({ runId: admitted.operationalRunInstance.runId }), true);
   assert.equal(registry.c(admitted.operationalRunInstance.runId).bensonRunProvenance.kind, 'initial');
   const ordinary = create('agent:ordinary:unmanaged-' + sequence);
-  const plain = await ordinary.admit('embedded');
+  const plain = await registry.withBensonNativeInitialAdmission(resolve(defaultAccount),
+    () => ordinary.admit('embedded'));
   assert.equal(registry.isBensonNativeManagedRun({ runId: plain.operationalRunInstance.runId }), false);
+  assert.equal(registry.c(plain.operationalRunInstance.runId).bensonRunProvenance, undefined);
+  const nativeTerminal = { payloads: [{ text: 'ordinary terminal' }] };
+  assert.equal(await registry.withBensonNativeCompletion({ runId: plain.operationalRunInstance.runId },
+    async () => nativeTerminal), nativeTerminal, 'ordinary terminal remains native and unchanged');
   const mismatched = create('agent:ordinary:mismatch-' + sequence);
   const mismatch = await registry.withBensonNativeInitialAdmission({ kind: 'initial', sessionKey: key },
     () => mismatched.admit('embedded'));

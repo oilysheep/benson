@@ -909,11 +909,13 @@
 +                ...bensonRunProvenance ? { bensonRunProvenance } : {},
 --- a/dist/dispatch-from-config-Cu599NRF.mjs
 +++ b/dist/dispatch-from-config-Cu599NRF.mjs
-@@ -0,0 +1 @@
+@@ -0,0 +1,3 @@
 +import { withBensonNativeInitialAdmission } from "./agent-run-registry-DO6Dg2r0.mjs";
-@@ -608,0 +610,17 @@
-+// Benson's native external ingress marks owned runs independently of routing
-+// eligibility or agent identity. The overlay is staged and not installed here.
++import { n as normalizeAccountId } from "./account-id-B1bfbA5J.mjs";
++import { o as resolveAgentRoute } from "./resolve-route-6ukGCxYl.mjs";
+@@ -608,0 +612,31 @@
++// Benson ownership begins at the authenticated native channel/account route,
++// never at the selected agent. The overlay is staged and not installed here.
 +function resolveBensonNativeInitialAdmission(state) {
 +  const ctx = state.ctx;
 +  if (!state.allowInboundHandlers || ctx.InboundAccessAuthorized !== true ||
@@ -924,17 +926,31 @@
 +      ctx.CommandTurn?.kind !== "normal" || /^\s*\//u.test(ctx.commandText ?? "") ||
 +      state.inboundDedupeClaim.status !== "claimed" || state.inboundDedupeClaim.recovered ||
 +      !state.getDispatchReplyOperation() || state.isPreDispatchOperationAborted()) return;
++  const channel = normalizeMessageChannel(ctx.Provider ?? ctx.Surface);
++  const accountId = normalizeAccountId(ctx.AccountId);
++  // Only the operator-owned Benson account's explicit native account binding
++  // establishes initial ownership. The selected agent is not an ownership signal.
++  if (!channel || accountId !== "benson" || ctx.AccountId !== accountId ||
++      normalizeMessageChannel(ctx.Surface ?? ctx.Provider) !== channel ||
++      (ctx.OriginatingChannel && normalizeMessageChannel(ctx.OriginatingChannel) !== channel) ||
++      normalizeMessageChannel(state.replyRoute?.channel) !== channel ||
++      state.replyRoute?.accountId !== accountId ||
++      !Object.hasOwn(state.cfg.channels?.[channel]?.accounts ?? {}, accountId) ||
++      state.cfg.channels[channel].accounts[accountId]?.enabled === false) return;
++  const route = resolveAgentRoute({ cfg: state.cfg, channel, accountId });
++  if (route.channel !== channel || route.accountId !== accountId ||
++      route.matchedBy !== "binding.account") return;
 +  const sessionKey = state.sessionStoreEntry.sessionKey ?? state.sessionKey;
 +  if (!sessionKey) throw new Error("Benson initial admission has no native session identity");
 +  return Object.freeze({ kind: "initial", sessionKey,
 +    sourceTurnId: readChannelSourceTurnId(ctx) ?? null });
 +}
-@@ -1437 +1455,3 @@
+@@ -1437 +1471,3 @@
 -	const replyResult = await runWithDispatchLifecycleAdmission(async () => await runWithDispatchAbortSignal(getDispatchAbortSignal(), () => state.traceReplyPhase("reply.run_reply_resolver", async () => {
 +	const initialProvenance = resolveBensonNativeInitialAdmission(state);
 +  const replyResult = await withBensonNativeInitialAdmission(initialProvenance,
 +    () => runWithDispatchLifecycleAdmission(async () => await runWithDispatchAbortSignal(getDispatchAbortSignal(), () => state.traceReplyPhase("reply.run_reply_resolver", async () => {
-@@ -1636 +1656 @@
+@@ -1636 +1672 @@
 -	});
 +}));
 --- a/dist/public-job-C0Jx9vVK.mjs
