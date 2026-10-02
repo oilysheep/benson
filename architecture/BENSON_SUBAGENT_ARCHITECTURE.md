@@ -1430,9 +1430,11 @@ Device domains such as Jessica, Boiler, and Irrigation should follow a common pa
 ```text
 User request
         ↓
-Request Controller selects eligible direct domain or Main orchestration
+Request Controller: authorized continuation OR Main/direct routing
         ↓
-Fresh domain sub-agent reasons and selects approved capability
+Existing eligible active domain run OR fresh isolated activation
+        ↓
+Domain agent reasons and selects approved capability
         ↓
 Deterministic domain tool validates and executes
         ↓
@@ -1766,7 +1768,7 @@ Before approving a domain or major workflow, verify these design/implementation 
 
 ### Request routing and orchestration
 
-- [ ] Benson and Main remain distinct; Main owns contextual reasoning, dependencies, delegation, aggregation, and final semantics for its workflows.
+- [ ] Benson and Main remain distinct; Main owns broad/unresolved contextual reasoning, dependencies, cross-domain orchestration, aggregation, and final semantics for its workflows.
 - [ ] New external interactive admissions enter Request Controller; internal completions/recovery are not reclassified requests.
 - [ ] Decision Model receives an admission-consistent bounded conversation/workflow projection and supplies evidence only; deterministic continuation policy precedes ordinary routing and commits one owner/action.
 - [ ] Grounded continuations do not require Main; ambiguous, broad or multi-domain work and unresolved semantic dependencies (including historical references) do. Isolated briefs preserve exact current text and minimum relevant context.
