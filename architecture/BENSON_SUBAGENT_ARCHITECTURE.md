@@ -170,7 +170,7 @@ When OpenClaw is upgraded, re-verify at minimum:
 5. scheduler/Cron execution and delivery semantics;
 6. any OpenClaw file or configuration surface on which Benson runtime behavior depends.
 
-For the target control plane, also verify native pre-Main admission, bounded model access, exclusive execution commitment, automatic terminal enforcement for every Benson agent, completion-only capability restriction, trusted completion destinations, transcript ownership, and frozen prepared-payload delivery/recovery. The logical boundaries below do not assert that any installed API already implements them. Exact native bindings belong to the separately approved implementation plan.
+For the target control plane, also verify native pre-Main admission, bounded model access, exclusive execution commitment, automatic terminal enforcement for every Benson agent, completion-only capability restriction, trusted completion destinations, and frozen prepared-payload delivery/recovery. Conversation continuity additionally requires verified external-conversation versus execution-session identity, canonical transcript custody across routing paths, admission-consistent context reads, compaction ordering, authorized active-run continuation, and the scope/durability of concurrency controls. The logical boundaries below do not assert that any installed API already implements them. Section 27 records current evidence and gaps; exact native bindings belong to the separately approved implementation plan.
 
 If official OpenClaw documentation appears inconsistent, prefer the most specific current documentation for the affected subsystem, then verify against focused installed-version runtime evidence and implementation/source when necessary. Do not preserve an older Benson assumption merely because it existed in a previous architecture revision.
 
@@ -181,14 +181,17 @@ If official OpenClaw documentation appears inconsistent, prefer the most specifi
 Benson is the complete orchestration system, not the Benson Main agent. It separates semantic reasoning, deterministic control, domain execution, device integration, response control, native delivery, and persistence.
 
 ```text
-User / Channel -> OpenClaw native admission
-  -> Benson Request Controller
+User / Channel -> OpenClaw native conversation / trusted admission
+  -> Benson Request Controller: bounded conversation + workflow context
   -> one-shot Decision Model (when enabled)
-  -> deterministic routing policy
-       +-> Benson Main -> optional fresh domain children
-       +-> fresh Direct Domain Agent
-              -> deterministic tools -> verification
-              -> domain result + explicit userResponse
+  -> deterministic continuation policy first
+       +-> verified active/pending workflow -> authorized continuation
+       +-> otherwise ordinary routing policy
+              +-> Benson Main -> optional fresh domain children
+              +-> fresh Direct Domain Agent
+  -> selected authorized execution/continuation
+       -> approved deterministic tools where needed -> verification
+       -> owner result + explicit userResponse
   -> every agent: benson_complete -> deterministic completion validation
        +-> rejected: bounded completion-only repair; mutation disabled
        +-> exhausted: runtime constructs RECOVERED completion if evidence suffices
@@ -204,25 +207,27 @@ User / Channel -> OpenClaw native admission
   -> existing OpenClaw outbound queue -> sendPrepared/provider -> User
 ```
 
+OpenClaw-owned canonical conversation history spans these execution paths. Main and domain execution sessions consume authorized projections from it; neither an absent Main turn nor a terminated child may erase conversational continuity. Continuation admission and capacity/resource checks precede execution under Sections 4 and 7.
+
 ### 3.1 Three component categories
 
 | Category | Examples | Responsibility |
 | --- | --- | --- |
 | Agents | Benson Main, Jessica, Reminder Service, future Benson agents | Semantic reasoning inside an OpenClaw-controlled run. Main owns broad/cross-domain orchestration; domains own internal reasoning and approved tool selection. The current final semantic owner owns normal user-facing composition. Every run uses the global completion protocol. |
-| Deterministic components | Request Controller, routing policy, global Benson finalization, Completion Control, Response Controller, schemas, validators, authorization, domain-local renderers, state machines, persistence, domain tools, verification, idempotency, correlation | Mechanical, repeatable, permission-sensitive, lifecycle-sensitive, state-changing, externally observable, and validation behavior. |
-| One-shot model capabilities | Decision Model and optional Response Model | Stateless bounded inference: request to classification evidence, or minimal verified facts to fallback wording only for explicit message unavailability in an otherwise valid completion. These are not agents. |
+| Deterministic components | Request Controller, continuation/routing policy, global Benson finalization, Completion Control, Response Controller, schemas, validators, authorization, domain-local renderers, state machines, persistence, domain tools, verification, idempotency, correlation | Mechanical, repeatable, permission-sensitive, lifecycle-sensitive, state-changing, externally observable, and validation behavior, including concurrency and resource ownership. |
+| One-shot model capabilities | Decision Model and optional Response Model | Stateless bounded inference: request plus authorized conversation/workflow context to classification/continuation evidence, or minimal verified facts to fallback wording only for explicit message unavailability in an otherwise valid completion. These are not agents. |
 
 Neither one-shot capability owns a conversation, hidden workflow state, domain tools, mutation, authorization, dispatch, lifecycle, or delivery. Agents also do not own native user delivery. Request Controller, global finalization, Completion Control, and Response Controller are logical responsibilities, not a mandate for separate processes, plugins, services, or another runtime.
 
 ### 3.2 OpenClaw runtime
 
-Prefer native OpenClaw ownership of channel admission, trusted session/runtime context, model access, agent identities and workspaces, context assembly, fresh isolated runs, permissions, tool policy, lifecycle correlation, scheduling, persistence, transport, native delivery, logging, and recovery.
+Prefer native OpenClaw ownership of channel admission, conversation/session/transcript infrastructure, model-context assembly and compaction lifecycle, trusted runtime context, model access, agent identities and workspaces, fresh isolated runs, permissions, tool policy, lifecycle correlation, scheduling, persistence, transport, native delivery, logging, and recovery.
 
 Benson owns routing policy, the versioned Benson Agent Completion Protocol and global finalization invariant, domain boundaries, response policy, and domain-local deterministic render contracts. Infrastructure applies finalization automatically to every Benson-managed run; new agents inherit it without private validators or retry machinery. First use native lifecycle surfaces where they satisfy those contracts. Do not introduce MCP, A2A, n8n, a second agent framework, a custom message bus, or another orchestration runtime merely to express these logical responsibilities.
 
 ### 3.3 Benson Main
 
-Benson Main remains the central cognitive orchestrator when conversation context, broad reasoning, multi-domain orchestration, or general semantic work is required. Main is not necessarily the first model invoked for an external request.
+Benson Main remains the central cognitive orchestrator for broad or unresolved contextual reasoning, multi-domain orchestration, and general semantic work. Main is not the owner of conversation history and is not necessarily invoked for an external request. A grounded single-domain continuation may follow Section 4 without Main; unresolved semantic dependencies still belong to Main.
 
 Main prepares domain briefs, evaluates cross-domain dependencies, aggregates validated structured completions, and owns the final user-facing message whenever it owns the workflow. It finalizes through benson_complete with the final-workflow kind of the Benson Agent Completion Protocol (the ResponseEnvelope role). Main is not the final delivery boundary. Historical evidence and current verification limits are recorded in Section 27.
 
@@ -244,9 +249,21 @@ Home Assistant is the device-integration layer. It normalizes device capabilitie
 
 ### 3.7 Persistent state
 
-Persistent state lives in explicit deterministic storage: native lifecycle and scheduler records, files, databases, configuration, domain metadata, logs, structured pending-context records, or Home Assistant state where appropriate.
+Persistent state lives in explicit storage with deterministic ownership: native conversation, lifecycle and scheduler records, domain metadata, structured pending-context records, or Home Assistant state where appropriate. Distinguish:
 
-Persistent behavior must not depend on an old hidden LLM session. Reuse native state ownership; do not create a duplicate scheduler, execution ledger, completion store, or delivery ledger merely to represent a conceptual contract.
+| State | Meaning and owner |
+| --- | --- |
+| Canonical conversation transcript | OpenClaw-owned retained external turns and final assistant messages, correlated independently of which agent executed them. It is the durable source for later conversation reads, subject to native retention/access/reset policies. |
+| Agent/model session context | The context assembled for a particular execution session. A fresh isolated domain run is not the canonical external conversation. |
+| Compacted model context | An OpenClaw-managed representation of older history plus retained context. Built-in summarization uses an LLM; lifecycle ownership and persistence do not make its semantic output deterministic or exact. |
+| Recent exact turns | Original relevant user/assistant entries with speaker, order and source identity; obtain exact text from canonical entries, not reconstructed summaries or display previews. |
+| Active/pending workflow state | Trusted lifecycle, correlation, pending clarification, capacity and resource-ownership facts under Section 7.4; prose and summaries are not authoritative control state. |
+
+Conversation continuity sits logically above Main/domain execution sessions. Bind the trusted channel/account/peer/thread address and requester to the native conversation and its current session/transcript identity; an agent-scoped `sessionKey`, a replaceable `sessionId`, and a temporary `runId` serve different purposes. Shared-group membership or an identical domain is not identical requester authority. Physical storage under an agent namespace does not make that agent's model the history owner.
+
+Every accepted external turn, including a direct route and a continuation, must retain exact source text and provenance through native input/transcript custody, with one canonical conversation entry when adopted. Admissions joined under Section 6.4 remain individually recorded and correlated to their workflow's shared final assistant message and delivery status, even if Main never ran. Use native recording/receipt and deduplication mechanisms; child transcripts may retain execution evidence but cannot be the only record of the user conversation. Verify this across route changes, resets, retention, cancellation and restart before enabling the path; no duplicate Benson conversation database or synthetic transcript reconstruction is authorized.
+
+After a run ends, new isolated activations obtain relevant authorized history and pending context from these explicit owners, not the terminated run's hidden state. Unavailable or expired context is explicit and requires safe clarification where necessary. Reuse native state ownership; do not create a duplicate scheduler, execution/session ledger, completion store, or delivery ledger merely to represent a conceptual contract.
 
 ---
 
@@ -256,7 +273,7 @@ Every new admitted external interactive user request enters the deterministic Be
 
 ### 4.1 Benson Request Controller
 
-The controller receives the trusted OpenClaw admission/runtime envelope, preserves the exact current user request, identifies a new admission, constructs bounded Decision Model input, invokes the configured capability when enabled, validates its result, and applies deterministic eligibility/routing policy. It establishes trusted execution/completion metadata and commits exactly one initial execution path. Missing or unusable classification safely selects Main before commitment.
+The controller receives the trusted OpenClaw admission/runtime envelope, preserves the exact current request and conversation binding, and obtains an admission-consistent conversation/workflow view (Section 5.3). It constructs bounded Decision Model input, invokes the configured capability when enabled, validates its evidence, and applies continuation policy before ordinary routing. It commits the admission once: to an authorized existing workflow action, or to one initial Main/direct execution path, subject to capacity and resource policy. Missing or unusable classification selects Main for semantic resolution before commitment; Main cannot bypass another workflow's authority or uncertain execution ownership.
 
 The controller does not resolve Jessica rooms, calculate Reminder times, choose domain tools, construct domain transactions, perform domain reasoning, grant authorization, or claim execution success.
 
@@ -264,21 +281,27 @@ The controller does not resolve Jessica rooms, calculate Reminder times, choose 
 
 The Decision Model is provider-independent and replaceable behind a stable Benson decision contract. Jev / TypeSafe is an intended candidate, not an architectural dependency or a prerequisite for ordinary Main operation.
 
-Default input is the exact current user request, a fixed/versioned classification rubric, and only narrowly justified classifier-safe metadata. Do not send full conversation history, hidden memory, credentials, secrets, internal domain state, internal IDs, authorization claims, or tool results by default. Unsupported inputs or a privacy restriction select Main safely before commitment.
+Input is a fixed/versioned rubric and the minimum-sufficient trusted routing-context projection defined in Section 5.3: exact current request, necessary requester/conversation bindings, relevant recent conversation, existing compacted context when useful, and applicable active/pending workflow metadata. Trusted provenance does not make quoted text or a model-generated summary an instruction or authorization source. Keep opaque binding references and only necessary facts in the model projection; retain authoritative records in deterministic control. Do not send the full transcript, secrets, unrelated users' history, hidden reasoning or bulk tool/domain state by default.
 
-The model supplies bounded evidence: candidate domain or Main, self-contained versus context-dependent, single-domain versus mixed-domain, supported versus uncertain, and provider-supported confidence evidence only where meaningful. It does not resolve history or dispatch anything. Exact wire schemas, enums, thresholds, provider score semantics, and native mappings await verification in the implementation plan.
+The model supplies bounded classification/continuation evidence: candidate domain or Main, relation to a supplied workflow/context reference, grounded versus unresolved dependency, single-domain versus mixed-domain, supported versus uncertain, and provider-supported confidence only where meaningful. It may recognize "actually", "also", "do it twice", "the same one", or "and the living room too" from the supplied context. It cannot grant authority, choose a trusted route, discover arbitrary sessions, mutate state, steer a run, or fabricate a workflow binding. Exact schemas, evidence thresholds, bounds and projection algorithms await implementation planning. Privacy restrictions or insufficient evidence leave semantic resolution with Main without expanding its authority.
 
 ### 4.3 Deterministic routing policy
 
-Direct-domain routing is an optimization, not a new authority boundary. It is eligible only when deterministic Benson policy establishes that the request is sufficiently self-contained, single-domain, supported, safe, compatible with the domain contract and trusted runtime context, and compatible with approved result/completion/response handling.
+Apply this order to each new external turn:
 
-Requests needing earlier conversation, unresolved references or pronouns, "do the same as before", multiple domains, cross-domain dependencies, general conversation, or broad reasoning normally select Main. Unsupported attachments/input types, ambiguous ownership, invalid classifier output, and insufficient evidence also select Main. Fallback to Main before execution commitment is a normal route, not an error.
+1. Establish trusted admission, requester and canonical conversation identity; read bounded conversation and active/pending workflow context.
+2. Obtain and validate Decision Model evidence when enabled.
+3. Before ordinary routing, deterministically check whether the turn relates to an eligible active or pending workflow. Check the exact requester/authorized actor relationship, conversation, workflow, native run/session generation, lifecycle phase and domain continuation contract. Revalidate at admission to avoid a stale read racing completion, cancellation or replacement.
+4. For a verified relation to an eligible workflow, continuation policy owns the admission: join the active workflow under Section 6.4 and continue its authorized run through a proven native binding, resume eligible pending work, or queue/wait/reject under Section 7. An inability to continue safely is not permission to start a competing run. A pending workflow whose run is terminal may require a fresh isolated activation with explicit context; it never resurrects hidden execution state. Once the workflow's terminal finalization begins, no later admission can join it; route that new admission through ordinary routing with current context, capacity and resource checks.
+5. Otherwise choose ordinary Main/direct routing. A direct route is eligible when the exact request plus bounded authorized context sufficiently establishes a supported single-domain task, with valid authority, capacity, resource ownership and completion handling. Context dependence alone does not require Main.
 
-The controller, not model confidence or an agent-generated routing field, selects the initial execution owner. Domain authorization and tool restrictions remain fully effective on direct routes.
+Ambiguous, broad or multi-domain work, and semantic dependencies not resolved by the authorized bounded context (including historical references), select Main for resolution. Unsupported input or invalid/unavailable classification also selects Main before execution commitment. Main may clarify or coordinate permitted work; it cannot bypass continuation, capacity, resource or no-replay gates. Model confidence and agent-authored route fields never select the trusted owner.
+
+For example, a same-conversation correction to Jessica R1 can continue R1 without Main when the binding and lifecycle permit it. A new Jessica request from another user cannot alter R1 merely because it targets the same domain or arrives seconds later. Section 7 defines the deterministic capacity and isolation choices.
 
 ### 4.4 Benson Main's orchestration responsibility
 
-For requests assigned to Main, Main understands relevant conversational context, selects domain tasks and an appropriate approved model, builds minimum-sufficient briefs, and requests fresh isolated runs through native lifecycle mechanisms. Deterministic control establishes each run's authority and completion route. Main consumes correlated validated protocol completions, continues or aggregates the workflow, and owns final response composition. Its final ResponseEnvelope includes explicit userResponse state and must pass benson_complete before reaching the Response Controller.
+For requests assigned to Main, Main consumes authorized OpenClaw-owned conversational context, including relevant prior direct-domain turns, selects domain tasks and an appropriate approved model, builds minimum-sufficient briefs, and requests fresh isolated runs through native lifecycle mechanisms. Deterministic control establishes each run's authority and completion route and enforces Section 7 concurrency/resource policy. Main consumes correlated validated protocol completions, continues or aggregates the workflow, and owns final response composition. Its final ResponseEnvelope includes explicit userResponse state and must pass benson_complete before reaching the Response Controller.
 
 Main may orchestrate several children while remaining the single initial workflow owner. Each committed child task has its own single execution owner; these children are not competing initial execution paths for the admission.
 
@@ -323,7 +346,7 @@ perform and verify the actual operation
 
 ## 5. Optimal delegation prompts
 
-For Main-owned workflows, the quality of the semantic delegation prompt is a core responsibility of Benson Main. For an eligible direct request, deterministic formatting preserves the exact self-contained current request under the reviewed domain contract; no Main prompt-generation call is required.
+For Main-owned workflows, the quality of the semantic delegation prompt is a core responsibility of Benson Main. For an eligible direct request or continuation, deterministic formatting preserves the exact current request and minimum relevant authorized context under the reviewed domain contract; no Main prompt-generation call is required.
 
 A delegation is not ready until the selected sub-agent has everything reasonably required to understand the task quickly and execute it correctly without unnecessary rediscovery.
 
@@ -337,14 +360,14 @@ The child receives three distinct context planes:
 
 2. Task-specific context
    Main supplies the exact request and minimum prior semantic context;
-   direct routing supplies the exact self-contained request without history.
+   direct routing supplies the exact request and bounded authorized context.
 
 3. Trusted runtime and capability context
    OpenClaw supplies and enforces session routing, agent identity, channel
    context, tool policy, sandbox/host policy, and allowlists.
 ```
 
-These planes must not be duplicated or confused. Main selects semantic conversation context; direct routing does not project conversation history. Neither semantic briefs nor classifiers manufacture trusted identity, permissions, scheduler state, or tool capability.
+These planes must not be duplicated or confused. Main selects semantic context for its workflows; Request Controller projects bounded routing context and passes the necessary authorized fragments to an eligible direct execution/continuation. Both read OpenClaw-owned conversation state. Neither semantic briefs nor classifiers manufacture trusted identity, permissions, scheduler state, or tool capability.
 
 ### 5.1 Required prompt qualities
 
@@ -387,9 +410,21 @@ Those facts are supplied or verified through trusted OpenClaw runtime context an
 
 ### 5.3 Context projection
 
-Benson Main must not blindly pass the full conversation.
+#### Routing projection and native context lifecycle
 
-It must select the minimum sufficient prior turns needed to interpret the current message. The selection is dependency-based, not a fixed number of recent messages.
+Request Controller consumes a consistent OpenClaw-owned view tied to the current admission, then builds a bounded routing projection. The view must identify the canonical conversation/session generation, the admitted current turn and a transcript revision/cutoff or equivalent native consistency evidence, plus the relevant workflow-state revision. Do not mix another request's future turns, an old summary with a replaced transcript, or stale workflow authority. The exact read/assembly seam and freshness/revalidation mechanism are implementation-time UNKNOWNs, not an invented snapshot API.
+
+Include only what is needed: exact current text; trusted requester and conversation/thread bindings; relevant recent user/assistant fragments with provenance; existing native compacted context where useful; and trusted active/pending workflow references, status and continuation eligibility. Preserve exact turns for corrections, referents and citations that a summary cannot establish. Summary text is lossy semantic context, never proof of authorization, execution, pending-state validity or an exact user quotation.
+
+Bound bytes/tokens and dependency coverage, not an arbitrary "last N messages" rule. The implementation plan must justify the projection algorithm and limits against native read capabilities and representative continuations. Missing, truncated or inconsistent context must be explicit; unresolved meaning goes to Main/clarification, not guessed direct execution. Same-conversation access still requires requester/privacy isolation, especially in shared threads.
+
+OpenClaw owns transcript retention, model-context assembly and compaction scheduling. In the inspected built-in runtime, compaction appends a summary boundary while retaining original history; model context uses that boundary and retained recent entries. Required compaction occurs before inference and may also follow provider overflow; optional persistent-session maintenance follows settled delivery and is settled/cancelled before a later turn reads context. Other harness/provider engines may differ (Section 27). Pre-model admission hooks do not prove that a compacted, admission-consistent view already exists at Request Controller's boundary.
+
+Benson consumes available native context rather than adding an LLM summarization call to every routing request or triggering compaction as a routing side effect. Built-in compaction is LLM work under OpenClaw lifecycle control, with its own latency/cost. No new context engine or summary store is authorized by this requirement.
+
+#### Main-owned semantic projection
+
+When Main owns the workflow, it selects the minimum sufficient prior turns needed to interpret and delegate the current message. Selection is dependency-based, not a fixed message count or a full-conversation copy. Main uses the same authorized native history, including turns that bypassed Main.
 
 Main should:
 
@@ -462,7 +497,7 @@ A deterministic formatter may be introduced later only when there is a measurabl
 - transport compatibility;
 - repeatable envelope formatting.
 
-Direct routing has a justified deterministic formatting need: preserve exact request text, enforce bounds, and separate untrusted user text from trusted runtime metadata. This formatter must not replace semantic context selection or domain reasoning. A context-dependent request selects Main before execution commitment.
+Direct routing has a justified deterministic formatting need: preserve exact text and provenance, enforce the routing projection's bounds, and separate quoted conversation from trusted runtime metadata. This is Section 5.3 projection, not a second semantic prompt-generation service. Decision evidence and deterministic continuation policy handle grounded continuations; unresolved semantic selection belongs to Main, and domain reasoning remains with the domain.
 
 ### 5.6 Isolated context by default
 
@@ -470,7 +505,7 @@ Benson normally delegates with native `sessions_spawn`, an explicit target `agen
 
 `context: "fork"` must not be used merely to avoid selecting context. Forking a transcript is allowed only when a reviewed workflow genuinely requires the broader requester transcript and the privacy, token, instruction-mixing, and domain-boundary costs are justified.
 
-An isolated child is clean, not empty. OpenClaw loads the child's `AGENTS.md`, applies effective tool policy, and provides the trusted runtime envelope. Main supplies a semantic brief when it is the caller; direct routing supplies only the eligible bounded request. Both paths require identical isolation and capability enforcement.
+An isolated child is clean, not empty. OpenClaw loads the child's `AGENTS.md`, applies effective tool policy, and provides the trusted runtime envelope. Main supplies a semantic brief when it is the caller; direct routing supplies the eligible bounded request/context. Both paths require identical isolation and capability enforcement. Authorized steering of an existing active run is not a new activation or transcript fork; a later new activation still starts fresh with explicit projected context.
 
 ---
 
@@ -482,7 +517,7 @@ TaskResultEnvelope and ResponseEnvelope name the domain-task and final-workflow 
 
 ### 6.1 Execution selection and domain ownership
 
-The Request Controller selects the initial Main or direct-domain owner under Section 4. For a Main-owned workflow, Main semantically selects subsequent domain tasks. Jessica owns vacuum reasoning, Reminder Service owns reminders and Calendar-linked Reminder work, and future domains retain their approved boundaries. Direct routing is an optimization for eligible self-contained requests; it does not weaken Main's contextual or cross-domain role.
+The Request Controller binds a verified continuation or selects the initial Main/direct-domain owner under Section 4. For a Main-owned workflow, Main semantically selects subsequent domain tasks. Jessica owns vacuum reasoning, Reminder Service owns reminders and Calendar-linked Reminder work, and future domains retain their approved boundaries. Direct routing is an optimization for eligible single-domain requests with sufficient authorized context; it does not weaken Main's broad contextual or cross-domain role.
 
 ### 6.2 Domain classification and final semantic ownership
 
@@ -512,7 +547,7 @@ The domain-task kind retains the TaskResultEnvelope role:
 | `warnings`, `error`, partial effects, uncertainty | Preserve known warnings, failures, durable effects, evidence gaps, and unresolved execution outcomes, including during finalization failure. |
 | `pendingContext` | Explicit clarification/continuation data with grounding, binding, version, and expiry when applicable. |
 | `userResponse` | Required discriminated response state as defined below; never an accidentally absent optional candidate. |
-| Trusted binding / provenance | Admission/request, run, agent, caller/parent correlation, authorization, execution/tool evidence, verification state, completion destination, and delivery policy, attached by or checked against deterministic authority. |
+| Trusted binding / provenance | Admission/request and workflow correlation (including joined admissions under Section 6.4), run, agent, caller/parent correlation, authorization, execution/tool evidence, verification state, completion destination, and delivery policy, attached by or checked against deterministic authority. |
 
 `userResponse` explicitly distinguishes:
 
@@ -524,13 +559,17 @@ Important execution facts cannot exist only in prose. Model-authored `verified: 
 
 ### 6.4 ExecutionRoute and trusted CompletionRoute
 
-Execution owner answers who performs the task; completion destination answers who receives its accepted completion. Deterministic Benson/OpenClaw orchestration establishes admission identity, owner/run identity, caller/parent correlation where applicable, completionTarget (CALLER or RESPONSE_CONTROLLER), finality, and delivery policy before accepting a completion.
+Execution owner answers who performs the task; completion destination answers who receives its accepted completion. Deterministic Benson/OpenClaw orchestration establishes admission identity, trusted requester/conversation/workflow binding, owner/run identity, caller/parent correlation where applicable, completionTarget (CALLER or RESPONSE_CONTROLLER), finality, and delivery policy before accepting a completion. Continuing a workflow preserves its trusted completion owner; classifier output cannot change that owner.
+
+**Shared final:** a later external admission deterministically accepted as a continuation, amendment or refinement of the same active workflow before terminal finalization begins joins that workflow. Each admission remains independently recorded in the canonical conversation and bound to the workflow. The joined workflow produces exactly one final-workflow completion and one final interactive delivery reflecting the latest accepted intent, accumulated in trusted admission order. Joined admissions do not independently produce final responses. The trusted workflow binding identifies its admitted membership and accepted-intent revision; these are control state, not model-authored authority or a new store.
+
+The existing lifecycle owner must serialize joining with entry into the workflow's terminal finalization: that entry closes membership and the accepted-intent revision before completion validation/repair and before transport freeze. The cutoff cannot wait for successful completion or delivery. Later admissions follow normal new-admission routing and cannot amend this workflow's completion or frozen payload. A child's terminal finalization closes that child's execution; it does not itself close a still-active Main-owned parent workflow. Duplicate events/retries for an already joined admission retain its original binding and never acquire a new final response. Section 7.5 governs whether a supported native binding can actually enforce this contract; unavailable proof keeps joining disabled.
 
 CompletionRoute is the completion portion of this trusted native orchestration state, not a second model-authored payload or new store. A Main-spawned domain child normally returns to CALLER/Main. An eligible direct-domain execution and Main's final interactive workflow go to RESPONSE_CONTROLLER. Agent text never selects the destination, recipient, channel, or session.
 
 ### 6.5 Benson Completion Control
 
-Completion Control deterministically binds accepted protocol completions to the committed lifecycle, checks expected ownership, version/kind, trusted correlation, provenance, finality, and duplicate/stale state, and routes to the pre-established continuation. It uses the canonical validation contract; it does not own another schema family or another repair loop.
+Completion Control deterministically binds accepted protocol completions to the committed lifecycle, checks expected ownership, version/kind, trusted correlation, provenance, finality, and duplicate/stale state, and routes to the pre-established continuation. Final-workflow acceptance also checks the closed admission membership and accepted-intent revision from Section 6.4; a stale candidate for an earlier intent cannot finalize the workflow. It uses the canonical validation contract; it does not own another schema family or another repair loop.
 
 - CALLER: deliver the accepted structured completion for the assigned task/workflow, including NORMAL/RECOVERED completions and canonical FAILED reports, to the correlated caller, normally Main. A child's locally final result does not confer finality for the parent's interactive workflow.
 - RESPONSE_CONTROLLER: deliver accepted final-workflow completion. For a direct domain-task completion, deterministically project it into the final-workflow kind within the same schema family and validate that projection.
@@ -553,7 +592,7 @@ Main composes the final user-facing message inside its own workflow and submits 
 
 The final-workflow kind fulfills the ResponseEnvelope role in the same versioned family. It carries common completion semantics plus:
 
-- trusted request/admission, source agent/run, workflow correlation, finality, and delivery-policy binding;
+- trusted workflow correlation, closed membership of independently recorded admissions, accepted-intent revision, source agent/run, finality, and delivery-policy binding under Section 6.4;
 - actual overall task/workflow outcome and separate runtime-assigned NORMAL/RECOVERED/FAILED completion outcome;
 - `results[]`, retaining each domain result's version, task identity, operation, status, verification scope, facts, warnings, errors, partial effects, uncertainty, and provenance;
 - grounded pending clarification/continuation state;
@@ -561,13 +600,13 @@ The final-workflow kind fulfills the ResponseEnvelope role in the same versioned
 
 A direct domain normally contributes one result; Main may aggregate any bounded collection permitted by the contract. Main-only conversation can have no domain results, with execution verification explicitly not applicable. Overall success cannot hide failed children or inflate command acceptance into physical completion. RECOVERED preserves actual task/workflow success, failure, or partial outcome; agent envelope-generation failure must not change that business status. FAILED records actual inability to establish a complete trustworthy completion while retaining known domain success, partial effects and uncertainty. Aggregation preserves these per-result distinctions instead of treating all exhausted attempts as failed tasks.
 
-The final semantic owner's wording is part of completion, not an alternative source of execution truth. Structured facts remain authoritative. The owner preserves exact relevant dates/times, warnings, partial effects, errors, and uncertainty in its response contract. Normal deterministic rendering belongs with the domain owner (Section 6.9), not Response Controller.
+The final semantic owner's wording is part of completion, not an alternative source of execution truth. Structured facts remain authoritative. The shared final addresses the latest accepted intent without silently dropping joined corrections or claiming they were applied merely because they were admitted. If an amendment could not be applied or its outcome is uncertain, preserve that limitation and any prior effects in the result and wording. The owner preserves exact relevant dates/times, warnings, partial effects, errors, and uncertainty in its response contract. Normal deterministic rendering belongs with the domain owner (Section 6.9), not Response Controller.
 
 ### 6.8 Benson Response Controller: single interactive outbound boundary
 
 Every interactive Benson workflow passes through exactly one Benson Response Controller before native delivery, including direct domain, Main-only, multi-domain, clarification, and failure responses.
 
-Its normal work is deterministic: accept only validated final-workflow completions; validate trusted request/run/source/finality/correlation state; enforce one finalization per admission/workflow; enforce delivery eligibility and bounded output constraints that need no general semantic interpretation; and hand the already-final message to native OpenClaw delivery. Duplicate/recovery events reuse the existing finalization rather than creating another one.
+Its normal work is deterministic: accept only validated final-workflow completions; validate trusted workflow/admission-membership/run/source/finality/correlation state; enforce one finalization and one final interactive delivery per workflow, shared by all joined admissions under Section 6.4; enforce delivery eligibility and bounded output constraints that need no general semantic interpretation; and hand the already-final message to native OpenClaw delivery. Duplicate/recovery events from any joined admission reuse the existing finalization rather than creating another one.
 
 The controller is neither the normal response composer nor a semantic reviewer of arbitrary Hebrew/English prose. It cannot establish prose truth through general language interpretation, execute domains, rerun Main, change execution facts, or restore mutation authority. The final semantic owner and its domain response contract own wording fidelity. Bounds/structure checks are not proof of arbitrary prose truth.
 
@@ -588,6 +627,8 @@ If the one-shot fallback is unavailable, fails, or violates its bounded contract
 ### 6.10 Global terminal finalization and completion-only repair
 
 `benson_complete` names the conceptual terminal primitive of the Benson Agent Completion Protocol. It is infrastructure-owned, automatically applied to every Benson-managed agent run, and mandatory before successful completion is accepted. It is not a claim that an OpenClaw API with this name exists.
+
+For the workflow's final semantic owner, entry into this terminal protocol first closes admission membership and accepted intent under Section 6.4, including on cancellation, timeout or failure. Neither a rejected candidate nor recovery reopens joining; the later transport freeze is not the admission cutoff.
 
 ```text
 Agentic execution / semantic composition
@@ -622,7 +663,7 @@ After exhaustion the LLM has no further obligation or attempt budget. Runtime ap
 
 For RECOVERED, runtime may provide domain-local deterministic wording or the protocol's explicit unavailable userResponse state; lack of wording alone does not imply FAILED. For FAILED, runtime emits a schema-valid evidence-preserving failure report, explicitly reporting the inability to establish complete task/workflow semantics. That report is not a successful reconstruction of the missing completion. Preserve all known verified outcomes, warnings, errors, partial effects and uncertainty, using unknown/not-applicable fields where appropriate rather than fabricating business data. Both paths use the original trusted binding and canonical validation; inability to establish binding stays under native recovery, never an invented route. Model-authored outcome labels are not authoritative. Response fallback and native delivery recovery cannot change this completion outcome or authorize execution.
 
-Raw malformed output never crosses as completion; downstream consumers receive only accepted canonical records, including RECOVERED completions and valid FAILED reports. An infrastructure crash can delay delivery; it does not permit raw-output release or imply successful finalization. Native recovery preserves terminal phase, budget, evidence, completion outcome, accepted record identity, and no-replay restrictions through existing lifecycle/persistence ownership, without a second completion store.
+Raw malformed output never crosses as completion; downstream consumers receive only accepted canonical records, including RECOVERED completions and valid FAILED reports. An infrastructure crash can delay delivery; it does not permit raw-output release or imply successful finalization. Native recovery preserves terminal phase, closed admission membership and accepted-intent revision, budget, evidence, completion outcome, accepted record identity, and no-replay restrictions through existing lifecycle/persistence ownership, without a second completion store.
 
 Every agent's AGENTS.md documents the obligation and its domain result contract. Native/provider structured-output constraints should additionally constrain generation where supported. Neither prompts nor provider schema support is the enforcement/trust boundary. Runtime validation and terminal interception are mandatory even if the model omits benson_complete or emits ordinary prose. Adding an agent must not require private finalizers, validators, retry state machines, or enforcement hooks.
 
@@ -646,9 +687,9 @@ Final approved message
   -> sendPrepared/provider delivery
 ```
 
-After freeze, semantic content is immutable. OpenClaw owns physical channel delivery, native outcome, and durable recovery. Recovery reuses the same frozen prepared payload; it does not re-render, call the Response Model, rerun Main/domain execution, or create a new finalization. Do not add a Benson outbound dispatcher, delivery queue, parallel transport, or delivery ledger.
+After freeze, semantic content is immutable. OpenClaw owns physical channel delivery, native outcome, and durable recovery. Recovery for any joined admission resolves to the workflow's same finalization and native delivery identity, reusing the same frozen prepared payload; it does not fan out a final response per admission, re-render, call the Response Model, rerun Main/domain execution, or create a new finalization. Later admissions cannot join or alter this final under Section 6.4. Do not add a Benson outbound dispatcher, delivery queue, parallel transport, or delivery ledger.
 
-Queued != delivered. A final interactive response requires a canonical final assistant message in the owning Benson conversation and a native delivery outcome or explicit durable recovery ownership. Canonical final transcript state, accepted completion, prepared/queued payload, provider delivery outcome, and durable recovery ownership are distinct evidence. A queued-final signal or generated message does not prove delivery. Failure in finalization or delivery never reauthorizes execution.
+Queued != delivered. A final interactive response requires one canonical final assistant message in the owning Benson conversation, correlated to all joined admissions, and a native delivery outcome or explicit durable recovery ownership. Canonical final transcript state, accepted completion, prepared/queued payload, provider delivery outcome, and durable recovery ownership are distinct evidence. The one-final-delivery invariant does not assert unverified provider exactly-once behavior: native retries/reconciliation retain the same delivery identity, and an ambiguous send is not permission to send another final. A queued-final signal or generated message does not prove delivery. Failure in finalization or delivery never reauthorizes execution.
 
 Execution/tool evidence remains authoritative independently of UI/progress events. Any policy depending on whether execution occurred must use complete native execution evidence; absent visible progress/tool callbacks do not prove zero execution. Incomplete evidence remains uncertain and fails closed wherever zero-execution proof is required. Exact installed-version queue/preparation/sendPrepared integration must be inspected during planning; the ordering is an architectural invariant, not a claim about an undocumented native API.
 
@@ -656,13 +697,13 @@ Execution/tool evidence remains authoritative independently of UI/progress event
 
 ## 7. Sub-agent runtime model
 
-Every sub-agent activation is a fresh, temporary, isolated run. Every Benson agent run, including Main, scheduled semantic runs, and future agents, inherits the infrastructure-owned terminal protocol in Section 6.10. Native yield/wait is a nonterminal suspension, not an exemption or successful workflow completion.
+Every new sub-agent activation is fresh, temporary and isolated. A verified continuation may update an existing active workflow under its existing authority; it does not create a competing activation. Every Benson agent run, including Main, scheduled semantic runs, and future agents, inherits the infrastructure-owned terminal protocol in Section 6.10. Native yield/wait is a nonterminal suspension, not an exemption or successful workflow completion.
 
 ### 7.1 Fresh session
 
 For a Main-delegated task, Main normally calls native `sessions_spawn` with explicit domain `agentId`, `context: "isolated"`, and the task-specific brief. For a direct route, deterministic orchestration must use a verified native binding with the same fresh isolated-run guarantees. OpenClaw creates the isolated session, loads the target runtime contract, and supplies only task-required context. The implementation plan must verify that binding rather than invent an API.
 
-The run must not depend on a previous sub-agent conversation.
+A new activation must not depend on a previous sub-agent's hidden conversation. Required prior semantics come from explicit authorized conversation/pending-context projection; continuing a currently active run follows Section 7.5.
 
 Main must not use `context: "fork"` as a substitute for semantic context projection. Any exception requires a documented need for broader transcript context and a review of privacy, token, latency, and instruction-mixing risks.
 
@@ -704,7 +745,7 @@ perform and verify the operation
 
 Benson Main does not copy entire skill directories or tool definitions into the task prompt.
 
-Main supplies a semantic brief for its own children; direct routing supplies the bounded self-contained request. OpenClaw supplies the isolated runtime, loads the target sub-agent's `AGENTS.md`, derives trusted context, and enforces effective tool policy. Completion Control uses native lifecycle correlation and the established CompletionRoute (Section 6.5); it does not assume every run has Main as its caller.
+Main supplies a semantic brief for its own children; direct routing supplies the bounded request/context. OpenClaw supplies the isolated runtime, loads the target sub-agent's `AGENTS.md`, derives trusted context, and enforces effective tool policy. Completion Control uses native lifecycle correlation and the established CompletionRoute (Section 6.5); it does not assume every run has Main as its caller.
 
 ### 7.3 Temporary runtime context
 
@@ -716,15 +757,11 @@ After accepted completion and preservation of the evidence required for native c
 
 Anything required later must be persisted explicitly.
 
-Examples include:
+Reuse native lifecycle/session/task state for domain identity, native run/session and generation, requester, conversation/workflow binding, joined admission membership and accepted-intent revision, lifecycle status and join closure, continuation eligibility, capacity reservations and recovery ownership where represented. Keep pending clarification grounding/revision/expiry explicit. Domain tools own durable operation/idempotency evidence and resource ownership; reference that canonical owner rather than copying its ledger. These facts must not depend on Main remembering them, agent prose, or hidden model state.
 
-- reminder records;
-- linked Calendar metadata;
-- device state or verified capability state;
-- pending clarification context;
-- transaction records;
-- audit logs;
-- durable job status.
+Compose a trusted control-plane view from these owners; the concept does not authorize a duplicate execution/session ledger. If required correlation or durable concurrency state is missing, first verify supported session extensions or existing domain metadata. A new persistence surface still requires a separately justified and approved design. Reminder/Calendar links, device capability state and audit records retain their existing domain owners.
+
+Persist enough to distinguish a live executor, admitted/queued work, suspended/pending workflow, terminal run, and an uncertain orphan after restart. A missing terminal timestamp or an old session row alone is not liveness. An LLM run may finish while its physical workflow or pending clarification remains active; release each kind of ownership only on its own verified lifecycle condition. Remaining physical/pending state does not reopen a finalized interactive workflow: a later admission uses normal new-admission routing with that explicit context.
 
 ### 7.5 Waiting and long-running work
 
@@ -742,6 +779,14 @@ For a normal delegated run:
 For a direct run there need not be a waiting Main turn; use native lifecycle completion with the pre-established Response Controller destination. Completion events never re-enter new-request classification.
 
 Long-running or externally delayed operations should use an approved durable deterministic worker, native job/condition mechanism, or scheduler instead of keeping an LLM turn alive indefinitely. Waiting state and dependencies must be explicit and restart-safe; this does not authorize a new infrastructure boundary.
+
+For an external continuation, discover the exact eligible run through trusted native lifecycle facts and Section 7.4 correlation, not by domain name, timing or text search. Section 4 policy verifies requester/workflow authority before any supported lifecycle call. Active-run steering is preferred only when it preserves the intended run/workflow, provenance, permissions, completion destination and evidence; it cannot undo a tool call that already crossed the execution boundary.
+
+Evaluate native queue steering, followup, pending-task resume and interrupt separately. Followup is a later turn, and interrupt cancels/replaces execution; neither may be silently substituted for same-run guidance. A native operation that falls back to a new turn when idle is eligible only if policy can prevent an unauthorized terminal-race activation. Native resume may retain task identity while assigning a successor run identity; prove the nonterminal workflow binding and restrictions rather than pretending the old run remains live. Terminal runs are not reopened for new requests or to repair output.
+
+An admission acknowledgment does not prove that guidance was persisted, consumed, applied or completed. Preserve every contributing external turn and its linkage to the affected workflow/result; native batching must not erase requester provenance or lose a correction. Joined admissions use the shared final in Section 6.4 through benson_complete, the existing CompletionRoute and Response Controller. Prove durable membership, accepted-intent ordering, atomic join closure at terminal finalization, and recovery to that one completion/delivery before enabling joining; the shared-final policy itself is fixed, not deferred to implementation.
+
+After restart, reconcile native ownership, accepted input and domain effects before continuing. Do not equate an in-memory queue with durable continuation, replay uncertain input, or release a physical owner merely because its LLM process ended. New input cannot reopen the mutation-disabled completion-only phase. If exact control-plane caller scope, atomic target binding or restart semantics are unsupported, keep that path unavailable and record the precise native gap under Section 27; do not patch core.
 
 ### 7.6 Native OpenClaw first
 
@@ -774,6 +819,16 @@ Before concluding that an OpenClaw native mechanism is defective or unsuitable:
 Only consider an alternative after the native path is demonstrably unavailable, inadequate for the required semantics, or confirmed defective in the relevant runtime.
 
 When an alternative is necessary, document the evidence and the architectural reason for using it.
+
+### 7.7 Agent capacity and resource ownership
+
+Every domain-agent identity must have an explicit reviewed deterministic concurrency contract before runtime admission. It defines maximum simultaneously active runs across all callers and entry paths, what active/suspended/queued means for counting, continuation eligibility, capacity-exhaustion behavior, bounded queue/wait/reject policy, requester/workflow isolation, and restart/recovery reconciliation. Missing policy or uncertain ownership fails closed for new execution. The LLM never sets its own parallelism or bypasses a full capacity limit through another session.
+
+Specific limits belong to domain contracts/configuration after review. A single-run Jessica policy and bounded-parallel Reminder policy are illustrative candidates, not values approved here. Native process lanes, per-session serialization and per-parent child limits may help implement capacity; none alone proves a global per-domain-agent limit. Admission and reservation must exclude races across Main children, direct routes, scheduled work and other authorized activations without introducing a second scheduler.
+
+Keep three identities separate: `Jessica` (agent type/identity), `Jessica R123` (temporary run), and the Dreame robot (shared physical resource). A workflow may outlive a run, and a run count is not a resource lock. For Jessica, at most one physical mutation workflow may own the robot at a time unless a future reviewed design proves otherwise. Multiple read-only runs may have a different policy. Domain deterministic boundaries enforce resource acquisition, mutation authorization, verified release and recovery; unknown effects retain reconciliation ownership and block conflicting mutations.
+
+Resource ownership must reject stale actors after cancellation/restart/reassignment at the mutation boundary; an expiring lock or timeout alone does not prove the old actor stopped. Use existing domain/native transaction, identity and fencing mechanisms where suitable. No new lock service is prescribed. A second user's request cannot steer the current owner's workflow without explicit trusted authority; policy may queue, wait, reject or admit separate work only where both the agent-capacity and resource contracts allow it.
 
 ---
 
@@ -977,6 +1032,7 @@ These are responsibility budgets, not claims about the installed provider-call c
 | Path | Expected semantic/model work |
 | --- | --- |
 | Direct domain + owner-composed/domain-rendered response | One bounded Decision inference when enabled, plus the domain run's native tool loop; no Main or Response Model inference on the ordinary accepted fast path. |
+| Grounded active-domain continuation | Bounded Decision evidence from native context, then authorized continuation of the existing run when supported; no mandatory Main call or new per-request summarization. |
 | Explicit unavailable final message | Otherwise valid completion plus at most one bounded response inference; deterministic truthful response on fallback failure. |
 | Main-only | Decision when enabled, then Main reasoning; a usable final userResponse needs no Response Model call. |
 | Main + domain(s) | Decision when enabled, Main orchestration/continuation, and required domain tool loops; Main owns final wording, avoiding redundant downstream synthesis. |
@@ -1049,7 +1105,7 @@ Long-running operations should write durable progress and completion records.
 
 ### 10.6 Execution commitment and retry safety
 
-Exactly one initial execution owner exists for a committed request. Native admission identity distinguishes retransmission of the same admission from a genuinely new identical-text request. Commitment and dispatch recovery must exclude competing Main/direct execution, including timeouts, restarts, and cancellation races; a local flag or model promise is insufficient.
+Exactly one initial execution owner exists for a committed request. A continuation admission is bound once to its authorized workflow action, not also dispatched as a competing Main/direct request. Native admission identity distinguishes retransmission of the same admission from a genuinely new identical-text request. Commitment and dispatch recovery must exclude competing execution, including timeouts, restarts, steering-to-followup races, and cancellation; a local flag or model promise is insufficient.
 
 Before commitment, classifier/provider/routing failure may safely select Main. Once domain execution has been dispatched, accepted, or its outcome is uncertain, do not replay the original request through Main as fallback. Reconcile native lifecycle/correlation, domain durable state, idempotency, and deterministic verification first. Uncertainty retains recovery ownership and fails closed; it does not create a second owner.
 
@@ -1183,9 +1239,11 @@ Use approved authentication mechanisms and minimal required permissions.
 
 Trusted requester identity and channel/session binding come from OpenClaw/runtime context. Classifier evidence or confidence never grants authorization. Authorization, validation, explicit tool allowlists, least privilege, and zero runtime skills by default remain enforced close to deterministic mutation on both Main and direct routes.
 
+Apply authorization separately to reading conversation context and controlling a workflow. Same domain, shared thread, visible session or recent activity does not grant another user's continuation authority. Revalidate the exact requester, conversation, workflow and lifecycle generation at the control operation, then enforce domain/resource authority again at mutation. Neither a classifier-selected reference nor a model summary can widen those bindings.
+
 Decision and Response Model outputs are untrusted model output. Validate bounded contracts before use; neither may author trusted routes, identity, permissions, verification, or delivery destinations. Agent-authored source/provenance/verification/response-policy fields must be checked against deterministic authority. Runtime-owned finalization disables mutation and execution delegation during completion repair; an agent cannot restore permissions by requesting another completion attempt. Model-generated success claims never replace deterministic evidence.
 
-Review provider privacy/data handling before household content is transmitted. Even a single request can contain personal information. Send no secrets to either one-shot model, and no history or internal metadata merely to improve classification or wording. A restricted or unsupported input keeps the direct path ineligible; it does not weaken authorization.
+Review provider privacy/data handling before household content is transmitted. Even a single request can contain personal information. Decision Model receives only the authorized minimum routing projection in Section 5.3; Response Model retains the narrower verified-facts input in Section 6.9. Send neither secrets nor unnecessary history/internal metadata. A restricted or unsupported input keeps the direct path ineligible; it does not weaken authorization or permit cross-user context leakage through Main.
 
 ---
 
@@ -1230,18 +1288,21 @@ Use domain-local templates for known verified results and owner composition for 
 
 Oren may receive operational execution reports, not hidden chain-of-thought. Other family members receive concise ordinary responses without internal details by default.
 
-Trace native admission -> Request Controller -> optional Decision Model -> routing policy -> execution owner/run -> deterministic tools/evidence -> owner composition -> benson_complete validation/repair -> accepted canonical completion -> Completion Control -> caller continuation or final-workflow projection -> Response Controller -> explicit-message fallback only if eligible -> preparation/freeze -> native queue/provider outcome/recovery. Main continuation and finalization remain linked to the same workflow; Main-only paths omit domain stages.
+Trace native conversation/admission -> bounded context/workflow view -> Request Controller -> optional Decision Model -> continuation policy or ordinary routing -> capacity/resource admission -> execution owner/run -> deterministic tools/evidence -> owner composition -> benson_complete validation/repair -> accepted canonical completion -> Completion Control -> caller continuation or final-workflow projection -> Response Controller -> explicit-message fallback only if eligible -> preparation/freeze -> native queue/provider outcome/recovery. Main continuation and finalization remain linked to the same workflow; Main-only paths omit domain stages.
 
 Record narrowly scoped structured evidence sufficient to measure:
 
 - request/admission correlation, policy version, candidate, final route, and route reason;
+- authorized conversation/session generation and context cutoff, projection version/size and omission/uncertainty indicators, without copying raw history;
+- continuation candidate versus authorized workflow/run, requester-scope checks, joined admission membership and accepted-intent revision, accepted/consumed guidance evidence, join closure, and terminal-race or recovery disposition;
+- agent-capacity reservation and queue/wait/reject outcome, separately from resource owner, mutation eligibility and reconciliation/release;
 - decision provider/model/rubric version and meaningful decision evidence;
 - execution owner, completion destination, native child/caller run correlation;
 - domain/tool outcomes, verification, partial effects, retries, and reconciliation;
 - protocol version/kind, validation failures, repair attempts/budget, terminal phase, and enforced mutation restriction;
 - NORMAL/RECOVERED/FAILED completion outcome, evidence-sufficiency decision, actual task/workflow status, preserved effects/uncertainty, and accepted record identity;
 - final semantic owner, domain-rendered versus agent-composed wording, explicit userResponse state, and fallback eligibility/outcome;
-- final-message correlation, prepared/frozen payload identity, queue admission, and separate native delivery outcome or durable recovery ownership;
+- shared final-message correlation for all joined admissions, prepared/frozen payload and native delivery identity, queue admission, and separate native delivery outcome or durable recovery ownership;
 - native execution-evidence completeness, separately from UI/progress callbacks;
 - latency per stage, model calls, and tokens/cost when observable;
 - Main bypass rate, fallback-to-Main rate, false-fast-path rate, and explicit message-unavailability/fallback rate, agent-attempt exhaustion rate, RECOVERED rate, and FAILED rate separately; exhaustion alone is not system completion failure.
@@ -1322,16 +1383,16 @@ Do not treat a clarification answer as a new unrelated request.
 
 For Reminder continuations, pending context carries a bounded, route-bound
 provenance bundle: immutable per-turn evidence, a stable context id and
-revision, current-turn evidence id, expiry, and field-level citations. Main
-preserves that bundle and adds only the new answer supplied to the fresh child;
-it does not synthesize a transcript. The deterministic Reminder boundary
-compares cited evidence with external user turns in the current Main
-conversation binding, including the last turn from the same sender, and
+revision, current-turn evidence id, expiry, and field-level citations. The
+workflow owner preserves that bundle and adds only the new answer supplied to
+the domain; it does not synthesize a transcript. The deterministic Reminder
+boundary compares cited evidence with external user turns in the trusted
+canonical conversation binding, including the last turn from the same sender, and
 rejects stale, foreign, altered, or incomplete provenance before mutation.
 
 Reminder clarification follows the trusted CompletionRoute: a Main child returns to Main; an eligible direct result reaches the Response Controller through deterministic normalization. The active external turn's final clarification always passes through the Response Controller. Native interactive question state is not created from an internal completion-report run, and unrelated external messages must not be consumed by a pending question owned by another caller.
 
-A new external clarification answer still enters the Request Controller, but its dependency on explicit pending state normally requires Main. Preserve the existing route-bound conversation provenance; direct execution is ineligible where that binding cannot be established. The new target must not relax Reminder's current provenance contract to enable a fast path.
+A new external clarification answer enters Section 4 continuation policy first. Verified pending context can ground an eligible domain continuation without Main; unresolved dependencies or an unverified direct binding require Main/clarification. A terminal prior run requires a fresh isolated activation with explicit pending context. Preserve the existing route-bound evidence requirements: the current Main-bound implementation remains valid for that path until a separately verified canonical-conversation binding supports direct continuation. This target does not relax Reminder provenance to enable a fast path.
 
 ### 17.4 Atomic Reminder plans
 
@@ -1520,6 +1581,9 @@ The following patterns are prohibited or strongly discouraged:
 
 - forwarding only the latest message when earlier context is required;
 - forwarding the full conversation by default;
+- making history visibility depend on Main having participated, or equating compaction summaries with exact turns/trusted workflow state;
+- routing every contextual phrase to Main without checking authorized continuation, or steering by domain name/timing alone;
+- treating per-session/parent concurrency as a global agent limit, or treating a terminal LLM run as release of a physical resource;
 - allowing Main to duplicate domain-internal logic;
 - allowing any agent to bypass the Response Controller for interactive user delivery;
 - relying on long-lived hidden sub-agent memory;
@@ -1564,11 +1628,11 @@ These are target architecture acceptance examples, not implementation tests or c
 
 User: "Tell Jessica to clean the kitchen."
 
-Decision evidence identifies Jessica, self-contained, single-domain, and not context-dependent. The Request Controller validates eligibility and commits `executionOwner = Jessica`, `completionTarget = RESPONSE_CONTROLLER`.
+The admission has no related active/pending workflow. Decision evidence identifies Jessica and a supported single-domain request. The Request Controller validates context, authority, capacity and resource eligibility and commits `executionOwner = Jessica`, `completionTarget = RESPONSE_CONTROLLER`.
 
 ```text
-User -> native admission -> Request Controller -> Decision Model
-  -> deterministic policy -> fresh isolated Jessica run
+User -> native conversation/admission -> bounded context -> Decision Model
+  -> continuation check -> ordinary routing/capacity policy -> fresh Jessica run
   -> Jessica interprets domain operation and selects approved tool
   -> deterministic authorization/execution -> device verification
   -> Jessica domain-local wording + domain-task completion
@@ -1581,11 +1645,33 @@ Jessica is the final semantic owner. A known verified started result uses its do
 
 The same general shape applies to an eligible direct Reminder request; the Reminder agent and deterministic tools retain scheduling semantics, authorization, and verification. It never gains interactive delivery authority.
 
+**Active continuation:** before workflow W1 enters terminal finalization, the same trusted user/conversation says, "Actually, do two passes." The initial request is admission A1 and the correction is A2; Jessica R1 is W1's active execution.
+
+```text
+New external admission A2 -> same canonical conversation + trusted W1/R1
+  -> bounded exact prior request/current correction + lifecycle metadata
+  -> Decision continuation evidence -> deterministic authority/phase checks
+  -> accept A2 into W1 before join closure; retain A1 and A2 independently
+  -> supported same-run continuation of R1, if still eligible
+  -> domain decides the permitted adjustment -> deterministic verification
+  -> close W1 membership/intent at terminal finalization -> benson_complete
+  -> one accepted final-workflow completion covering A1 and A2
+  -> Response Controller -> one final message/delivery for W1's latest intent
+```
+
+Acceptance must prove that both turns remain independently visible without Main, that the correction reaches the exact authorized active workflow once, and that consumption/application is not inferred from queue admission. W1's single final addresses the two-pass request and its verified outcome or inability/uncertainty; A1 must not separately emit an obsolete one-pass final. Duplicate or recovery events for either admission reuse W1's completion, canonical final entry and delivery identity.
+
+Exercise both sides of the join/finalization race. If A2 is accepted first, terminal finalization must include it. If W1 has begun terminal finalization (even before repair or payload freeze), A2 cannot join and goes through normal new-admission routing with current context, capacity and resource checks; it cannot revise W1's closed intent or final. If R1 ended or the native binding cannot guarantee the target, policy must not silently start a replacement. Reconcile pending/resource state and choose the permitted fresh-run, wait or clarification path. Verify the same outcomes after restart without replaying uncertain work.
+
+**Other user:** while Oren's workflow owns the robot, Ilana sends a Jessica request. It has its own requester/conversation binding and cannot implicitly steer Oren's run. Apply the reviewed queue/wait/reject policy or admit separate work only when both capacity and resource policy permit it. A shared family thread alone does not grant control.
+
+**After terminal completion:** a later "and the living room too" still has access to the relevant canonical conversation, even after R1's temporary context is discarded. An eligible new domain activation starts fresh with that bounded context and current resource checks; otherwise Main resolves the dependency. Test the same continuity across native compaction and restart, with original-turn provenance and no replay of uncertain mutations.
+
 ### 24.2 Main plus domain: history-dependent rooms
 
 User: "Tell Jessica to clean the rooms she did not clean before."
 
-"Did not clean before" is context/history-dependent. The Decision Model need not resolve "before"; its evidence makes self-contained routing unsafe. Policy selects Main.
+Here no trusted active/pending workflow or bounded context resolves "before". The dependency remains historical/ambiguous, so policy selects Main; the mere presence of a contextual phrase is not the reason.
 
 Main determines whether the dependency is prior conversation, deterministic Jessica cleaning history, or a need for clarification. It projects only the minimum necessary conversational context. Jessica retains responsibility for domain history interpretation and approved tool use.
 
@@ -1598,7 +1684,7 @@ User -> admission -> Request Controller -> Decision Model -> Main
   -> Completion Control -> Response Controller -> prepare/freeze/native delivery
 ```
 
-A missing reference produces an explicit clarification, not guessed rooms. Main's final response always returns to the Response Controller. The Reminder follow-up "And the day after tomorrow?" after a request for tomorrow's reminders uses the same context-projection and completion pattern.
+A missing reference produces an explicit clarification, not guessed rooms. Main's final response always returns to the Response Controller. A Reminder follow-up such as "And the day after tomorrow?" can instead take the grounded domain path when the bounded canonical context resolves its reference and all continuation/admission checks pass.
 
 ### 24.3 Main plus independent domains and conversation
 
@@ -1682,8 +1768,10 @@ Before approving a domain or major workflow, verify these design/implementation 
 
 - [ ] Benson and Main remain distinct; Main owns contextual reasoning, dependencies, delegation, aggregation, and final semantics for its workflows.
 - [ ] New external interactive admissions enter Request Controller; internal completions/recovery are not reclassified requests.
-- [ ] Decision Model supplies bounded evidence; deterministic eligibility commits one initial owner.
-- [ ] Mixed/context-dependent requests select Main; isolated briefs preserve exact current text and minimum relevant context.
+- [ ] Decision Model receives an admission-consistent bounded conversation/workflow projection and supplies evidence only; deterministic continuation policy precedes ordinary routing and commits one owner/action.
+- [ ] Grounded continuations do not require Main; ambiguous, broad or multi-domain work and unresolved semantic dependencies (including historical references) do. Isolated briefs preserve exact current text and minimum relevant context.
+- [ ] Direct turns remain visible in native canonical conversation history without Main; compaction, exact turns, model context and trusted pending state remain distinct under Sections 3.7 and 5.3.
+- [ ] No full-transcript default, unjustified last-N policy, per-request Benson summary call or duplicate conversation store is introduced.
 - [ ] Main does not duplicate domain operation logic or manufacture trusted runtime facts.
 
 ### Global completion and runtime permissions
@@ -1702,6 +1790,7 @@ Before approving a domain or major workflow, verify these design/implementation 
 - [ ] New agents require no private finalizer, validator, repair machine, or lifecycle hooks.
 - [ ] Native lifecycle/persistence owns recovery; no duplicate completion store or alternate runtime is introduced.
 - [ ] Domain runs remain isolated, least-privileged, with accurate AGENTS.md Tools guidance and zero runtime skills by default.
+- [ ] Section 7.7 capacity policy covers every entry path and is separate from workflow/resource ownership; cross-user and stale-generation controls are deterministic.
 
 ### Completion Control and workflow continuation
 
@@ -1710,6 +1799,8 @@ Before approving a domain or major workflow, verify these design/implementation 
 - [ ] Main aggregation preserves every result's version, identity, status, verification scope, warnings, and effects for bounded collections of any admitted size.
 - [ ] Workflow continuation is distinct from terminal repair; dependencies use deterministic predicates over verified facts.
 - [ ] Native suspension is nonterminal; long-running dependencies use explicit durable state without LLM polling.
+- [ ] Active continuation preserves authority, phase, exact lifecycle binding and completion ownership; queue admission, consumption and effects are distinct. Terminal/race/restart handling cannot replay mutations or silently create another run.
+- [ ] Each joined admission remains independently recorded/correlated; the shared final covers the latest accepted intent and verified effects/limitations. Admission ordering and join closure at workflow terminal finalization are deterministic and restart-safe; later admissions use normal new-admission routing.
 
 ### Composition, outbound boundary, and recovery
 
@@ -1720,9 +1811,9 @@ Before approving a domain or major workflow, verify these design/implementation 
 - [ ] Only otherwise valid explicit-unavailable final completions enable the one-shot tool-free Response Model.
 - [ ] Fallback has no hidden context, tools, mutation, workflow, or delivery authority; failure uses truthful deterministic wording.
 - [ ] No second model reviews arbitrary first-model prose; schema checks do not pretend to prove free-text truth.
-- [ ] One finalization per admission/workflow leads to prepare -> freeze -> existing native queue -> sendPrepared/provider.
+- [ ] Exactly one final-workflow completion and one final interactive delivery serve all joined admissions; prepare -> freeze -> existing native queue -> sendPrepared/provider cannot fan out finals per admission.
 - [ ] Queued != delivered; native outcome and durable recovery ownership are explicit.
-- [ ] Frozen semantic content/payload is reused unchanged; recovery never re-renders or reruns agents.
+- [ ] Duplicates/recovery from any joined admission reuse the same canonical final entry, completion and native delivery identity with unchanged frozen payload; later admissions cannot alter them. Recovery never re-renders or reruns agents.
 - [ ] Scheduled notifications retain native delivery; scheduled agent runs still inherit global finalization.
 
 ### Evidence and implementation boundaries
@@ -1739,8 +1830,8 @@ Before approving a domain or major workflow, verify these design/implementation 
 
 ## 26. Normative summary
 
-1. Benson is the system; Main remains its central cognitive orchestrator for contextual and cross-domain workflows. Direct routing optimizes eligible self-contained requests.
-2. Request Controller and deterministic policy establish one initial execution owner; model classification grants no authority.
+1. Benson is the system; Main remains its central cognitive orchestrator for broad/unresolved contextual and cross-domain work. OpenClaw-owned conversation continuity spans Main and direct-domain execution; Main does not own history (Section 3.7).
+2. Request Controller supplies bounded native conversation/workflow context and checks continuation before ordinary routing. Deterministic policy binds one authorized action/owner; classification grants no authority (Sections 4 and 5.3).
 3. Domains own internal reasoning and approved tool selection. Deterministic tools own authorization, execution, persistence, verification, and reconciliation.
 4. All Benson agent runs inherit one versioned Benson Agent Completion Protocol. TaskResultEnvelope and ResponseEnvelope are domain-task and final-workflow roles in that family.
 5. Every terminal run uses infrastructure-owned benson_complete. No raw final answer, prompt convention, or provider schema constraint replaces deterministic runtime validation.
@@ -1751,13 +1842,13 @@ Before approving a domain or major workflow, verify these design/implementation 
 10. userResponse explicitly distinguishes usable and unavailable. Missing/malformed state triggers completion repair, never accidental response fallback.
 11. Repair is bounded and completion-only in the same run. Runtime disables mutations and execution delegation; no completed or uncertain work is replayed.
 12. NORMAL means benson_complete accepted the agent's completion. After exhausted or impossible agent repair, sufficient trusted evidence permits runtime-built RECOVERED completion preserving the actual task/workflow outcome; only inability to establish complete trustworthy completion is FAILED. Its canonical failure report preserves known facts/effects/uncertainty. Exhaustion is not business failure, and malformed output never crosses the boundary.
-13. Every interactive workflow passes through one deterministic Response Controller before native delivery. It enforces trusted finality, eligibility, bounds, and one finalization per admission; it does not own ordinary composition or semantic prose review.
+13. Every interactive workflow passes through one deterministic Response Controller before native delivery. It enforces trusted finality, eligibility, bounds, and one final-workflow completion/delivery shared by all independently recorded joined admissions, reflecting the latest accepted intent. Joining closes when workflow terminal finalization begins; later admissions use normal new-admission routing (Section 6.4). The controller does not own ordinary composition or semantic prose review.
 14. The tool-free, one-shot Response Model is only fallback for valid explicit-unavailable final completion. Failure uses deterministic truthful wording; neither fallback repairs protocol failures nor reopens execution.
 15. Final approved message -> prepare -> freeze -> existing OpenClaw outbound queue -> sendPrepared/provider. Queued != delivered. Recovery reuses the frozen payload without re-rendering or rerunning agents.
 16. Execution evidence is independent of progress/UI events. Incomplete evidence is uncertain and cannot prove zero execution. Finalization/delivery failure never reauthorizes work.
 17. Conditional mutations depend on deterministic predicates over verified facts; native durable dependencies and scheduling avoid long-lived hidden agent state and polling.
-18. Native OpenClaw owns lifecycle, permissions, persistence, transport, outcomes, and recovery. Benson adds its contract at existing boundaries, without duplicate frameworks, stores, queues, or dispatchers.
-19. New agents inherit finalization automatically. AGENTS.md explains obligations and domain contracts; infrastructure owns enforcement and retry mechanics.
+18. Native OpenClaw owns transcript/context lifecycle and compaction, permissions, persistence, transport, outcomes, and recovery. Benson adds its contract at supported boundaries, without duplicate frameworks, conversation/execution stores, queues or dispatchers. Section 7.6 governs core exceptions; this revision authorizes none.
+19. New agents inherit finalization automatically and require explicit deterministic concurrency policy. Fresh activations, active continuations, workflow ownership and resource ownership remain distinct under Section 7. AGENTS.md explains obligations; infrastructure and deterministic domain boundaries enforce them.
 20. Reliability and truth precede token/cost/latency optimization. This target does not assert installed native API support or production acceptance; architecture review and separate implementation planning precede changes to runtime.
 
 ---
@@ -1770,9 +1861,23 @@ This file owns the approved target architecture; root AGENTS.md owns engineering
 
 ### 27.2 Current evidence and verification limits
 
-Focused read-only inspection on 2026-10-02 identified the local OpenClaw package at /home/oa/.npm-global/lib/node_modules/openclaw, version 2026.9.6, with shipped runtime bundles, documentation and Plugin SDK. The active Gateway service points to that package. The separate local source-checkout location is UNKNOWN; verify its path and revision before relying on checkout-specific source evidence. Snapshot output/context/benson-context-20261001-101324.md, generated 2026-10-01 10:13:24 IDT, records OpenClaw 2026.9.6 (eb377ac). These observations do not prove in-memory bundle identity, target capability support or production conformance.
+Focused read-only inspection on 2026-10-02 identified the local OpenClaw package at `/home/oa/.npm-global/lib/node_modules/openclaw`, version `2026.9.6`, build commit `eb377ac59e6c9fd6c7705028034812becf00271b`, with shipped bundles, documentation and Plugin SDK. The active Gateway service points to that package. Snapshot `output/context/benson-context-20261002-115547.md`, generated 2026-10-02 11:55:47 IDT, records the same version. The separate local upstream-checkout path remains UNKNOWN. Current upstream was inspected read-only at commit [`9562d84d90d0761e6b5f0c97a8e3d05bfa08c805`](https://github.com/openclaw/openclaw/tree/9562d84d90d0761e6b5f0c97a8e3d05bfa08c805); it is not the installed revision. None of these observations proves the Gateway's in-memory bytes or Benson production conformance.
 
 The 2026-08-23 compatibility baseline in Section 2.6 remains historical and must be reverified where relevant. Current official and shipped plugin documentation support extension outside core but mark plugin APIs experimental; supported host versions need explicit compatibility evidence. Existing preparation, tests, core patches and earlier acceptance do not prove implementation of the global completion protocol or narrowed Response Controller. The S09 principles preserved in Section 6.12 remain normative invariants, not a fresh deployment/E2E claim.
+
+The following are verified source/API capabilities and limits, not acceptance of a Benson integration. Bundle names identify the inspected installed build and are not import targets for Benson code.
+
+| Boundary | Verified evidence | Applicability / remaining limit |
+| --- | --- | --- |
+| Conversation versus execution identity | Installed `session-key-CBvmC8zz.mjs` builds agent-prefixed peer keys; `session-store-runtime` exports `getConversationSession` with agent plus channel/account/kind/peer/thread address, returning current `sessionKey`/`sessionId`. Current upstream retains that agent-scoped mapping. Inspected configuration uses `session.dmScope = per-channel-peer`. | A stable external address is not a route-independent execution key. Native conversation pointers exist, but a single canonical conversation across Benson's dynamic direct/Main paths, resets and final writes still needs binding proof. Configuration alone proves neither cross-account isolation nor workflow authority. |
+| Transcript persistence and reads | Default durable session rows/transcripts are in the native per-agent `openclaw-agent.sqlite`. Installed SDK exports `getSessionEntry`, `readRecentUserAssistantTextForSession`, `loadTranscriptEventsSync` and transcript stats; `api.runtime.subagent.getSessionMessages` also exists. | These expose different views, not a universal atomic routing snapshot. Recent-text helpers normalize/project text and have limits; do not mistake previews for exact original turns or complete compacted context. Verify canonical entry provenance, authorization, bounded reads and revision consistency at the chosen seam. No production transcripts were dumped for this audit. |
+| Compaction and context | `session-manager-DjC09C_X.mjs` appends compaction entries with `summary`/`firstKeptEntryId`; `session-D9cHHQGH.mjs` builds the current model view from retained entries. `compaction-CAzwgOuQ.mjs` invokes model completion for built-in summaries. Installed runtime/docs provide required pre-inference/overflow compaction and deferred post-delivery maintenance; original history is retained by compaction, subject to independent retention/reset policies. | Compaction is not deterministic summarization or guaranteed to run before Request Controller. Context-engine/harness choice affects ordering and representation. Consistent pre-routing access to summary plus exact turns and pending state remains to be proven; a new summarizer/context engine is not justified. |
+| Admission and transcript custody | Supported `before_dispatch`/`reply_dispatch` hooks expose inbound/finalized context. `reply_dispatch` includes host lifecycle callbacks and `userTurnTranscriptRecorder`; assistant transcript receipts prevent duplicate appends. | These are candidate integration seams, not proof that a direct child records the external conversation correctly. Preserve native recorder ownership and prove direct input/final projection, abort/reset fencing and one canonical entry. Returning handled/queued status alone is insufficient. |
+| Active-run discovery and caller scope | Installed subagent registry/control checks bind visibility and control to requester/controller session and store; current-generation checks compare child session/run/generation. Session inventories and native task state provide lifecycle evidence. Current upstream additionally exposes `gateway.readSessionFacts`; that helper is absent from the inspected installed runtime API type. | Do not import internal registry code or assume the upstream-only helper is installed. Select a supported read surface that proves current ownership, not recency or an unended row. Exact authorized access from Benson control plane to a directly spawned domain run remains UNKNOWN. |
+| Continuation and recovery | Native queue `steer` targets an active session runtime; `followup` waits for a later turn, `collect` coalesces and `interrupt` replaces. Explicit `/steer` can fall back to a normal prompt. Crucially, installed `sessions-messaging-Bf8Z-8mt.mjs` and the pinned upstream `sessions-messaging.ts` map RPC `sessions.steer` to `queueMode: interrupt`. `sessions_send` exposes scoped continuation/resume semantics, including task-preserving resume with a successor run identity. | These names are not interchangeable. Prove exact target/caller/generation, no implicit new-run fallback, mutation-phase restriction, completion owner and the Section 6.4 shared-final membership/closure binding before enabling joining. Ordinary queued input custody is distinct from durable replay: the in-memory queue is not replayed after restart. Native interrupted-child recovery settles results rather than blindly relaunching execution. |
+| Concurrency scope | Installed `hook-client-ip-config-BTyUP38r.mjs` configures the shared `subagent` lane; `sessions-spawn-tool-AW-VALLJ.mjs` enforces `maxChildrenPerAgent` against the spawning session. Current upstream docs instead describe ordinary subagent execution lanes per immediate spawning/controller session, with separate collector lanes. | Neither version's inspected mechanism establishes a global limit per target domain-agent identity, nor a physical resource lock. Do not copy current online concurrency semantics onto 2026.9.6. Global domain capacity and resource-owner recovery require separate implementation evidence. |
+
+The selected direction is native conversation/transcript custody plus bounded read projection, deterministic continuation admission, and separate domain capacity/resource enforcement. Routing every reference to Main adds inference and cannot recover a direct turn missing from canonical history; copying full history or summarizing every request adds privacy/cost and accuracy risks; sharing a persistent domain execution session breaks fresh activation/isolation. Native steering may avoid a new run, but only with proven caller and lifecycle semantics; followup/wait/reject are explicit policy outcomes, not silent substitutes. Existing supported session extensions are candidates for genuinely missing metadata, not approval for another ledger. This chooses the architectural responsibilities while deferring unproven native bindings.
 
 ### 27.3 Implementation drift and target status
 
@@ -1782,11 +1887,13 @@ Implementation alignment is not established by a document edit. Existing agent c
 
 Architecture approval does not establish implementation alignment or production acceptance. The canonical `BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md` owns staged implementation and acceptance under this architecture; stage progress there does not imply runtime deployment or conformance.
 
-IMPLEMENTATION DRIFT relative to Section 7.6: the 2026-10-02 inspection found ten version-bound core patch files under integrations/openclaw/patches (2026.9.4 and 2026.9.6), covering request admission, reconciliation, memory/question/yield behavior, commitment, completion control, finalization and runtime compatibility. Installed admission and completion bundles also contain Benson integration code. This is not a complete applied-patch inventory or proof that every path is active. Their disposition belongs to the separate implementation-plan redesign under Section 7.6; this documentation alignment changes none of these artifacts.
+IMPLEMENTATION DRIFT relative to Section 7.6: the preceding 2026-10-02 read-only implementation-plan audit remains planning evidence. It inventoried ten core-patch artifacts under `integrations/openclaw/patches`. The 2026.9.4 artifacts are not literally applied to this installed line; several behaviors were ported into 2026.9.6 runtime compatibility. The 2026.9.6 admission and runtime-compatibility artifacts passed reverse-application checks; commitment/completion code is present with artifact differences and production flags false; the finalization artifact is not installed. The separate blocked R03 candidate is not deployed. These source-level findings are not proof of every live event path, and no patch receives retroactive approval. Retain the audit's component inventory and proposed dispositions for the later plan rewrite; preserve correct existing domain tools and accepted contract work meanwhile.
+
+The current-only Decision input, Main-dependent context assumptions and missing verified continuity/concurrency bindings are additional target-alignment gaps. This documentation stage changes no implementation, runtime/configuration, agent/tool contract, patch artifact or implementation plan. The plan audit remains useful evidence; only its proposed future approach/stages must be reconsidered under this revised architecture after review, merge, synchronization and a fresh accepted-state snapshot.
 
 ### 27.4 Deferred native binding and implementation decisions
 
-Focused inspection of the installed OpenClaw version must establish:
+Implementation planning must retain the completed audit and close these evidence gaps before selecting or enabling the affected bindings:
 
 1. Automatic interception of every Benson terminal path, including Main, children, scheduled semantic runs, future managed agents, plain model finals, errors, cancellation, and timeouts. `benson_complete` is conceptual, not a verified API name.
 2. Supported native/provider structured-output/schema surfaces and deterministic evidence validation at the terminal boundary, independent of model compliance.
@@ -1794,20 +1901,28 @@ Focused inspection of the installed OpenClaw version must establish:
 4. Native identity, parent/caller correlation, trusted route/finality binding, duplicate/stale rejection, caller continuation, and direct domain-to-final-workflow projection without a duplicate completion store.
 5. Deterministic evidence-sufficiency validation and RECOVERED construction when agent attempts are exhausted or impossible; FAILED reporting only when complete trustworthy completion cannot be established. Preserve actual task outcome, existing evidence/effects/uncertainty and native recovery ownership when correlation is unavailable.
 6. Complete native execution/tool evidence versus UI/progress callbacks, especially for policies requiring proof of zero execution.
-7. One outbound finalization per admission, transcript ownership, transport preparation and freeze before the existing native queue, sendPrepared/provider outcomes, and durable reuse of the identical prepared payload.
+7. One final-workflow completion and outbound finalization/delivery per workflow shared by its joined admissions, canonical transcript correlation, transport preparation and freeze before the existing native queue, sendPrepared/provider outcomes, and durable reuse of the same delivery identity and identical prepared payload.
+8. One native canonical conversation binding across direct/Main routes, with exact admitted external turns, correlated final replies, authorized reads and reset/retention behavior independent of the execution agent. Prove this without invoking Main merely to write history.
+9. Admission-consistent bounded routing projection: exact-turn and native summary retrieval, lifecycle/compaction ordering, cutoff/revision semantics, privacy filtering and failure handling. Compare native read/recorder hooks and supported SDK extensions; do not assume that pre-dispatch is post-compaction or choose a fixed last-N shortcut.
+10. Supported active-run discovery and continuation from the direct control-plane caller, preserving requester authority, current run/task identity, generation and completion phase/destination. Prove the native binding for Section 6.4's approved shared final: durable admission membership and accepted-intent revision, atomic join closure at workflow terminal finalization, later-admission routing, and recovery without duplicate finals. Prove steering versus followup/resume/interrupt behavior; unavailable support keeps joining disabled without a core patch.
+11. Explicit per-agent capacity enforcement across all callers/entry paths, distinct resource ownership and stale-writer rejection at domain mutation boundaries. Specify capacity, queue/wait/reject, isolation and recovery in the reviewed domain contract; neither native session lanes nor timeout-based release alone closes this gap.
 
 Exact wire encoding, schema technology/version migration, retry count, domain render coverage/localization, provider/model choice, output bounds, and evaluation budgets belong to the separately reviewed implementation plan. Ownership and no-replay invariants are already fixed here. If native support cannot enforce one, document the precise gap and compare supported native/plugin alternatives at the existing ownership boundary. Apply the OPENCLAW CORE PATCH exception gate in Section 7.6 if internals would change; new architectural boundaries still require separate approval. No logical component name grants permission to modify core.
 
-Current extension-policy references consulted on 2026-10-02:
+Current primary references consulted on 2026-10-02 (online contracts may exceed installed support):
 
 - [OpenClaw: building plugins](https://docs.openclaw.ai/plugins/building-plugins)
 - [OpenClaw: Plugin SDK and API stability](https://docs.openclaw.ai/plugins/sdk-overview#api-stability)
+- [OpenClaw: sessions](https://docs.openclaw.ai/concepts/session), [compaction](https://docs.openclaw.ai/concepts/compaction), and [context engines](https://docs.openclaw.ai/concepts/context-engine)
+- [OpenClaw: runtime agent/session SDK](https://docs.openclaw.ai/plugins/sdk-runtime/agent), [background/subagent SDK](https://docs.openclaw.ai/plugins/sdk-runtime/background-work), and [message/transcript hooks](https://docs.openclaw.ai/plugins/hooks/messages)
+- [OpenClaw: session tools and caller scope](https://docs.openclaw.ai/concepts/session-tool), [steering](https://docs.openclaw.ai/tools/steer), [queue durability](https://docs.openclaw.ai/concepts/queue), and [subagent concurrency/recovery](https://docs.openclaw.ai/tools/subagents/operations)
+- [Pinned upstream: agent-scoped session identity](https://github.com/openclaw/openclaw/blob/9562d84d90d0761e6b5f0c97a8e3d05bfa08c805/src/routing/session-key.ts), [SDK transcript access](https://github.com/openclaw/openclaw/blob/9562d84d90d0761e6b5f0c97a8e3d05bfa08c805/src/plugin-sdk/session-store-runtime.ts), and [sessions.steer RPC semantics](https://github.com/openclaw/openclaw/blob/9562d84d90d0761e6b5f0c97a8e3d05bfa08c805/src/gateway/server-methods/sessions-messaging.ts)
+- [Martin Kleppmann: correctness locks and fencing](https://martin.kleppmann.com/2016/02/08/how-to-do-distributed-locking.html): apply the stale-owner exclusion principle at the actual mutation boundary; do not infer safety from elapsed time or mandate a new lock service.
+- [AWS Builders' Library: retries and idempotent APIs](https://aws.amazon.com/builders-library/making-retries-safe-with-idempotent-APIs/): retain request identity and reconcile uncertain effects before retries, including continuation admission. This production evidence supports the existing no-replay boundary.
 
 Historical compatibility references (not reverified by this documentation alignment):
 
 - OpenClaw, retired TOOLS.md: https://docs.openclaw.ai/reference/templates/TOOLS
-- OpenClaw, session tools: https://docs.openclaw.ai/concepts/session-tool
-- OpenClaw, sub-agents: https://docs.openclaw.ai/tools/subagents
 - OpenClaw, Automations: https://docs.openclaw.ai/automation/cron-jobs
 - OpenClaw, Gateway protocol: https://docs.openclaw.ai/gateway/protocol
 - OpenClaw, message lifecycle: https://docs.openclaw.ai/concepts/message-lifecycle-refactor
