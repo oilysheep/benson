@@ -3,7 +3,7 @@
 **Canonical architecture document for the Benson home-agent project**  
 **Document language:** English  
 **Status:** Approved target architecture; implementation and production acceptance are tracked separately
-**Last updated:** 2026-09-29
+**Last updated:** 2026-10-02
 **OpenClaw compatibility provenance:** 2026-08-23 baseline; current evidence and limitations in Section 27  
 
 > This document defines the intended architecture, responsibility boundaries, execution model, engineering principles, and maintenance rules for Benson/OpenClaw. It is not a runtime snapshot and must not be used as proof that a particular path, version, agent, model, tool, or configuration is currently installed.
@@ -137,7 +137,9 @@ Current `AGENTS.md` runtime contracts
 Historical design conversations
 ```
 
-If current runtime files conflict with the architecture, treat the mismatch as an implementation defect to inspect, not as an automatic architecture change.
+If evidence is insufficient, record UNKNOWN: what is unknown, why it matters, and the minimum evidence needed to resolve it. Do not infer absence, success, failure, installation, capability, configuration or runtime state from missing evidence.
+
+If verified implementation or runtime differs from the approved architecture, label it IMPLEMENTATION DRIFT and inspect the violated invariant. Do not silently redefine the architecture to match the implementation.
 
 ### 2.6 OpenClaw compatibility contract
 
@@ -744,6 +746,20 @@ Long-running or externally delayed operations should use an approved durable det
 ### 7.6 Native OpenClaw first
 
 OpenClaw is Benson's agent harness. Built-in OpenClaw mechanisms are the default architectural choice for orchestration, session lifecycle, sub-agent delegation, completion delivery, permissions, and other harness responsibilities.
+
+Use this preference order, subject to verified capability and architectural suitability:
+
+1. existing native OpenClaw capability;
+2. documented native OpenClaw primitive;
+3. official OpenClaw Plugin SDK or supported extension point;
+4. an existing high-quality external implementation;
+5. only then a Benson-owned implementation at a stable supported boundary.
+
+Benson MUST NOT modify, overwrite, monkey-patch or otherwise patch OpenClaw core/package runtime implementation as a normal integration mechanism. A Benson plugin outside core using the supported Plugin SDK is not an OpenClaw core patch. A documented SDK boundary is not a promise of compatibility across releases: current plugin APIs are experimental, so pin and verify supported host versions.
+
+If a required invariant genuinely cannot be enforced without modifying internals, STOP before implementation and label the proposal OPENCLAW CORE PATCH. Identify the exact native capability gap, why native/plugin approaches are insufficient, version coupling and upgrade/maintenance burden, rollback, and the preferred upstream/native path if one exists. Obtain explicit Oren approval; general capability or architecture approval does not authorize a core patch.
+
+Existing Benson-owned core changes are IMPLEMENTATION DRIFT relative to this policy. Preserve them pending separately approved analysis; the next implementation-plan redesign must decide for each whether to remove it, migrate to a native primitive, or replace it through an official plugin/extension. Discovery alone never authorizes removal or further modification.
 
 Do not introduce a custom workaround, alternate waiting mechanism, parallel orchestration framework, or replacement primitive merely because a symptom suggests that a native mechanism may be failing.
 
@@ -1429,46 +1445,15 @@ Do not leave backups, candidates, generated output, or obsolete copies in active
 
 ## 20. Engineering and maintenance workflow
 
-### 20.1 Small measurable patches
+The root AGENTS.md owns Benson's engineering workflow, approval/review/push/PR gates, learning handoffs, rollback and maintenance procedures. It applies the global Codex engineering policy; PLANS.md owns the planning procedure. Runtime AGENTS.md files remain agent/domain contracts, not development workflows. Follow those owners rather than duplicating their procedures here.
 
-Prefer small, measurable patches over broad refactors.
+### 20.1 Durable architecture rationale
 
-Do not combine unrelated:
+Meaningful durable architecture decisions must leave a concise rationale in the existing canonical owner: problem, viable alternatives, decision, reason and important consequences. Research informs the decision under the engineering policy; neither trends nor implementation drift silently change approved boundaries. Do not create a parallel decision document merely for visibility or turn the active contract into a transcript or decision diary.
 
-- cleanup;
-- behavior changes;
-- architecture changes;
-- formatting changes;
-- migrations.
+For native integration, distinguish the OpenClaw primitive and supported registration/extension surface from Benson's policy or domain contract. For example, native tool registration can expose a Benson deterministic tool while OpenClaw retains run lifecycle and permissions. An OpenClaw core patch couples the integration to internals instead; Section 7.6 makes that an explicit exception decision. This separation preserves native ownership without weakening Benson's required invariants. Exact binding feasibility still requires evidence.
 
-### 20.2 Inspect before modifying
-
-Start with safe, focused, read-only inspection.
-
-Do not assume paths or implementations from old conversations.
-
-### 20.3 Required change report
-
-For every code or configuration change, provide:
-
-- the exact change;
-- one validation command;
-- the expected result;
-- a rollback note when relevant.
-
-### 20.4 Interactive work
-
-When guiding work on the Raspberry Pi:
-
-- proceed one measurable stage at a time;
-- provide one primary command or command block;
-- explain what it checks or changes;
-- review the output before the next stage;
-- request focused output rather than a full filesystem dump.
-
-### 20.5 Truthfulness
-
-Do not claim that a command succeeded, a file changed, a service restarted, or a runtime behavior is fixed unless the result was observed.
+Persistent architecture and behavior must remain understandable without hidden model/session memory. Operational success and architecture conformance require observed acceptance, not a changed document.
 
 ---
 
@@ -1781,25 +1766,23 @@ Before approving a domain or major workflow, verify these design/implementation 
 
 ### 27.1 Canonical owner and revision scope
 
-The 2026-09-28 design revision changes only the canonical architecture owner:
-`/home/oa/projects/benson/architecture/BENSON_SUBAGENT_ARCHITECTURE.md`.
-Project AGENTS.md assigns architecture authority to this file. This revision changes only this canonical architecture document. It does not itself change runtime code, configuration, agents, installation, production state, or the implementation plan. Git branch, commit, PR, and merge mechanics are repository workflow state, not architectural state.
+This file owns the approved target architecture; root AGENTS.md owns engineering execution and PLANS.md owns its planning procedure. The implementation plan translates the target into separately approved stages. Documentation approval does not authorize runtime, configuration, agent, installation or implementation-plan changes. Git/PR mechanics and recovery procedures belong to the engineering contract.
 
-This canonical architecture document is Git-managed. For this revision, the verified pre-change repository baseline is `b363111e3b2576110fb2b20c1ac87541dcb6ea21` on `main`; rollback uses Git history from that baseline, and shared-history rollback after merge uses a new revert commit rather than history rewriting. The earlier checkpoint `/home/oa/projects/benson/output/checkpoints/architecture-completion-protocol-20260928-mq27smab/BENSON_SUBAGENT_ARCHITECTURE.md` is retained only as historical evidence of the 2026-09-28 edit session, not as the canonical rollback mechanism.
+### 27.2 Current evidence and verification limits
 
-### 27.2 Historical evidence and current verification limits
+Focused read-only inspection on 2026-10-02 identified the local OpenClaw package at /home/oa/.npm-global/lib/node_modules/openclaw, version 2026.9.6, with shipped runtime bundles, documentation and Plugin SDK. The active Gateway service points to that package. The separate local source-checkout location is UNKNOWN; verify its path and revision before relying on checkout-specific source evidence. Snapshot output/context/benson-context-20261001-101324.md, generated 2026-10-01 10:13:24 IDT, records OpenClaw 2026.9.6 (eb377ac). These observations do not prove in-memory bundle identity, target capability support or production conformance.
 
-Historical compatibility inspection on 2026-08-23 covered the OpenClaw 2026.8.1 line, including prompt loading, isolated delegation, scheduling, and native delivery assumptions in Section 2.6. Historical snapshot `output/context/benson-context-20260925-112548.md`, generated 2026-09-25 11:25:48 IDT, recorded OpenClaw 2026.9.4 (3a9d69d) with successful inventory queries. Neither establishes the installed version or production behavior on 2026-09-28.
-
-This architecture-only revision does not inspect or certify current runtime wiring. Existing preparation, tests, patches, and earlier acceptance are not evidence that the newly specified global completion protocol or narrowed Response Controller is implemented. The preserved S09 principles are normative invariants in Section 6.12, not a fresh deployment/E2E claim.
+The 2026-08-23 compatibility baseline in Section 2.6 remains historical and must be reverified where relevant. Current official and shipped plugin documentation support extension outside core but mark plugin APIs experimental; supported host versions need explicit compatibility evidence. Existing preparation, tests, core patches and earlier acceptance do not prove implementation of the global completion protocol or narrowed Response Controller. The S09 principles preserved in Section 6.12 remain normative invariants, not a fresh deployment/E2E claim.
 
 ### 27.3 Implementation drift and target status
 
 The superseded architecture assigned normal response-mode selection/composition and semantic result escalation to Response Controller. The active target instead assigns composition to the final semantic owner and global terminal enforcement to infrastructure. Earlier optional candidate fields and independent result/response definitions are replaced by one protocol family with mandatory explicit userResponse state.
 
-Implementation alignment is not established by this document edit. Existing agent contracts, code/configuration, and the current canonical decision-routing implementation plan must be assessed and, where necessary, aligned with this approved target through separately reviewed and approved changes. Until such plan alignment is merged, any mismatch between this architecture and the implementation plan or runtime is plan/implementation drift; do not treat historical S09 or any unmerged replacement-stage plan as canonical implementation authority. No unresolved ownership alternative is intentionally retained in this canonical target.
+Implementation alignment is not established by a document edit. Existing agent contracts, code/configuration and the canonical implementation plan must be assessed and, where necessary, aligned with this approved target through separately reviewed and approved changes. Any mismatch is plan/implementation drift; historical stage acceptance does not override the active architecture or authorize unapproved replacement work. No unresolved ownership alternative is intentionally retained in this target.
 
 Architecture approval does not establish implementation alignment or production acceptance. The canonical `BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md` owns staged implementation and acceptance under this architecture; stage progress there does not imply runtime deployment or conformance.
+
+IMPLEMENTATION DRIFT relative to Section 7.6: the 2026-10-02 inspection found ten version-bound core patch files under integrations/openclaw/patches (2026.9.4 and 2026.9.6), covering request admission, reconciliation, memory/question/yield behavior, commitment, completion control, finalization and runtime compatibility. Installed admission and completion bundles also contain Benson integration code. This is not a complete applied-patch inventory or proof that every path is active. Their disposition belongs to the separate implementation-plan redesign under Section 7.6; this documentation alignment changes none of these artifacts.
 
 ### 27.4 Deferred native binding and implementation decisions
 
@@ -1813,9 +1796,14 @@ Focused inspection of the installed OpenClaw version must establish:
 6. Complete native execution/tool evidence versus UI/progress callbacks, especially for policies requiring proof of zero execution.
 7. One outbound finalization per admission, transcript ownership, transport preparation and freeze before the existing native queue, sendPrepared/provider outcomes, and durable reuse of the identical prepared payload.
 
-Exact wire encoding, schema technology/version migration, retry count, domain render coverage/localization, provider/model choice, output bounds, and evaluation budgets belong to the separately reviewed implementation plan. Ownership and no-replay invariants are already fixed here. If native support cannot enforce one, document the precise gap and propose the smallest Benson integration at the existing ownership boundary; new architectural boundaries still require approval.
+Exact wire encoding, schema technology/version migration, retry count, domain render coverage/localization, provider/model choice, output bounds, and evaluation budgets belong to the separately reviewed implementation plan. Ownership and no-replay invariants are already fixed here. If native support cannot enforce one, document the precise gap and compare supported native/plugin alternatives at the existing ownership boundary. Apply the OPENCLAW CORE PATCH exception gate in Section 7.6 if internals would change; new architectural boundaries still require separate approval. No logical component name grants permission to modify core.
 
-Historical compatibility references (not reverified by this design revision):
+Current extension-policy references consulted on 2026-10-02:
+
+- [OpenClaw: building plugins](https://docs.openclaw.ai/plugins/building-plugins)
+- [OpenClaw: Plugin SDK and API stability](https://docs.openclaw.ai/plugins/sdk-overview#api-stability)
+
+Historical compatibility references (not reverified by this documentation alignment):
 
 - OpenClaw, retired TOOLS.md: https://docs.openclaw.ai/reference/templates/TOOLS
 - OpenClaw, session tools: https://docs.openclaw.ai/concepts/session-tool
