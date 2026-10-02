@@ -72,19 +72,24 @@ Use the current-state precedence defined in the root `AGENTS.md`.
 
 Inspect the canonical existing implementation before proposing a replacement.
 
-For recovery or migration work, build a capability inventory before proposing
-changes.
-
-Classify relevant existing behavior as:
+Before proposing any future capability or implementation stage, inventory the
+relevant existing implementation, including recovery and migration work.
+Classify it as:
 
 - KEEP
-- REPAIR
 - EXTEND
+- REPAIR
 - REPLACE
-- RETIRE
+- REMOVE
 
-RETIRE requires explicit evidence that the behavior is obsolete, unsafe,
-duplicated, or intentionally removed.
+Explain what is correct or partial, what remains untouched, what changes or is
+removed, what is newly created, and why. "No change because the existing
+implementation is correct" is a valid disposition. Do not rewrite correct code
+because a new plan exists or blindly copy legacy behavior.
+
+REMOVE requires explicit evidence that the behavior is obsolete, unsafe,
+duplicated or intentionally removed, together with the global policy's
+reference/dependency checks, recovery protection and validation.
 
 Uncertainty means inspect or preserve, not delete.
 
@@ -162,7 +167,7 @@ Prefer, in order:
 
 1. repairing a clean canonical implementation;
 2. extending it locally when the responsibility already belongs there;
-3. cleanly replacing it when accumulated drift makes patching unsafe or
+3. cleanly replacing it when accumulated drift makes a focused change unsafe or
    confusing;
 4. creating a new component only when no canonical existing owner fits.
 
@@ -172,8 +177,10 @@ permission-sensitive, safety-sensitive, and externally observable operations.
 Use LLM reasoning where semantic interpretation, ambiguity, planning, or
 language reasoning is genuinely required.
 
-Prefer native OpenClaw mechanisms before custom orchestration or another agent
-framework.
+Apply the root AGENTS.md capability-discovery order and the global research gate
+before selecting an implementation. Architecture Section 7.6 owns native-first
+preference, core immutability and any explicitly approved exception. A plan must
+not treat an existing OpenClaw core patch as permission for another one.
 
 Benson planning must not assume Git, branches, commits, or worktrees are
 available. Use them only when the inspected workspace actually provides them.
@@ -184,7 +191,7 @@ For every planned implementation step specify:
 
 - exact component or path;
 - exact responsibility being changed;
-- repair / extend / replace / retire decision;
+- KEEP / EXTEND / REPAIR / REPLACE / REMOVE disposition;
 - why the change is necessary;
 - whether it changes runtime or durable state;
 - dependencies on previous steps;
@@ -197,9 +204,9 @@ behavior changes.
 
 ## Phase 7 — Backup and rollback
 
-Before any destructive, state-changing, configuration-changing, or
-structurally significant step, define a verified restorable checkpoint outside
-active canonical directories.
+Use the root AGENTS.md checkpoint and rollback policy, including its distinction
+between Git source recovery, affected uncommitted content, explicit file-copy
+requirements and artifacts Git cannot restore.
 
 For each relevant step identify:
 
@@ -223,8 +230,10 @@ Use the smallest sufficient validation ladder, for example:
 4. runtime health verification;
 5. representative end-to-end behavior.
 
-Not every change requires every layer, but meaningful architecture or runtime
-changes require representative end-to-end acceptance.
+Not every change requires every layer. Meaningful user-facing behavior changes
+require representative end-to-end acceptance. For a documentation-only change,
+prove document correctness, consistency, scope and preservation of protected
+contracts; do not perform runtime or physical actions outside its authorization.
 
 For every planned change provide:
 
@@ -240,22 +249,19 @@ Define observable acceptance criteria before implementation.
 
 Acceptance must verify the actual user/system behavior affected by the change.
 
-For important agent workflows, verify the relevant path across:
-
-`user request → Main decision → delegation → model → tools → verification → structured result → final response`
+For important agent workflows, select the relevant path from the canonical
+architecture flow in Section 3 and its acceptance examples in Section 24.
+Do not assume every request passes through Main or treat response generation
+as native delivery evidence.
 
 Do not claim success from configuration inspection alone when runtime behavior
 is the objective.
 
 ## Phase 10 — Snapshot
 
-After meaningful validated changes to Benson/OpenClaw configuration, agents,
-workspaces, instructions, deterministic tools, models, delegation, permissions,
-scheduling, domain state, or architecture:
-
-1. run `bensonsnap`;
-2. verify that a new snapshot was produced;
-3. preserve/upload it as the new captured current-state source.
+Apply the root AGENTS.md snapshot policy at the authorized acceptance point.
+Verify generation and preserve/upload the resulting captured state when required;
+do not use a snapshot as proof of implementation or production acceptance.
 
 ## Required plan output
 
