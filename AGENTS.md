@@ -62,17 +62,18 @@ it. Do not change stage structure, dependencies, acceptance strategy, or
 architectural decisions without presenting the evidence and obtaining Oren's
 approval.
 
-Work autonomously through routine implementation and validation. Stop for a
-genuine architecture decision, operator approval gate, physical E2E action,
-security concern, or blocker; do not stop merely to narrate routine progress.
+After the required stage-start approval, work autonomously within the approved
+scope through routine implementation and validation. Stop at the next genuine
+architecture decision, operator approval gate, physical E2E action, security
+concern, or blocker; do not stop merely to narrate routine progress.
 
 ## Stage branch, plan closure, and PR workflow
 
 Default to one meaningful canonical stage per branch and PR, including approved
 documentation stages, unless Oren explicitly approves different grouping.
 Before state-changing work, provide the stage-start briefing and satisfy the
-applicable approval gates; existing authorization does not need to be requested
-again.
+stage-start approval gate below. Approval is scoped to the current stage; do not
+request it again once explicitly granted.
 
 For each stage:
 
@@ -87,11 +88,8 @@ For each stage:
   and known limitations or explicitly deferred follow-up;
 - never mark a stage accepted before the required evidence has been observed;
 - give Oren the end-of-stage Hebrew learning explanation defined below;
-- stop and remind Oren: MANUAL REVIEWER GATE REQUIRED BEFORE PR;
-- invoke the independent reviewer only when Oren explicitly requests it; review
-  the final proposed diff and resolve or explicitly disposition findings before
-  PR creation. Material post-review changes require review of the final diff;
-- after review/findings disposition, provide the pre-push summary below and
+- complete the independent review approval gate below before every PR;
+- after final reviewer PASS, stop, provide the pre-push summary below and
   obtain explicit Oren approval before EVERY push to the remote repository;
 - only then push the accepted stage branch to origin;
 - prepare an English PR title and description covering purpose, architectural
@@ -113,16 +111,25 @@ and files, observed validation, acceptance status, checkpoint/rollback,
 limitations/unknowns and learning points. Prior push approval does not authorize
 another push. PR creation approval is separate from push approval.
 
-### Manual independent review before PR
+### Independent review approval gate before PR
 
-Independent review is mandatory before PR creation and must not start
-automatically. When Oren explicitly requests it, run a fresh independent Codex
-process using the configured reviewer profile from the target checkout/worktree.
+Before every PR, the Builder must STOP and tell Oren that the mandatory
+independent review gate has been reached. The first reviewer run requires
+Oren's explicit approval.
 
-When the request is made from an active Builder Codex session, the Builder must
-launch that independent reviewer process itself, wait for it to finish, and
-return the reviewer report to Oren. The Builder must not substitute its own
-review or pass its reasoning/session context to the reviewer.
+After approval, the Builder launches a fresh independent read-only Codex process
+using the configured `reviewer` profile from the target checkout/worktree and
+receives its findings directly. Oren does not launch the reviewer or copy/paste
+reviewer reports. The Builder must not substitute its own review or pass its
+reasoning/session context to the reviewer.
+
+The Builder fixes or explicitly dispositions findings, validates the resulting
+changes, and explains to Oren what was found and changed. If fixes materially
+change the proposed diff, automatically launch another fresh independent review
+of the final proposed diff. The initial review approval covers follow-up reviews
+needed to resolve findings within the approved scope. Review is complete only
+after a final independent reviewer PASS; then stop at the pre-push approval gate
+above.
 
 Use the final proposed diff plus the stage, capability or domain named by Oren
 as the review target; include the PR if one already exists. Before PR creation,
@@ -214,6 +221,11 @@ and before implementation or state-changing work, explain:
 
 This describes intent and planned architecture, not claimed results.
 
+After this briefing, STOP for every meaningful implementation stage. Do not
+begin any state-changing work until Oren explicitly approves starting that
+stage. Approval of a plan or an earlier stage is not approval to start the
+current stage.
+
 ### End-of-stage learning gate
 
 After the change, validation, acceptance and any applicable plan closure, and
@@ -299,14 +311,20 @@ scheduling, domain state, or canonical architecture, produce and verify a fresh
 
 ## OpenClaw capability discovery and maintenance
 
-Before designing or implementing a capability, ask whether current OpenClaw
-already provides it or the required lower-level primitive. Inspect, in order:
+Before finalizing the implementation approach for every meaningful stage,
+establish what current OpenClaw already provides, including the required
+lower-level primitives. Inspect, in order:
 
 1. the actual current OpenClaw repository/source;
 2. current official OpenClaw documentation;
 3. installed-version implementation when needed;
 4. the Plugin SDK and supported lifecycle/tool/config extension surfaces;
-5. only then external implementations or Benson-specific code.
+5. relevant current authoritative best practices and useful production/community
+   evidence.
+
+Compare viable alternatives and their trade-offs, then choose the smallest
+correct solution. Do not build Benson-specific functionality before this
+discovery justifies it. Trivial mechanical edits do not require fresh research.
 
 Establish version/provenance; never infer a checkout path or installed support
 from current online documentation alone. Apply the global research gate and
