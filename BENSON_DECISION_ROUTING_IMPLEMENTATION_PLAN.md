@@ -1,6 +1,6 @@
 # Benson control-plane implementation plan
 
-Status: PLANNING PROPOSAL — independent documentation review PASS; pre-push approval and plan acceptance pending. P01–P11 are NOT STARTED. Existing implementation retained below is not new-stage acceptance.
+Status: PLANNING PROPOSAL — independent documentation review PASS. P01–P11 remain NOT STARTED. Existing implementation retained below is not new-stage acceptance.
 Date: 2026-10-02.
 Canonical owner: `BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md`.
 Authority: [Benson architecture](architecture/BENSON_SUBAGENT_ARCHITECTURE.md), accepted through commit `9ed4d471646d5129622a203647a2e444158e3bc2`, SHA-256 `e074ec5d6190268e012207697cbd4a38e56e240d4bf9c5ee3f1d730bd32cf7fa`.
@@ -14,7 +14,7 @@ The target is one native canonical conversation across Main/direct execution, bo
 
 Architecture owns responsibilities and semantics. This plan owns implementation sequencing, component dispositions, compatibility/migration obligations, evidence, and acceptance. Logical owners named here do not authorize a new plugin, tool, service, store, configuration surface, or core modification. Exact unsupported native bindings remain UNKNOWN with dependent work blocked; naming a desired API is not an implementation decision.
 
-Current authorization is documentation only: rewrite this file, perform the dedicated consistency audit and the explicitly approved independent review, then stop at the pre-push approval gate. No runtime/code/configuration/agent/tool/patch modification, deployment, service restart, provider call, device action, push, or PR creation is included. Approval of this plan will not authorize starting a future stage.
+This documentation-only rewrite authorizes no runtime or implementation change, including code/configuration/agent/tool/patch modification, deployment, service restart, provider call or device action. Approval of this plan does not authorize starting a future implementation stage.
 
 Whole-plan acceptance requires all Section 27.4 gaps, the stage criteria, and the mandatory acceptance matrix below to have observed evidence. Source tests, a snapshot, disabled production flags, or acceptance of one limited cohort cannot establish production conformance. Real direct routing needs an accepted real Decision capability; the positive conditional workflow needs independently verified exact Jessica task completion. UNKNOWN or a blocked mandatory capability keeps the dependent route and whole-plan closure incomplete.
 
@@ -511,4 +511,4 @@ Current documentation validation: COMPLETED by the Builder on 2026-10-02. The de
 
 Independent documentation review: PASS on 2026-10-02, following Oren's explicit approval, from a fresh read-only Codex process using the configured `reviewer` profile. No blocking findings or new architectural/ownership decisions were identified. The review established documentation coverage and consistency, not runtime acceptance: native bindings, active continuation/shared final, global enforcement, actual-channel delivery, the real Decision provider and exact Jessica completion remain subject to their implementation-stage evidence gates. The plan rewrite does not itself accept any P01–P11 implementation or runtime capability.
 
-Recovery for this revision is the verified pre-change Git commit in Section 4. The full previous plan/evidence remains available there; do not restore its historical runtime checkpoints over newer state. No runtime snapshot is required for this plan-only rewrite. The next gate is explicit Oren approval before push; PR creation requires separate approval. Do not push, create a PR or begin an implementation stage under the documentation/review authorization.
+Recovery for this revision is the verified pre-change Git commit in Section 4. The full previous plan/evidence remains available there; do not restore its historical runtime checkpoints over newer state. No runtime snapshot is required for this plan-only rewrite. Future implementation-stage and repository workflow approvals follow [AGENTS.md](AGENTS.md).
