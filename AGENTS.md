@@ -119,17 +119,24 @@ Oren's explicit approval.
 
 After approval, the Builder launches a fresh independent read-only Codex process
 using the configured `reviewer` profile from the target checkout/worktree and
-receives its findings directly. Oren does not launch the reviewer or copy/paste
-reviewer reports. The Builder must not substitute its own review or pass its
-reasoning/session context to the reviewer.
+receives its findings directly. Oren does not need to manually open or launch
+the reviewer session or copy/paste reviewer reports. The Builder may launch it
+from the current Builder workflow/session, but must not substitute its own review.
+
+Every independent review run MUST use a fresh isolated reviewer process/session.
+The reviewer MUST NOT inherit, fork, or receive the Builder conversation,
+reasoning context, hidden session state, summaries, or prior reviewer context.
+Reusing an existing reviewer conversation/session is not allowed. The reviewer
+starts only from the final proposed diff plus the minimum authoritative project
+sources it independently reads.
 
 The Builder fixes or explicitly dispositions findings, validates the resulting
 changes, and explains to Oren what was found and changed. If fixes materially
-change the proposed diff, automatically launch another fresh independent review
-of the final proposed diff. The initial review approval covers follow-up reviews
-needed to resolve findings within the approved scope. Review is complete only
-after a final independent reviewer PASS; then stop at the pre-push approval gate
-above.
+change the proposed diff, automatically launch a new fresh isolated reviewer
+process/session for another independent review of the final proposed diff. The
+initial review approval covers follow-up reviews needed to resolve findings
+within the approved scope. Review is complete only after a final independent
+reviewer PASS; then stop at the pre-push approval gate above.
 
 Use the final proposed diff plus the stage, capability or domain named by Oren
 as the review target; include the PR if one already exists. Before PR creation,
@@ -150,8 +157,8 @@ independently establish the minimum sufficient authoritative context:
   evidence.
 
 Do not broadly load unrelated plans, domains, architecture sections, historical
-documents, or builder-session reasoning. Builder summaries and passing tests
-are evidence, not authority.
+documents, or builder-session reasoning. Passing tests are evidence, not
+authority.
 
 If the PR makes claims about current runtime state or runtime acceptance, apply
 the repository's normal current-state evidence precedence rather than treating
