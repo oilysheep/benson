@@ -386,3 +386,255 @@ test('R02 retained legacy domain facts migrate only with explicit response and n
     }
   }
 });
+
+import { CURRENT_COMPLETION_SCHEMA_VERSION, MAX_WORKFLOW_ADMISSIONS,
+  completionProposalSchema } from '../envelope.mjs';
+import { p02Facts, p02Binding, p02Evidence, p02Accepted, p02Child, p02Workflow } from './fixtures/completion-v4.mjs';
+
+test('P02 v3 and v4 are strict transition readers, never implicit upgrades', () => {
+  const oldAuthority = createCompletionAuthority(nativeEvidence());
+  const oldRecord = acceptAgentCompletion(proposal(), oldAuthority);
+  const native = p02Evidence({ knownFacts: plain(oldRecord.facts) });
+  const { record, authority } = p02Accepted(native, plain(oldRecord.userResponse));
+  assert.equal(record.schemaVersion, 4);
+  assert.deepEqual(plain(record.facts), plain(oldRecord.facts));
+  assert.deepEqual(plain(record.userResponse), plain(oldRecord.userResponse));
+  assert.throws(() => validateCompletion(record, oldAuthority));
+  assert.throws(() => validateCompletion(oldRecord, authority));
+  for (const schemaVersion of [0, 1, 2, 5, '4', null]) {
+    assert.throws(() => createCompletionAuthority({ ...native, schemaVersion }));
+    assert.throws(() => acceptAgentCompletion({ schemaVersion, kind: native.kind,
+      facts: native.knownFacts, userResponse: oldRecord.userResponse }, authority), /version_or_kind/);
+  }
+  const noVersion = { ...native }; delete noVersion.schemaVersion;
+  assert.throws(() => createCompletionAuthority(noVersion), /native_evidence_shape/);
+  const noResponse = { schemaVersion: 4, kind: 'domain-task', facts: native.knownFacts };
+  assert.throws(() => acceptAgentCompletion(noResponse, authority), /agent_completion_shape/);
+  assert.throws(() => acceptAgentCompletion({ ...noResponse, userResponse: null }, authority), /user_response_required/);
+});
+
+test('P02 every trusted identity and revision survives round-trip and rejects forgery', () => {
+  const native = p02Evidence();
+  const { record, authority } = p02Accepted(native);
+  assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+  for (const key of Object.keys(record.binding)) {
+    const forged = plain(record);
+    const value = forged.binding[key];
+    forged.binding[key] = typeof value === 'number' ? value + 1 : typeof value === 'boolean' ? !value : 'forged';
+    assert.throws(() => validateCompletion(forged, authority), key);
+  }
+  for (const fake of [{}, plain(authority), native]) {
+    assert.throws(() => validateCompletion(record, fake), /native_completion_authority_required/);
+  }
+  const restoredAuthority = createCompletionAuthority(p02Evidence());
+  assert.deepEqual(plain(validateCompletion(plain(record), restoredAuthority)), plain(record));
+  const model = { schemaVersion: 4, kind: 'domain-task', facts: p02Facts(), userResponse: record.userResponse };
+  for (const key of ['binding', 'workflow', 'semantics', 'completion', 'results']) {
+    assert.throws(() => acceptAgentCompletion({ ...model, [key]: plain(native[key] ?? {}) }, authority), /agent_completion_shape/);
+  }
+});
+
+test('P02 membership evidence is ordered, complete, and mandatory for trusted references', () => {
+  const native = p02Evidence();
+  const changes = [
+    { workflowId: 'foreign' }, { conversationGeneration: 2 }, { membershipRevision: 2 },
+    { acceptedIntentRevision: 2 }, { admissions: [] },
+    { admissions: [{ admissionId: 'other', sequence: 1 }] },
+    { admissions: [{ admissionId: 'admission-1', sequence: 2 }] },
+    { admissions: [{ admissionId: 'admission-1', sequence: 1 }, { admissionId: 'admission-1', sequence: 2 }] },
+    { admissions: [{ admissionId: 'other', sequence: 2 }, { admissionId: 'admission-1', sequence: 1 }] },
+  ];
+  for (const change of changes) {
+    assert.throws(() => createCompletionAuthority({ ...native, workflow: { ...native.workflow, ...change } }));
+  }
+  for (const key of ['workflow', 'semantics']) {
+    const absent = { ...native }; delete absent[key];
+    assert.throws(() => createCompletionAuthority(absent), /native_evidence_shape/);
+  }
+  const admissions = Array.from({ length: MAX_WORKFLOW_ADMISSIONS }, (_, index) =>
+    ({ admissionId: `admission-${index + 1}`, sequence: index + 1 }));
+  createCompletionAuthority({ ...native, workflow: { ...native.workflow, admissions } });
+  assert.throws(() => createCompletionAuthority({ ...native, workflow: { ...native.workflow,
+    admissions: [...admissions, { admissionId: 'overflow', sequence: MAX_WORKFLOW_ADMISSIONS + 1 }] } }), /admissions_count/);
+  assert.equal(Object.hasOwn(p02Accepted(native).record, 'workflow'), false);
+});
+
+test('P02 roles use trusted task/workflow authority rather than fixed agent names', () => {
+  for (const agentId of ['jessica-vacuum', 'future-approved-agent']) {
+    const { record } = p02Accepted(p02Evidence({ binding: p02Binding({ agentId }) }));
+    assert.equal(record.kind, 'domain-task');
+  }
+  for (const change of [{ role: 'workflow-final' }, { taskId: null }, { sessionGeneration: 0 },
+    { runGeneration: 0 }, { caller: null }, { finality: true }]) {
+    assert.throws(() => createCompletionAuthority(p02Evidence({ binding: p02Binding(change) })));
+  }
+  const caller = p02Binding().caller;
+  assert.throws(() => createCompletionAuthority(p02Evidence({ binding: p02Binding({
+    caller: { ...caller, workflowId: 'foreign' } }) })), /caller_binding/);
+  assert.throws(() => createCompletionAuthority(p02Evidence({ knownFacts: p02Facts({ domainSchemaVersion: '2' }) })), /domain_version/);
+  const reminder = p02Accepted(p02Evidence({ knownFacts: p02Facts({ domain: 'reminder',
+    domainSchemaVersion: 'legacy-unversioned', operation: 'create' }),
+    binding: p02Binding({ agentId: 'reminder-service' }) })).record;
+  assert.equal(reminder.facts.domainSchemaVersion, 'legacy-unversioned');
+});
+
+test('P02 response and pending provenance remain explicit and bounded', () => {
+  const native = p02Evidence();
+  const authority = createCompletionAuthority(native);
+  const model = { schemaVersion: 4, kind: 'domain-task', facts: native.knownFacts };
+  for (const userResponse of [{ state: 'usable', text: '', language: 'en' },
+    { state: 'usable', text: 'x'.repeat(MAX_RENDERED_TEXT + 1), language: 'en' },
+    { state: 'unavailable' }, { state: 'missing' }]) {
+    assert.throws(() => acceptAgentCompletion({ ...model, userResponse }, authority));
+  }
+  for (const userResponse of [unavailableResponse,
+    { state: 'usable', text: 'א'.repeat(MAX_RENDERED_TEXT), language: 'he' }]) {
+    assert.deepEqual(plain(acceptAgentCompletion({ ...model, userResponse }, authority).userResponse), userResponse);
+  }
+  const unicodeResponse = { state: 'usable', text: '🧹'.repeat(MAX_RENDERED_TEXT / 2), language: 'en' };
+  assert.equal(acceptAgentCompletion({ ...model, userResponse: unicodeResponse }, authority).userResponse.text.length, MAX_RENDERED_TEXT);
+  assert.throws(() => acceptAgentCompletion({ ...model, userResponse: {
+    ...unicodeResponse, text: unicodeResponse.text + '🧹' } }, authority), /candidate_invalid/);
+  const pendingContext = { schemaVersion: 1, value: { question: 'Which room?', evidenceId: 'admission-1' },
+    binding: { requesterId: 'oren', conversationId: 'conversation-1' }, expiresAt: '2026-10-04T12:00:00Z' };
+  const nativePending = p02Evidence({ knownFacts: p02Facts({ status: 'clarification_required', verified: false,
+    verificationScope: [], effects: [], pendingContext }) });
+  const pendingRecord = p02Accepted(nativePending).record;
+  assert.deepEqual(plain(pendingRecord.facts.pendingContext), pendingContext);
+  assert.throws(() => createCompletionAuthority({ ...nativePending, knownFacts: { ...nativePending.knownFacts,
+    pendingContext: { ...pendingContext, binding: { ...pendingContext.binding, conversationId: 'foreign' } } } }), /pending_conversation/);
+});
+
+test('P02 domain outcomes and reconstruction retain effects independently of finalization', () => {
+  for (const [status, change] of [
+    ['success', {}], ['failure', { verified: false, error: { code: 'BUSINESS_FAILURE' } }],
+    ['partial', { verified: false, error: { code: 'PARTIAL_EXECUTION' } }],
+    ['unknown', { verified: 'unknown' }],
+    ['not_applicable', { verified: 'not_applicable', verificationScope: [], effects: [] }],
+    ['clarification_required', { verified: false, effects: [], pendingContext: { schemaVersion: 1,
+      value: { evidenceId: 'admission-1' }, binding: { requesterId: 'oren', conversationId: 'conversation-1' },
+      expiresAt: '2026-10-04T12:00:00Z' } }],
+  ]) {
+    const knownFacts = p02Facts({ status, ...change });
+    for (const [origin, coverage, outcome] of [['agent', 'complete', 'NORMAL'],
+      ['runtime', 'complete', 'RECOVERED'], ['runtime', 'incomplete', 'FAILED']]) {
+      const { record, authority } = p02Accepted(p02Evidence({ knownFacts, origin, coverage }));
+      assert.equal(record.completion.outcome, outcome);
+      assert.deepEqual(plain(record.facts), knownFacts);
+      assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+    }
+  }
+});
+
+test('P02 missing fact evidence yields FAILED and survives domain and final reconstruction', () => {
+  const fields = [...new Set(['verificationScope', ...Object.keys(p02Facts())])];
+  const checkKnown = (record, known, field) => {
+    assert.equal(record.completion.outcome, 'FAILED');
+    assert.ok(record.completion.gaps.some(gap => gap.code === 'FACT_NOT_ESTABLISHED' && gap.path === `facts.${field}`));
+    for (const [key, value] of Object.entries(known)) assert.deepEqual(plain(record.facts[key]), value, `${field}:${key}`);
+  };
+  for (const field of fields) {
+    for (const direct of [false, true]) {
+      const knownFacts = p02Facts(); delete knownFacts[field];
+      const binding = p02Binding(direct ? { caller: null, completionTarget: 'RESPONSE_CONTROLLER',
+        finality: true, deliveryPolicy: { eligible: true, reason: null } } : {});
+      const native = p02Evidence({ binding, knownFacts, origin: 'runtime' });
+      const child = p02Accepted(native);
+      checkKnown(child.record, knownFacts, field);
+      assert.deepEqual(plain(validateCompletion(plain(child.record), child.authority)), plain(child.record));
+      assert.throws(() => createCompletionAuthority({ ...native, origin: 'agent' }), /completion_evidence_insufficient/);
+      const final = direct ? p02Accepted(p02Evidence({
+        binding: { ...binding, role: 'direct-final', taskId: null },
+        knownFacts: { ...plain(child.record.facts), domain: null, domainSchemaVersion: null, operation: null },
+        results: [child], origin: 'runtime', semantics: null,
+      })) : p02Workflow([child], { evidence: { origin: 'runtime' } });
+      assert.equal(final.record.completion.outcome, 'FAILED');
+      assert.deepEqual(plain(final.record.results[0]), plain(child.record));
+      assert.deepEqual(plain(validateCompletion(plain(final.record), final.authority)), plain(final.record));
+    }
+    const child = p02Child('complete-child');
+    const binding = p02Binding({ role: 'workflow-final', taskId: null, caller: null, agentId: 'main',
+      completionTarget: 'RESPONSE_CONTROLLER', finality: true, deliveryPolicy: { eligible: true, reason: null } });
+    const knownFacts = p02Facts({ domain: null, domainSchemaVersion: null, operation: null,
+      data: { answer: 'Known partial owner result.' } }); delete knownFacts[field];
+    const semantics = { ownerRunId: binding.runId, ownerRunGeneration: binding.runGeneration,
+      acceptedIntentRevision: binding.acceptedIntentRevision, coverage: field === 'data' ? 'incomplete' : 'complete',
+      value: knownFacts.data ?? null };
+    const { record, authority } = p02Accepted(p02Evidence({ binding, knownFacts, results: [child], origin: 'runtime', semantics }));
+    checkKnown(record, knownFacts, field);
+    assert.deepEqual(plain(record.results[0]), plain(child.record));
+    assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+  }
+  assert.throws(() => createCompletionAuthority(p02Evidence({ origin: 'runtime', coverage: 'incomplete',
+    knownFacts: p02Facts({ verificationScope: [] }) })), /completion_verification_scope/);
+  assert.throws(() => createCompletionAuthority(p02Evidence({ origin: 'runtime',
+    knownFacts: p02Facts({ verificationScope: [] }), gaps: [{ code: 'FACT_NOT_ESTABLISHED',
+      path: 'facts.verificationScope', detail: 'Claimed absent despite an explicitly supplied invalid scope.' }] })),
+  /completion_verification_scope/);
+  const unsupportedVersion = p02Facts({ domainSchemaVersion: 'unknown' }); delete unsupportedVersion.domain;
+  assert.throws(() => createCompletionAuthority(p02Evidence({ origin: 'runtime', knownFacts: unsupportedVersion })), /completion_domain_version/);
+  const oldMissing = newFacts(); delete oldMissing.verificationScope;
+  assert.throws(() => createCompletionAuthority(nativeEvidence({ origin: 'runtime', knownFacts: oldMissing })), /completion_verification_scope/);
+});
+
+test('P02 supplementary schema is tied to canonical authority; unconstrained output is still checked', () => {
+  const native = p02Evidence();
+  const authority = createCompletionAuthority(native);
+  const schema = completionProposalSchema(authority);
+  assert.equal(schema.properties.schemaVersion.const, CURRENT_COMPLETION_SCHEMA_VERSION);
+  assert.equal(schema.properties.kind.const, native.kind);
+  assert.deepEqual(plain(schema.properties.facts.const), native.knownFacts);
+  assert.deepEqual(schema.required, ['schemaVersion', 'kind', 'facts', 'userResponse']);
+  assert.equal(schema.additionalProperties, false);
+  assert.equal(schema.properties.userResponse.oneOf[0].properties.text.maxLength, MAX_RENDERED_TEXT);
+  assert.ok(Object.isFrozen(schema.properties.facts.const));
+  assert.throws(() => completionProposalSchema({}), /native_completion_authority_required/);
+  const unconstrained = { schemaVersion: 4, kind: native.kind,
+    facts: p02Facts({ data: { physicallyCompleted: true } }), userResponse: unavailableResponse };
+  assert.throws(() => acceptAgentCompletion(unconstrained, authority), /evidence_mismatch/);
+});
+
+test('P02 migration fixtures preserve approved domain schemas and runtime outcomes', () => {
+  for (const entry of accepted) {
+    const legacy = result(entry.result, `p02-migration-${entry.id}`);
+    const facts = { status: legacy.status, domain: legacy.domain, domainSchemaVersion: legacy.domainSchemaVersion,
+      operation: legacy.operation, verified: legacy.verified,
+      verificationScope: legacy.verified ? ['legacy_tool_verification'] : [], data: legacy.data,
+      warnings: legacy.warnings, error: legacy.error, effects: [], uncertainty: [], pendingContext: legacy.pendingContext };
+    const conversationId = facts.pendingContext?.binding.conversationId ?? 'conversation-1';
+    const native = p02Evidence({ knownFacts: facts, binding: p02Binding({ conversationId, taskId: legacy.taskId }) });
+    const { record } = p02Accepted(native, unavailableResponse);
+    assert.deepEqual(plain(record.facts), plain(facts), entry.id);
+    assert.deepEqual(plain(record.userResponse), unavailableResponse);
+    // The fixture explicitly supplies owner response state and fresh native
+    // identity evidence; a legacy null candidate is never auto-promoted.
+    assert.throws(() => validateCompletion(legacy, createCompletionAuthority(native)));
+  }
+  for (const coverage of ['complete', 'incomplete']) {
+    const oldAuthority = createCompletionAuthority(nativeEvidence({ origin: 'runtime', coverage }));
+    const oldRecord = reconstructCompletion(oldAuthority);
+    const current = p02Accepted(p02Evidence({ knownFacts: plain(oldRecord.facts), origin: 'runtime', coverage })).record;
+    assert.equal(current.completion.outcome, oldRecord.completion.outcome);
+    assert.deepEqual(plain(current.facts), plain(oldRecord.facts));
+    assert.deepEqual(plain(current.userResponse), plain(oldRecord.userResponse));
+    assert.deepEqual(plain(current.completion.gaps), plain(oldRecord.completion.gaps));
+  }
+});
+
+test('P02 opaque native generations retain exact values and types without a Benson counter', () => {
+  const original = p02Binding();
+  const binding = p02Binding({ conversationGeneration: 'conversation-incarnation',
+    runGeneration: 'run-incarnation', sessionGeneration: 'session-incarnation',
+    caller: { ...original.caller, runGeneration: 'caller-run-incarnation', sessionGeneration: 'caller-session-incarnation' } });
+  const { record, authority } = p02Accepted(p02Evidence({ binding }));
+  assert.deepEqual(plain(record.binding), binding);
+  assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+  for (const key of ['conversationGeneration', 'runGeneration', 'sessionGeneration']) {
+    for (const value of [null, false, 0, -1, '', {}, 'x'.repeat(513)]) {
+      assert.throws(() => createCompletionAuthority(p02Evidence({ binding: { ...binding, [key]: value } })), /binding_generation/);
+    }
+  }
+  const numeric = p02Accepted(p02Evidence()).record;
+  const coerced = plain(numeric); coerced.binding.runGeneration = '1';
+  assert.throws(() => validateCompletion(coerced, createCompletionAuthority(p02Evidence())), /native_binding_mismatch/);
+});

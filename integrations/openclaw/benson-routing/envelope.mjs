@@ -435,11 +435,14 @@ export function assertPendingContextBinding(value, trusted, now = new Date()) {
   return freeze(normalized);
 }
 
-// R02 staged protocol. The exports above remain accepted-main v1 readers only.
-// Native lifecycle integration and persistence belong to R03/R04/R06.
+// One private completion family. The v1/v2 consumers above remain transition
+// readers; native integrations retain lifecycle, persistence and routing.
 import { isDeepStrictEqual } from 'node:util';
 
+// Pinned transition reader; new producers explicitly select v4.
 export const COMPLETION_SCHEMA_VERSION = 3;
+export const CURRENT_COMPLETION_SCHEMA_VERSION = 4;
+export const MAX_WORKFLOW_ADMISSIONS = 256;
 export const COMPLETION_KINDS = Object.freeze(['domain-task', 'final-workflow']);
 export const COMPLETION_STATUSES = Object.freeze([
   'success', 'clarification_required', 'failure', 'partial', 'unknown', 'not_applicable',
@@ -449,6 +452,11 @@ const FACT_KEYS = ['status', 'domain', 'domainSchemaVersion', 'operation', 'veri
 const BINDING_KEYS = ['requestId', 'workflowId', 'runId', 'agentId', 'sessionKey',
   'sessionId', 'generation', 'taskId', 'callerRunId', 'completionTarget', 'finality',
   'authorizationId', 'deliveryPolicy'];
+const V4_BINDING_KEYS = ['conversationId', 'conversationGeneration', 'admissionId',
+  'admissionSequence', 'workflowId', 'membershipRevision', 'acceptedIntentRevision',
+  'runId', 'runGeneration', 'agentId', 'sessionKey', 'sessionId', 'sessionGeneration',
+  'taskId', 'caller', 'role', 'completionTarget', 'finality', 'authorizationId', 'deliveryPolicy'];
+const NATIVE_EVIDENCE_KEYS = ['kind', 'binding', 'knownFacts', 'results', 'coverage', 'gaps', 'origin'];
 const RECORD_KEYS = ['schemaVersion', 'kind', 'facts', 'results', 'userResponse',
   'binding', 'completion'];
 const authorities = new WeakMap();
@@ -481,7 +489,45 @@ function userResponse(value) {
   }
   fail('user_response_state');
 }
-function nativeBinding(value, kind) {
+function revision(value) { return Number.isSafeInteger(value) && value > 0; }
+function generationToken(value) { return revision(value) || identifier(value); }
+function v4Binding(value, kind) {
+  exact(value, V4_BINDING_KEYS, 'completion_binding_shape');
+  for (const key of ['conversationId', 'admissionId', 'workflowId', 'runId', 'agentId',
+    'sessionKey', 'sessionId', 'authorizationId']) {
+    if (!identifier(value[key])) fail('completion_binding_identity');
+  }
+  for (const key of ['admissionSequence', 'membershipRevision', 'acceptedIntentRevision']) {
+    if (!revision(value[key])) fail('completion_binding_revision');
+  }
+  for (const key of ['conversationGeneration', 'runGeneration', 'sessionGeneration']) {
+    if (!generationToken(value[key])) fail('completion_binding_generation');
+  }
+  if (!['domain-task', 'direct-final', 'workflow-final'].includes(value.role) ||
+      kind !== (value.role === 'domain-task' ? 'domain-task' : 'final-workflow') ||
+      (kind === 'domain-task' ? !identifier(value.taskId) : value.taskId !== null) ||
+      !['CALLER', 'RESPONSE_CONTROLLER'].includes(value.completionTarget) ||
+      value.finality !== (value.completionTarget === 'RESPONSE_CONTROLLER') ||
+      (kind === 'final-workflow' && !value.finality)) fail('completion_binding_invalid');
+  if (value.completionTarget === 'CALLER') {
+    exact(value.caller, ['workflowId', 'runId', 'runGeneration', 'agentId', 'sessionKey',
+      'sessionId', 'sessionGeneration'], 'completion_caller_shape');
+    for (const key of ['workflowId', 'runId', 'agentId', 'sessionKey', 'sessionId']) {
+      if (!identifier(value.caller[key])) fail('completion_caller_identity');
+    }
+    if (value.caller.workflowId !== value.workflowId ||
+        !generationToken(value.caller.runGeneration) || !generationToken(value.caller.sessionGeneration)) {
+      fail('completion_caller_binding');
+    }
+  } else if (value.caller !== null) fail('completion_caller_binding');
+  exact(value.deliveryPolicy, ['eligible', 'reason'], 'completion_delivery_policy_shape');
+  if (typeof value.deliveryPolicy.eligible !== 'boolean' ||
+      (value.deliveryPolicy.reason !== null && !code(value.deliveryPolicy.reason)) ||
+      (!value.finality && value.deliveryPolicy.eligible)) fail('completion_delivery_policy_invalid');
+  return freeze(boundedCopy(value));
+}
+function nativeBinding(value, kind, version = COMPLETION_SCHEMA_VERSION) {
+  if (version === CURRENT_COMPLETION_SCHEMA_VERSION) return v4Binding(value, kind);
   exact(value, BINDING_KEYS, 'completion_binding_shape');
   for (const key of ['requestId', 'workflowId', 'runId', 'agentId', 'sessionKey',
     'sessionId', 'authorizationId']) if (!identifier(value[key])) fail('completion_binding_identity');
@@ -498,7 +544,17 @@ function nativeBinding(value, kind) {
       (!value.finality && value.deliveryPolicy.eligible)) fail('completion_delivery_policy_invalid');
   return freeze(boundedCopy(value));
 }
-function facts(value, kind, outcome) {
+function missingFactFields(missing) {
+  return FACT_KEYS.filter(field => missing.some(gap =>
+    gap.code === 'FACT_NOT_ESTABLISHED' && gap.path === `facts.${field}`));
+}
+function factAbsences(binding, ownFields, results) {
+  return [...new Set([...ownFields, ...(binding.role === 'direct-final' ?
+    missingFactFields(results[0]?.completion.gaps ?? []) : [])])];
+}
+function facts(value, kind, outcome, version, absentFields) {
+  const absent = field => version === CURRENT_COMPLETION_SCHEMA_VERSION &&
+    outcome === 'FAILED' && absentFields.includes(field);
   exact(value, FACT_KEYS, 'completion_facts_shape');
   if (!COMPLETION_STATUSES.includes(value.status) ||
       ![true, false, 'unknown', 'not_applicable'].includes(value.verified) ||
@@ -508,14 +564,22 @@ function facts(value, kind, outcome) {
       (value.error !== null && !isPlainObject(value.error)) ||
       (value.operation !== null && !identifier(value.operation))) fail('completion_facts_invalid');
   if (kind === 'domain-task') {
-    if (value.domain === null && value.domainSchemaVersion === null) {
+    if ((value.domain === null && absent('domain')) ||
+        (value.domainSchemaVersion === null && absent('domainSchemaVersion'))) {
+      if ((value.domain !== null && !Object.hasOwn(DOMAIN_VERSIONS, value.domain)) ||
+          (value.domainSchemaVersion !== null && !Object.values(DOMAIN_VERSIONS).includes(value.domainSchemaVersion))) {
+        fail('completion_domain_version');
+      }
+    } else if (value.domain === null && value.domainSchemaVersion === null) {
       if (outcome !== 'FAILED') fail('completion_domain_unknown');
     } else if (!Object.hasOwn(DOMAIN_VERSIONS, value.domain) ||
         DOMAIN_VERSIONS[value.domain] !== value.domainSchemaVersion) fail('completion_domain_version');
   } else if (value.domain !== null || value.domainSchemaVersion !== null || value.operation !== null) {
     fail('completion_workflow_domain');
   }
-  if (value.verified === true && value.verificationScope.length === 0) fail('completion_verification_scope');
+  if (value.verified === true && value.verificationScope.length === 0 && !absent('verificationScope')) {
+    fail('completion_verification_scope');
+  }
   if (value.verified === 'not_applicable' && (value.verificationScope.length || value.effects.length)) {
     fail('completion_verification_not_applicable');
   }
@@ -538,9 +602,28 @@ function facts(value, kind, outcome) {
 
 // Shape validation alone never establishes trust. Every consumer additionally
 // requires validateCompletion(record, nativeAuthority) against native evidence.
+function incompleteChildGap(record, index = 0) {
+  const path = record.schemaVersion === CURRENT_COMPLETION_SCHEMA_VERSION ?
+    `results.${index}` : `results.${record.binding.taskId}`;
+  return { code: 'CHILD_COMPLETION_INCOMPLETE', path,
+    detail: 'Child report preserves known facts but lacks complete semantics.' };
+}
+function completionBounds(record) {
+  if (record.schemaVersion === COMPLETION_SCHEMA_VERSION) {
+    boundedCopy(record);
+    return;
+  }
+  // Each v4 record component has the original budget. Its validated domain
+  // children keep their own budget when embedded two structural levels deeper.
+  boundedCopy({ ...record, results: [] });
+  const count = record.results.length;
+  const maximum = MAX_BYTES * (count + 1) + Math.max(0, count - 1);
+  if (Buffer.byteLength(JSON.stringify(record), 'utf8') > maximum) fail('json_bytes_exceeded');
+}
 function completionShape(raw) {
   exact(raw, RECORD_KEYS, 'completion_shape');
-  if (raw.schemaVersion !== COMPLETION_SCHEMA_VERSION || !COMPLETION_KINDS.includes(raw.kind)) {
+  if (![COMPLETION_SCHEMA_VERSION, CURRENT_COMPLETION_SCHEMA_VERSION].includes(raw.schemaVersion) ||
+      !COMPLETION_KINDS.includes(raw.kind)) {
     fail('completion_version_or_kind');
   }
   exact(raw.completion, ['outcome', 'gaps'], 'completion_outcome_shape');
@@ -550,15 +633,37 @@ function completionShape(raw) {
   if (!Array.isArray(raw.results) || raw.results.length > MAX_RESPONSE_RESULTS ||
       (raw.kind === 'domain-task' && raw.results.length)) fail('completion_results_count');
   const results = raw.results.map((result) => {
-    if (result?.kind !== 'domain-task') fail('completion_result_kind');
+    if (result?.kind !== 'domain-task' || result.schemaVersion !== raw.schemaVersion) fail('completion_result_kind');
     return completionShape(result);
   });
   if (new Set(results.map((result) => result.binding.taskId)).size !== results.length) fail('completion_duplicate_task');
+  const binding = nativeBinding(raw.binding, raw.kind, raw.schemaVersion);
   const result = { schemaVersion: raw.schemaVersion, kind: raw.kind,
-    facts: facts(raw.facts, raw.kind, raw.completion.outcome), results,
-    userResponse: userResponse(raw.userResponse), binding: nativeBinding(raw.binding, raw.kind),
+    facts: facts(raw.facts, raw.kind, raw.completion.outcome, raw.schemaVersion,
+      factAbsences(binding, missingFactFields(missing), results)), results,
+    userResponse: userResponse(raw.userResponse), binding,
     completion: { outcome: raw.completion.outcome, gaps: missing } };
   for (const child of results) {
+    if (raw.schemaVersion === CURRENT_COMPLETION_SCHEMA_VERSION) {
+      if (child.binding.workflowId !== result.binding.workflowId ||
+          child.binding.conversationId !== result.binding.conversationId ||
+          child.binding.conversationGeneration !== result.binding.conversationGeneration ||
+          child.binding.membershipRevision > result.binding.membershipRevision ||
+          child.binding.acceptedIntentRevision > result.binding.acceptedIntentRevision) {
+        fail('completion_result_correlation');
+      }
+      if (result.binding.role === 'direct-final') {
+        const keys = ['conversationId', 'conversationGeneration', 'admissionId', 'admissionSequence',
+          'workflowId', 'membershipRevision', 'acceptedIntentRevision', 'runId', 'runGeneration',
+          'agentId', 'sessionKey', 'sessionId', 'sessionGeneration', 'authorizationId', 'deliveryPolicy'];
+        if (results.length !== 1 || child.binding.completionTarget !== 'RESPONSE_CONTROLLER' ||
+            keys.some((key) => !isDeepStrictEqual(child.binding[key], result.binding[key]))) {
+          fail('completion_direct_result_binding');
+        }
+      } else if (child.binding.completionTarget !== 'CALLER' ||
+          child.binding.caller.agentId !== result.binding.agentId) fail('completion_result_caller');
+      continue;
+    }
     if (child.binding.requestId !== result.binding.requestId ||
         child.binding.workflowId !== result.binding.workflowId ||
         child.binding.sessionId !== result.binding.sessionId ||
@@ -575,7 +680,26 @@ function completionShape(raw) {
       fail('completion_empty_execution_proof');
     }
   }
-  boundedCopy(result);
+  if (raw.schemaVersion === CURRENT_COMPLETION_SCHEMA_VERSION && result.binding.role === 'direct-final') {
+    if (results.length !== 1) fail('completion_direct_results_count');
+    const projected = { ...results[0].facts, domain: null, domainSchemaVersion: null, operation: null };
+    if (!isDeepStrictEqual(boundedCopy(result.facts), boundedCopy(projected))) fail('completion_direct_facts');
+    if (result.completion.outcome !== results[0].completion.outcome) fail('completion_direct_outcome');
+    if (!isDeepStrictEqual(boundedCopy(result.userResponse), boundedCopy(results[0].userResponse))) {
+      fail('completion_direct_response');
+    }
+  }
+  completionBounds(result);
+  if (raw.schemaVersion === CURRENT_COMPLETION_SCHEMA_VERSION && result.kind === 'domain-task' &&
+      result.binding.completionTarget === 'RESPONSE_CONTROLLER') {
+    // Reserve the enclosing record's own component, including retained wording
+    // and the canonical recovery gap. The child has its independent budget.
+    boundedCopy({ ...result, kind: 'final-workflow',
+      facts: { ...result.facts, domain: null, domainSchemaVersion: null, operation: null },
+      results: [], binding: { ...result.binding, role: 'direct-final', taskId: null },
+      completion: { outcome: result.completion.outcome,
+        gaps: result.completion.outcome === 'FAILED' ? [incompleteChildGap(result)] : [] } });
+  }
   return freeze(result);
 }
 function authoritySnapshot(authority) {
@@ -589,39 +713,108 @@ function unknownFacts() {
     effects: [], uncertainty: [], pendingContext: null };
 }
 
+// This is a transient projection from the native lifecycle owner, not a ledger
+// or a claim that the installed host exposes atomic membership/intent reads.
+function checkWorkflowEvidence(workflow, binding, results) {
+  exact(workflow, ['workflowId', 'conversationId', 'conversationGeneration',
+    'membershipRevision', 'acceptedIntentRevision', 'membershipState', 'admissions'], 'native_workflow_shape');
+  for (const key of ['workflowId', 'conversationId', 'conversationGeneration',
+    'membershipRevision', 'acceptedIntentRevision']) {
+    if (workflow[key] !== binding[key]) fail('completion_workflow_binding_mismatch');
+  }
+  if (!['open', 'closed'].includes(workflow.membershipState) ||
+      (binding.finality && workflow.membershipState !== 'closed')) fail('completion_membership_not_closed');
+  if (!Array.isArray(workflow.admissions) || !workflow.admissions.length ||
+      workflow.admissions.length > MAX_WORKFLOW_ADMISSIONS) fail('native_admissions_count');
+  const members = new Map();
+  let previousSequence = 0;
+  for (const admission of workflow.admissions) {
+    exact(admission, ['admissionId', 'sequence'], 'native_admission_shape');
+    if (!identifier(admission.admissionId) || !revision(admission.sequence) ||
+        admission.sequence <= previousSequence || members.has(admission.admissionId)) {
+      fail('native_admission_order_or_identity');
+    }
+    members.set(admission.admissionId, admission.sequence);
+    previousSequence = admission.sequence;
+  }
+  for (const entry of [binding, ...results.map((result) => result.binding)]) {
+    if (members.get(entry.admissionId) !== entry.admissionSequence) fail('completion_admission_not_member');
+  }
+  if (binding.finality && binding.admissionId !== workflow.admissions[0].admissionId) {
+    fail('completion_final_admission_not_anchor');
+  }
+  boundedCopy(workflow);
+}
+function checkWorkflowSemantics(semantics, binding, known, missing) {
+  if (binding.role !== 'workflow-final') {
+    if (semantics !== null) fail('completion_semantics_not_applicable');
+    return;
+  }
+  if (semantics !== null) {
+    exact(semantics, ['ownerRunId', 'ownerRunGeneration', 'acceptedIntentRevision', 'coverage', 'value'],
+      'native_semantics_shape');
+    if (semantics.ownerRunId !== binding.runId || semantics.ownerRunGeneration !== binding.runGeneration ||
+        semantics.acceptedIntentRevision !== binding.acceptedIntentRevision) fail('completion_semantic_binding_mismatch');
+    if (!['complete', 'incomplete'].includes(semantics.coverage)) fail('native_semantics_coverage');
+    if (semantics.value !== null &&
+        !isDeepStrictEqual(boundedCopy(semantics.value), boundedCopy(known.data ?? null))) {
+      fail('completion_semantic_evidence_mismatch');
+    }
+  }
+  if (semantics === null || semantics.coverage !== 'complete' ||
+      !isPlainObject(semantics.value) || !Object.keys(semantics.value).length) {
+    missing.push({ code: 'WORKFLOW_SEMANTICS_NOT_ESTABLISHED', path: 'workflow.semantics',
+      detail: 'Child facts alone do not establish the final owner semantics for the accepted intent.' });
+  }
+}
+
 // Private, in-memory capability for an independently collected native evidence
 // snapshot. Never expose this constructor as an agent tool or feed agent JSON
 // into it. It owns no run state, completion history, retries or durable store.
 // Following restart the native owner reconstructs it from existing native state.
 export function createCompletionAuthority(native) {
-  exact(native, ['kind', 'binding', 'knownFacts', 'results', 'coverage', 'gaps', 'origin'], 'native_evidence_shape');
+  const version = Object.hasOwn(native ?? {}, 'schemaVersion') ? native.schemaVersion : COMPLETION_SCHEMA_VERSION;
+  if (version !== COMPLETION_SCHEMA_VERSION && version !== CURRENT_COMPLETION_SCHEMA_VERSION) {
+    fail('completion_version_or_kind');
+  }
+  // The original constructor remains a strict v3 reader. v4 is always explicit.
+  exact(native, version === CURRENT_COMPLETION_SCHEMA_VERSION ?
+    ['schemaVersion', ...NATIVE_EVIDENCE_KEYS, 'workflow', 'semantics'] : NATIVE_EVIDENCE_KEYS, 'native_evidence_shape');
   if (!COMPLETION_KINDS.includes(native.kind) || !['agent', 'runtime'].includes(native.origin) ||
       !['complete', 'incomplete'].includes(native.coverage) ||
       !isPlainObject(native.knownFacts) || Object.keys(native.knownFacts).some((key) => !FACT_KEYS.includes(key)) ||
       !Array.isArray(native.results) || native.results.length > MAX_RESPONSE_RESULTS ||
       (native.kind === 'domain-task' && native.results.length)) fail('native_evidence_invalid');
-  const binding = nativeBinding(native.binding, native.kind);
+  const binding = nativeBinding(native.binding, native.kind, version);
   const known = boundedCopy(native.knownFacts);
   const missing = gaps(native.gaps);
   if (native.coverage !== 'complete') missing.push({ code: 'EVIDENCE_COVERAGE_INCOMPLETE',
     path: 'evidence.coverage', detail: 'Native execution evidence does not account for all required work.' });
-  for (const field of FACT_KEYS) {
-    if (!Object.hasOwn(known, field)) missing.push({ code: 'FACT_NOT_ESTABLISHED',
+  const absentFields = FACT_KEYS.filter(field => !Object.hasOwn(known, field));
+  for (const field of absentFields) {
+    missing.push({ code: 'FACT_NOT_ESTABLISHED',
       path: `facts.${field}`, detail: 'Required semantic fact is absent from trusted native evidence.' });
   }
-  const results = native.results.map((entry) => {
+  const results = native.results.map((entry, index) => {
     exact(entry, ['record', 'authority'], 'native_result_evidence_shape');
     const record = validateCompletion(entry.record, entry.authority);
-    if (record.completion.outcome === 'FAILED') missing.push({ code: 'CHILD_COMPLETION_INCOMPLETE',
-      path: `results.${record.binding.taskId}`, detail: 'Child report preserves known facts but lacks complete semantics.' });
+    if (record.completion.outcome === 'FAILED') missing.push(incompleteChildGap(record, index));
     return record;
   });
+  if (version === CURRENT_COMPLETION_SCHEMA_VERSION) {
+    checkWorkflowEvidence(native.workflow, binding, results);
+    checkWorkflowSemantics(native.semantics, binding, known, missing);
+  }
   const normalized = facts({ ...unknownFacts(), ...known }, native.kind,
-    missing.length ? 'FAILED' : 'RECOVERED');
+    missing.length ? 'FAILED' : 'RECOVERED', version, factAbsences(binding, absentFields, results));
+  if (version === CURRENT_COMPLETION_SCHEMA_VERSION && normalized.pendingContext !== null &&
+      normalized.pendingContext.binding.conversationId !== binding.conversationId) {
+    fail('completion_pending_conversation_mismatch');
+  }
   gaps(missing); // Includes generated gaps; never silently truncate evidence.
   const authority = Object.freeze(Object.create(null));
   if (native.origin === 'agent' && missing.length) fail('completion_evidence_insufficient');
-  const snapshot = freeze({ kind: native.kind, binding, facts: normalized, results, gaps: missing,
+  const snapshot = freeze({ schemaVersion: version, kind: native.kind, binding, facts: normalized, results, gaps: missing,
     outcome: native.origin === 'agent' ? 'NORMAL' : missing.length ? 'FAILED' : 'RECOVERED' });
   // Validate correlation and collection bounds even before an agent is consulted.
   completionShape(recordFromSnapshot(snapshot, 'unavailable', snapshot.outcome));
@@ -629,17 +822,23 @@ export function createCompletionAuthority(native) {
   return authority;
 }
 function recordFromSnapshot(snapshot, response, outcome) {
-  return { schemaVersion: COMPLETION_SCHEMA_VERSION, kind: snapshot.kind,
+  const retainedResponse = snapshot.schemaVersion === CURRENT_COMPLETION_SCHEMA_VERSION &&
+    snapshot.binding.role === 'direct-final' ? snapshot.results[0]?.userResponse : null;
+  return { schemaVersion: snapshot.schemaVersion, kind: snapshot.kind,
     facts: snapshot.facts, results: snapshot.results,
-    userResponse: response === 'unavailable' ? { state: 'unavailable', reason: {
+    userResponse: response === 'unavailable' ? retainedResponse ?? { state: 'unavailable', reason: {
       code: 'RUNTIME_WORDING_UNAVAILABLE', detail: 'No owner-authored usable message is retained.' } } : response,
     binding: snapshot.binding, completion: { outcome, gaps: snapshot.gaps } };
 }
 function assertEvidence(record, snapshot) {
+  if (record.schemaVersion !== snapshot.schemaVersion) fail('completion_version_or_kind');
   if (!isDeepStrictEqual(boundedCopy(record.binding), boundedCopy(snapshot.binding)) ||
       record.kind !== snapshot.kind) fail('completion_native_binding_mismatch');
+  const sameResults = record.schemaVersion === CURRENT_COMPLETION_SCHEMA_VERSION ?
+    isDeepStrictEqual(record.results, snapshot.results) :
+    isDeepStrictEqual(boundedCopy(record.results), boundedCopy(snapshot.results));
   if (!isDeepStrictEqual(boundedCopy(record.facts), boundedCopy(snapshot.facts)) ||
-      !isDeepStrictEqual(boundedCopy(record.results), boundedCopy(snapshot.results))) fail('completion_evidence_mismatch');
+      !sameResults) fail('completion_evidence_mismatch');
   if (!isDeepStrictEqual(boundedCopy(record.completion.gaps), boundedCopy(snapshot.gaps)) ||
       record.completion.outcome !== snapshot.outcome) fail('completion_evidence_insufficient');
   if (snapshot.outcome !== 'NORMAL' && !isDeepStrictEqual(boundedCopy(record.userResponse),
@@ -656,7 +855,7 @@ export function validateCompletion(raw, nativeAuthority) {
 export function acceptAgentCompletion(proposal, nativeAuthority) {
   const snapshot = authoritySnapshot(nativeAuthority);
   exact(proposal, ['schemaVersion', 'kind', 'facts', 'userResponse'], 'agent_completion_shape');
-  if (proposal.schemaVersion !== COMPLETION_SCHEMA_VERSION || proposal.kind !== snapshot.kind) fail('completion_version_or_kind');
+  if (proposal.schemaVersion !== snapshot.schemaVersion || proposal.kind !== snapshot.kind) fail('completion_version_or_kind');
   if (snapshot.outcome !== 'NORMAL') fail('completion_origin_mismatch');
   if (!isDeepStrictEqual(boundedCopy(proposal.facts), boundedCopy(snapshot.facts))) fail('completion_evidence_mismatch');
   return validateCompletion(recordFromSnapshot(snapshot, userResponse(proposal.userResponse), 'NORMAL'), nativeAuthority);
@@ -668,4 +867,23 @@ export function reconstructCompletion(nativeAuthority) {
   const snapshot = authoritySnapshot(nativeAuthority);
   if (snapshot.outcome === 'NORMAL') fail('completion_origin_mismatch');
   return validateCompletion(recordFromSnapshot(snapshot, 'unavailable', snapshot.outcome), nativeAuthority);
+}
+
+// P06 may pass this supplementary JSON Schema to a proven constrained-output
+// surface. Unsupported/ignored constraints never replace validateCompletion.
+export function completionProposalSchema(nativeAuthority) {
+  const snapshot = authoritySnapshot(nativeAuthority);
+  if (snapshot.outcome !== 'NORMAL') fail('completion_origin_mismatch');
+  const object = (properties) => ({ type: 'object', additionalProperties: false,
+    required: Object.keys(properties), properties });
+  return freeze({ $schema: 'https://json-schema.org/draft/2020-12/schema',
+    ...object({ schemaVersion: { const: snapshot.schemaVersion }, kind: { const: snapshot.kind },
+      facts: { const: boundedCopy(snapshot.facts) }, userResponse: { oneOf: [
+        object({ state: { const: 'usable' }, text: { type: 'string', minLength: 1,
+          maxLength: MAX_RENDERED_TEXT, pattern: '\\S' }, language: { enum: ['en', 'he'] } }),
+        object({ state: { const: 'unavailable' }, reason: object({ code: { type: 'string',
+          pattern: '^[A-Z][A-Z0-9_]{0,63}$' }, detail: { type: 'string', minLength: 1,
+          maxLength: 512, pattern: '^[^\\u0000-\\u001f\\u007f]+$' } }) }),
+      ] } }),
+  });
 }
