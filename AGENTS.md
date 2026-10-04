@@ -67,6 +67,15 @@ scope through routine implementation and validation. Stop at the next genuine
 architecture decision, operator approval gate, physical E2E action, security
 concern, or blocker; do not stop merely to narrate routine progress.
 
+## Git checkout and worktree policy
+
+All Benson engineering work must use the primary checkout at
+`/home/oa/projects/benson`. Create stage branches directly in this checkout and
+run repository commands from it on the active branch.
+
+Do not create or use a Git worktree, temporary checkout, `/tmp` checkout, or
+parallel repository copy unless Oren explicitly approves an exception.
+
 ## Stage branch, plan closure, and PR workflow
 
 Default to one meaningful canonical stage per branch and PR, including approved
@@ -118,7 +127,7 @@ independent review gate has been reached. The first reviewer run requires
 Oren's explicit approval.
 
 After approval, the Builder launches a fresh independent read-only Codex process
-using the configured `reviewer` profile from the target checkout/worktree and
+using the configured `reviewer` profile from the target primary checkout and
 receives its findings directly. Oren does not need to manually open or launch
 the reviewer session or copy/paste reviewer reports. The Builder may launch it
 from the current Builder workflow/session, but must not substitute its own review.
