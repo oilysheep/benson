@@ -247,6 +247,266 @@ test('foreign, contradictory, duplicate and ambiguous completions fail closed', 
 import { createCompletionAuthority, acceptAgentCompletion, reconstructCompletion,
   validateCompletion, COMPLETION_SCHEMA_VERSION } from '../envelope.mjs';
 
+import { p02Facts, p02Binding, p02Evidence, p02Child, p02Workflow, p02Accepted } from './fixtures/completion-v4.mjs';
+
+test('P02 joined admissions and separate execution sessions share one trusted workflow', () => {
+  const first = p02Child('first-task');
+  const second = p02Child('second-task', { binding: { admissionId: 'admission-2', admissionSequence: 2,
+    membershipRevision: 2, acceptedIntentRevision: 2, runGeneration: 2, sessionGeneration: 2 } });
+  const workflow = { workflowId: 'workflow-1', conversationId: 'conversation-1', conversationGeneration: 1,
+    membershipRevision: 3, acceptedIntentRevision: 2, membershipState: 'closed', admissions: [
+      { admissionId: 'admission-1', sequence: 1 }, { admissionId: 'admission-2', sequence: 2 },
+    ] };
+  const { record, authority } = p02Workflow([first, second], { binding: {
+    membershipRevision: 3, acceptedIntentRevision: 2 }, evidence: { workflow } });
+  assert.equal(record.schemaVersion, 4);
+  assert.equal(record.results[1].binding.admissionId, 'admission-2');
+  assert.notEqual(record.results[0].binding.sessionId, record.results[1].binding.sessionId);
+  assert.notEqual(record.binding.runId, record.results[0].binding.caller.runId);
+  assert.deepEqual(plain(record.results), [plain(first.record), plain(second.record)]);
+  assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+  assert.equal(Object.hasOwn(record.binding, 'admissions'), false);
+  assert.throws(() => p02Workflow([first, second], { binding: {
+    admissionId: 'admission-2', admissionSequence: 2, membershipRevision: 3, acceptedIntentRevision: 2 },
+    evidence: { workflow } }), /final_admission_not_anchor/);
+});
+
+test('P02 final workflows accept bounded 0/1/many/max collections and preserve outcomes', () => {
+  for (const count of [0, 1, 3, MAX_RESPONSE_RESULTS]) {
+    const children = Array.from({ length: count }, (_, index) => p02Child(`task-${index}`));
+    for (const origin of ['agent', 'runtime']) {
+      const { record, authority } = p02Workflow(children, { evidence: { origin } });
+      assert.equal(record.results.length, count);
+      assert.equal(record.completion.outcome, origin === 'agent' ? 'NORMAL' : 'RECOVERED');
+      assert.deepEqual(plain(record.results), children.map((child) => plain(child.record)));
+      assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+    }
+  }
+  assert.throws(() => p02Workflow(Array.from({ length: MAX_RESPONSE_RESULTS + 1 }, (_, i) => p02Child(`overflow-${i}`))), /native_evidence_invalid/);
+  const child = p02Child('duplicate');
+  assert.throws(() => p02Workflow([child, child]), /duplicate_task/);
+  assert.throws(() => p02Workflow([], { facts: { verified: true, verificationScope: ['unproven'] } }), /empty_execution_proof/);
+  const future = p02Workflow([], { binding: { agentId: 'future-workflow-owner' } }).record;
+  assert.equal(future.kind, 'final-workflow');
+});
+
+test('P02 final acceptance rejects foreign, future, and unjoined child bindings', () => {
+  for (const binding of [{ workflowId: 'foreign' }, { conversationId: 'foreign' },
+    { conversationGeneration: 2 }, { membershipRevision: 2 }, { acceptedIntentRevision: 2 },
+    { admissionId: 'unjoined', admissionSequence: 2 },
+    { caller: { ...p02Binding().caller, agentId: 'foreign-owner' } }]) {
+    const child = p02Child('foreign-task', { binding: { ...binding,
+      ...(binding.workflowId ? { caller: { ...p02Binding().caller, workflowId: binding.workflowId } } : {}) } });
+    assert.throws(() => p02Workflow([child]));
+  }
+  const oldChild = protocolChild('old-version-child');
+  assert.throws(() => p02Workflow([oldChild]));
+  const native = p02Evidence({ binding: p02Binding({ role: 'workflow-final', taskId: null,
+    caller: null, completionTarget: 'RESPONSE_CONTROLLER', finality: true }),
+    knownFacts: p02Facts({ domain: null, domainSchemaVersion: null, operation: null }) });
+  assert.throws(() => createCompletionAuthority({ ...native, workflow: {
+    ...native.workflow, membershipState: 'open' } }), /membership_not_closed/);
+});
+
+test('P02 child facts cannot reconstruct missing owner semantics or accepted intent', () => {
+  const child = p02Child('known-success');
+  for (const semantics of [null, { ownerRunId: 'final-owner-run', ownerRunGeneration: 1,
+    acceptedIntentRevision: 1, coverage: 'incomplete', value: null }]) {
+    const { record } = p02Workflow([child], { evidence: { origin: 'runtime', semantics } });
+    assert.equal(record.completion.outcome, 'FAILED');
+    assert.equal(record.facts.status, 'success');
+    assert.deepEqual(plain(record.results[0]), plain(child.record));
+    assert.ok(record.completion.gaps.some((gap) => gap.code === 'WORKFLOW_SEMANTICS_NOT_ESTABLISHED'));
+    assert.throws(() => p02Workflow([child], { evidence: { semantics } }), /evidence_insufficient/);
+  }
+  for (const change of [{ ownerRunId: 'stale' }, { ownerRunGeneration: 2 }, { acceptedIntentRevision: 2 }]) {
+    assert.throws(() => p02Workflow([child], { evidence: { origin: 'runtime', semantics: {
+      ownerRunId: 'final-owner-run', ownerRunGeneration: 1, acceptedIntentRevision: 1,
+      coverage: 'complete', value: { answer: 'Requested work started.' }, ...change } } }), /semantic_binding_mismatch/);
+  }
+  const complete = p02Workflow([child], { evidence: { origin: 'runtime' } }).record;
+  assert.equal(complete.completion.outcome, 'RECOVERED');
+  assert.equal(complete.facts.status, 'success');
+});
+
+test('P02 semantic coverage cannot replace the retained owner meaning itself', () => {
+  const child = p02Child('known-child');
+  for (const value of [null, {}]) {
+    const { record } = p02Workflow([child], { facts: { data: value }, evidence: { origin: 'runtime',
+      semantics: { ownerRunId: 'final-owner-run', ownerRunGeneration: 1, acceptedIntentRevision: 1,
+        coverage: 'complete', value } } });
+    assert.equal(record.completion.outcome, 'FAILED');
+    assert.deepEqual(plain(record.results[0]), plain(child.record));
+    assert.ok(record.completion.gaps.some((gap) => gap.code === 'WORKFLOW_SEMANTICS_NOT_ESTABLISHED'));
+  }
+  assert.throws(() => p02Workflow([child], { evidence: { origin: 'runtime', semantics: {
+    ownerRunId: 'final-owner-run', ownerRunGeneration: 1, acceptedIntentRevision: 1,
+    coverage: 'complete', value: { answer: 'Invented owner meaning.' } } } }), /semantic_evidence_mismatch/);
+});
+
+test('P02 workflow reconstruction preserves business failure, partial effects, and missing facts', () => {
+  const success = p02Child('success', { evidence: { origin: 'runtime' } });
+  const failure = p02Child('failure', { facts: { status: 'failure', verified: false,
+    error: { code: 'BUSINESS_FAILURE' }, effects: [] }, evidence: { origin: 'runtime' } });
+  const partial = p02Child('partial', { facts: { status: 'partial', verified: false,
+    error: { code: 'PARTIAL_EXECUTION' } } });
+  const children = [success, failure, partial];
+  const { record } = p02Workflow(children, { facts: { status: 'partial', verified: false,
+    error: { code: 'PARTIAL_EXECUTION' } }, evidence: { origin: 'runtime' } });
+  assert.equal(record.completion.outcome, 'RECOVERED');
+  assert.deepEqual(record.results.map((child) => child.facts.status), ['success', 'failure', 'partial']);
+  assert.deepEqual(record.results.map((child) => child.completion.outcome), ['RECOVERED', 'RECOVERED', 'NORMAL']);
+  const failed = p02Workflow(children, { facts: { status: 'partial', verified: false,
+    error: { code: 'PARTIAL_EXECUTION' } }, evidence: { origin: 'runtime', semantics: null } }).record;
+  assert.equal(failed.completion.outcome, 'FAILED');
+  assert.equal(failed.facts.status, 'partial');
+  assert.deepEqual(plain(failed.results), plain(record.results));
+  assert.throws(() => p02Workflow(children), /success_hides_result/);
+  const childMissing = p02Child('missing', { evidence: { origin: 'runtime', coverage: 'incomplete' } });
+  const missing = p02Workflow([childMissing], { evidence: { origin: 'runtime' } }).record;
+  assert.equal(missing.completion.outcome, 'FAILED');
+  assert.equal(missing.results[0].facts.status, 'success');
+  assert.ok(missing.results[0].facts.effects.length);
+});
+
+test('P02 accepted child depth survives the final envelope for every outcome and destination', () => {
+  for (const [origin, coverage] of [['agent', 'complete'], ['runtime', 'complete'], ['runtime', 'incomplete']]) {
+    for (const direct of [false, true]) {
+      const binding = direct ? { caller: null, completionTarget: 'RESPONSE_CONTROLLER', finality: true,
+        deliveryPolicy: { eligible: true, reason: null } } : {};
+      const childAt = (depth) => {
+        let data = { effect: 'known' };
+        for (let index = 0; index < depth; index++) data = { nested: data };
+        return p02Child('deep-child', { binding, facts: { data }, evidence: { origin, coverage } });
+      };
+      for (const depth of [12, 13]) {
+        const child = childAt(depth);
+        const final = direct ? p02Accepted(p02Evidence({
+          binding: { ...plain(child.record.binding), role: 'direct-final', taskId: null },
+          knownFacts: { ...plain(child.record.facts), domain: null, domainSchemaVersion: null, operation: null },
+          results: [child], origin, semantics: null,
+        }), plain(child.record.userResponse)) : p02Workflow([child], { evidence: { origin } });
+        assert.equal(final.record.completion.outcome, child.record.completion.outcome);
+        assert.deepEqual(plain(final.record.results[0]), plain(child.record));
+        assert.deepEqual(plain(validateCompletion(plain(final.record), final.authority)), plain(final.record));
+      }
+      assert.throws(() => childAt(14), /json_too_deep/);
+    }
+  }
+});
+
+test('P02 v4 bounds each component and preserves large direct projections', () => {
+  const limit = 256 * 1024;
+  for (const [origin, coverage] of [['agent', 'complete'], ['runtime', 'complete'], ['runtime', 'incomplete']]) {
+    const options = { binding: { caller: null, completionTarget: 'RESPONSE_CONTROLLER', finality: true,
+      deliveryPolicy: { eligible: true, reason: null } }, evidence: { origin, coverage },
+      userResponse: { state: 'usable', text: '\\'.repeat(4096), language: 'en' } };
+    const large = { segments: Array(9).fill('x'.repeat(16384)) };
+    // Large valid children retain their own budget in either final path.
+    assert.ok(p02Child('sized-task', { ...options, binding: {}, facts: { data: large } }));
+    const largeChild = p02Child('sized-task', { ...options, facts: { data: large } });
+    const largeFinal = p02Accepted(p02Evidence({
+      binding: { ...plain(largeChild.record.binding), role: 'direct-final', taskId: null },
+      knownFacts: { ...plain(largeChild.record.facts), domain: null, domainSchemaVersion: null, operation: null },
+      results: [largeChild], origin, semantics: null,
+    }), plain(largeChild.record.userResponse));
+    assert.ok(Buffer.byteLength(JSON.stringify(largeFinal.record)) > limit);
+    assert.deepEqual(plain(largeFinal.record.results[0]), plain(largeChild.record));
+    assert.deepEqual(plain(validateCompletion(plain(largeFinal.record), largeFinal.authority)), plain(largeFinal.record));
+
+    const childAt = (length) => p02Child('sized-task', { ...options, facts: {
+      data: { segments: [...Array(15).fill('x'.repeat(16384)), 'x'.repeat(length)] },
+    } });
+    let low = 0, high = 16384;
+    while (low < high) {
+      const middle = Math.ceil((low + high) / 2);
+      try { childAt(middle); low = middle; }
+      catch (error) { assert.match(error.message, /json_bytes_exceeded/); high = middle - 1; }
+    }
+    const child = childAt(low);
+    assert.throws(() => childAt(low + 1), /json_bytes_exceeded/);
+    const binding = { ...plain(child.record.binding), role: 'direct-final', taskId: null };
+    const knownFacts = { ...plain(child.record.facts), domain: null, domainSchemaVersion: null, operation: null };
+    const { record, authority } = p02Accepted(p02Evidence({ binding, knownFacts, results: [child],
+      origin, semantics: null }), plain(child.record.userResponse));
+    assert.equal(record.completion.outcome, child.record.completion.outcome);
+    assert.deepEqual(plain(record.results[0]), plain(child.record));
+    assert.deepEqual(plain(record.facts), knownFacts);
+    assert.deepEqual(plain(record.userResponse), plain(child.record.userResponse));
+    const componentBytes = Math.max(Buffer.byteLength(JSON.stringify(child.record)),
+      Buffer.byteLength(JSON.stringify({ ...record, results: [] })));
+    assert.ok(componentBytes <= limit && limit - componentBytes < 1, `${origin}/${coverage}: ${componentBytes}`);
+    assert.ok(Buffer.byteLength(JSON.stringify(record)) <= 2 * limit);
+    assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+  }
+});
+
+test('P02 composed byte bounds preserve every accepted large caller result', () => {
+  const data = { segments: Array(9).fill('x'.repeat(16384)) };
+  for (const [origin, coverage] of [['agent', 'complete'], ['runtime', 'complete'], ['runtime', 'incomplete']]) {
+    for (const count of [1, 3, MAX_RESPONSE_RESULTS]) {
+      const children = Array.from({ length: count }, (_, index) => p02Child(`large-${index}`, {
+        facts: { data }, evidence: { origin, coverage },
+      }));
+      const { record, authority } = p02Workflow(children, { evidence: { origin } });
+      assert.equal(record.completion.outcome, children[0].record.completion.outcome);
+      assert.deepEqual(plain(record.results), children.map(child => plain(child.record)));
+      assert.ok(Buffer.byteLength(JSON.stringify(record)) <= (count + 1) * 256 * 1024 + count - 1);
+      assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+    }
+  }
+  const small = p02Child('small');
+  assert.throws(() => p02Workflow([small], { facts: {
+    data: { segments: Array(16).fill('x'.repeat(16300)) },
+  }, userResponse: { state: 'usable', text: '\\'.repeat(4096), language: 'en' } }), /json_bytes_exceeded/);
+});
+
+test('P02 failed child diagnostics remain bounded for maximum task identities', () => {
+  for (const length of [512, 505, 504]) {
+    const child = p02Child('x'.repeat(length), { binding: { runId: 'domain-run',
+      sessionKey: 'agent:domain:direct', sessionId: 'direct-session', caller: null,
+      completionTarget: 'RESPONSE_CONTROLLER', finality: true,
+      deliveryPolicy: { eligible: true, reason: null } }, evidence: { origin: 'runtime', coverage: 'incomplete' } });
+    const binding = { ...plain(child.record.binding), role: 'direct-final', taskId: null };
+    const knownFacts = { ...plain(child.record.facts), domain: null, domainSchemaVersion: null, operation: null };
+    const { record } = p02Accepted(p02Evidence({ binding, knownFacts, results: [child], origin: 'runtime', semantics: null }));
+    assert.equal(record.completion.outcome, 'FAILED');
+    assert.equal(record.facts.status, 'success');
+    assert.deepEqual(plain(record.results[0]), plain(child.record));
+    assert.deepEqual(record.completion.gaps.map(gap => gap.path), ['results.0']);
+  }
+  for (const count of [1, 3, MAX_RESPONSE_RESULTS]) {
+    const children = Array.from({ length: count }, (_, index) => p02Child(
+      String(index).padStart(3, '0') + 'x'.repeat(509), { binding: { runId: `run-${index}`,
+        sessionKey: `agent:domain:${index}`, sessionId: `session-${index}` },
+      evidence: { origin: 'runtime', coverage: 'incomplete' } }));
+    const { record } = p02Workflow(children, { evidence: { origin: 'runtime' } });
+    assert.equal(record.completion.outcome, 'FAILED');
+    assert.deepEqual(record.completion.gaps.map(gap => gap.path), children.map((_, index) => `results.${index}`));
+    assert.deepEqual(plain(record.results), children.map(child => plain(child.record)));
+  }
+});
+
+test('P02 direct final projection preserves source facts, outcome, wording, and cancellation', () => {
+  for (const [origin, coverage] of [['agent', 'complete'], ['runtime', 'complete'], ['runtime', 'incomplete']]) {
+    const child = p02Child('direct-task', { binding: { caller: null,
+      completionTarget: 'RESPONSE_CONTROLLER', finality: true,
+      deliveryPolicy: { eligible: false, reason: 'CANCELLED' } }, evidence: { origin, coverage } });
+    const binding = { ...plain(child.record.binding), role: 'direct-final', taskId: null };
+    const knownFacts = { ...plain(child.record.facts), domain: null, domainSchemaVersion: null, operation: null };
+    const native = p02Evidence({ binding, knownFacts, results: [child], origin, semantics: null });
+    const { record, authority } = p02Accepted(native, plain(child.record.userResponse));
+    assert.equal(record.completion.outcome, child.record.completion.outcome);
+    assert.deepEqual(plain(record.results[0]), plain(child.record));
+    assert.deepEqual(plain(record.userResponse), plain(child.record.userResponse));
+    assert.equal(record.binding.deliveryPolicy.eligible, false);
+    assert.deepEqual(plain(validateCompletion(plain(record), authority)), plain(record));
+    assert.throws(() => createCompletionAuthority({ ...native, knownFacts: { ...knownFacts, data: { invented: true } } }), /direct_facts/);
+    const forged = plain(record); forged.userResponse = { state: 'usable', text: 'Rewritten.', language: 'en' };
+    assert.throws(() => validateCompletion(forged, authority), /direct_response/);
+  }
+});
+
 function protocolFacts(changes = {}) {
   return { status: 'success', domain: 'jessica-vacuum', domainSchemaVersion: '1', operation: 'clean',
     verified: true, verificationScope: ['command_started'], data: { started: true },
