@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { createConversationContextController, MAX_ROUTING_CONTEXT_BYTES,
   MAX_ROUTING_REFERENCES, MAX_ROUTING_WORKFLOW_BYTES, MAX_TRANSCRIPT_HYDRATION_BYTES,
-  MAX_TRANSCRIPT_HYDRATION_EVENTS } from "../request-control.mjs";
+  MAX_TRANSCRIPT_HYDRATION_EVENTS, ROUTING_TRANSCRIPT_TIERS } from "../request-control.mjs";
 
 function fixture(changes = {}) {
   const binding = { agentId: "main", channel: "whatsapp", accountId: "account-a",
@@ -31,7 +31,8 @@ function fixture(changes = {}) {
   let registry = { sessionKey: binding.sessionKey, sessionId: binding.sessionId };
   let denied = false;
   const deniedEntries = new Set();
-  const calls = { model: 0, stats: 0, hydration: 0, receipt: 0, append: 0, workflow: 0 };
+  const calls = { model: 0, stats: 0, hydration: 0, receipt: 0, append: 0, workflow: 0, reads: [] };
+  let scopedAdmission;
   const infer = () => { calls.model++; throw new Error("inference forbidden"); };
   const native = {
     readTranscriptStatsSync(target) {
@@ -49,16 +50,35 @@ function fixture(changes = {}) {
     SessionManager: {
       generateSummary: infer, embedding: infer, agent: infer, semanticReranker: infer,
       async openBoundedAsync(target, { signal, onTruncated, ...limits }) {
-        const manager = await this.openAsync(target, undefined, limits, signal);
-        if (native.truncated) onTruncated();
-        return manager;
+        assert.equal(target.sessionId, binding.sessionId);
+        const admission = structuredClone(scopedAdmission);
+        assert.deepEqual(admission, receipt);
+        calls.hydration++;
+        calls.reads.push({ limits, admission });
+        const selected = native.onBounded?.(calls.reads.length) ?? {};
+        await native.onOpen?.();
+        signal?.throwIfAborted();
+        const cutoff = entries.findIndex((entry) => entry.id === admission.entryId);
+        let branch = entries.slice(0, cutoff);
+        if (selected.count !== undefined) branch = branch.slice(branch.length - selected.count);
+        if (selected.unfenced) branch = entries;
+        if (selected.truncated ?? native.truncated) onTruncated();
+        return { getSessionId: () => binding.sessionId,
+          getAppendParentId: () => selected.parentId === undefined ? admission.effectiveParentId : selected.parentId,
+          getBranch: () => branch.map((entry, index) => ({ ...entry, parentId: branch[index - 1]?.id ?? null })),
+          getEntry: (id) => branch.find((entry) => entry.id === id) };
       },
       readSessionContext(_target, read, { admission }) {
         calls.receipt++;
         assert.equal(admission.entryId, receipt.entryId);
         if (admission.generation !== receipt.generation) throw new Error("stale native receipt");
-        return read({ [Symbol.iterator]() { throw new Error("must not consume model context"); } },
-          { id: binding.sessionId });
+        scopedAdmission = admission;
+        try {
+          const result = read({ [Symbol.iterator]() { throw new Error("must not consume model context"); } },
+            { id: binding.sessionId });
+          assert.equal(typeof result?.then, "undefined", "native transaction callback must be synchronous");
+          return result;
+        } finally { scopedAdmission = undefined; }
       },
       async openAsync(_target, _cwd, limits) {
         assert.deepEqual(limits, { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
@@ -215,23 +235,89 @@ test("growth during bounded native hydration rejects the projection and preserve
   assert.equal(f.calls.model, 0);
 });
 
-test("omitted exact recent entries fail closed without requiring arbitrary older history", async () => {
-  const dense = fixture();
-  dense.native.truncated = true;
-  assert.equal((await dense.controller.projectRoutingContext(await dense.adopt())).reason, "exact_window_unavailable");
-  for (const omitted of [["m5"], ["m1", "m2", "m3", "m4", "m5", "m6"]]) {
+test("zero through five available previous exact messages are valid, without retries on complete reads", async () => {
+  for (const count of [0, 1, 2, 4, 5]) {
+    const f = fixture();
+    f.entries.splice(0, 7 - count);
+    f.entries[0].parentId = null;
+    const adoption = await f.adopt();
+    const projection = await f.controller.projectRoutingContext(adoption);
+    assert.equal(projection.status, "available");
+    assert.equal(projection.context.previous.length, count);
+    assert.deepEqual(projection.context.history, { previousMessageCount: count, historyTruncated: false });
+    assert.equal(f.calls.hydration, 1);
+    assert.equal(f.calls.model, 0);
+  }
+});
+
+test("deterministic tiers stop at complete reads or five safe previous messages, with at most three attempts", async () => {
+  for (const reads of [
+    [{ count: 1, truncated: true }, { count: 2, truncated: false }],
+    [{ count: 1, truncated: true }, { count: 2, truncated: true }, { count: 4, truncated: false }],
+    [{ count: 1, truncated: true }, { count: 2, truncated: true }, { count: 2, truncated: true }],
+    [{ count: 0, truncated: true }, { count: 0, truncated: true }, { count: 0, truncated: true }],
+    [{ count: 5, truncated: true }],
+  ]) {
+    const f = fixture();
+    f.native.onBounded = (attempt) => reads[attempt - 1];
+    const adoption = await f.adopt();
+    const projection = await f.controller.projectRoutingContext(adoption);
+    assert.equal(projection.status, "available");
+    assert.equal(f.calls.hydration, reads.length);
+    const last = reads.at(-1);
+    assert.deepEqual(projection.context.history,
+      { previousMessageCount: last.count, historyTruncated: last.truncated });
+    assert.deepEqual(projection.context.previous.map((entry) => entry.entryId),
+      Array.from({ length: last.count }, (_, i) => `m${8 - last.count + i}`));
+    for (const [i, read] of f.calls.reads.entries()) {
+      assert.deepEqual(read.limits, { maxBytes: ROUTING_TRANSCRIPT_TIERS[i].maxBytes,
+        maxEvents: ROUTING_TRANSCRIPT_TIERS[i].maxEvents - 2 });
+      assert.deepEqual(read.admission, adoption.receipt);
+    }
+    assert.equal(f.calls.model, 0);
+  }
+});
+
+test("an unproven suffix, native failure, binding, generation or provenance failure never enlarges the read", async () => {
+  for (const change of [
+    (f) => { f.native.onBounded = () => ({ count: 2, truncated: true, parentId: "future" }); },
+    (f) => { f.native.onBounded = () => ({ truncated: true, unfenced: true }); },
+    (f) => { f.native.onOpen = () => { throw new Error("native read failed"); }; },
+    (f) => { f.native.onOpen = () => { f.denied = true; }; },
+    (f) => { f.native.onBounded = () => ({ count: 0, truncated: true });
+      f.native.onOpen = () => { f.deniedEntries.add("current"); }; },
+    (f) => { f.native.onOpen = () => { f.registry = undefined; }; },
+    (f) => { f.native.onOpen = () => { f.receipt = { ...f.receipt, generation: "new" }; }; },
+    (f) => { f.native.onBounded = () => ({ count: 2, truncated: true });
+      f.native.onOpen = () => { f.state = { ...f.state, revision: "changed" }; }; },
+    (f) => { f.native.onBounded = () => ({ count: 2, truncated: true });
+      f.entries[6].message.__openclaw.transport.conversationRef = "another"; },
+  ]) {
     const f = fixture();
     const adoption = await f.adopt();
-    f.entries.splice(0, f.entries.length, ...f.entries.filter((entry) => !omitted.includes(entry.id)));
-    f.native.truncated = true;
-    assert.equal((await f.controller.projectRoutingContext(adoption)).reason, "exact_window_unavailable");
+    change(f);
+    const projection = await f.controller.projectRoutingContext(adoption);
+    assert.equal(projection.status, "unavailable");
+    assert.equal(projection.route, "main");
+    assert.equal(f.calls.hydration, 1);
+    assert.equal(f.calls.model, 0);
   }
+});
+
+test("concurrent append between attempts never changes the admitted cutoff or exposes future turns", async () => {
   const f = fixture();
   const adoption = await f.adopt();
-  f.entries.splice(0, 2);
+  f.native.onBounded = (attempt) => {
+    if (attempt === 2) f.entries.push(f.message("another-future", "user", "SECRET LATER TURN"));
+    return { count: attempt, truncated: attempt === 1 };
+  };
   const projection = await f.controller.projectRoutingContext(adoption);
   assert.equal(projection.status, "available");
-  assert.deepEqual(projection.context.previous.map((entry) => entry.entryId), ["m3", "m4", "m5", "m6", "m7"]);
+  assert.equal(f.calls.hydration, 2);
+  assert.doesNotMatch(projection.serialized, /PRIVATE FUTURE|SECRET LATER TURN/u);
+  assert.deepEqual(projection.context.previous.map((entry) => entry.entryId), ["m6", "m7"]);
+  assert.ok(f.calls.reads.every((read) => JSON.stringify(read.admission) === JSON.stringify(adoption.receipt)));
+  assert.equal(f.calls.model, 0);
 });
 
 test("only explicit trusted workflow IDs retrieve older exact turns, in native order", async () => {

@@ -5,7 +5,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
 import { createConversationContextController, MAX_TRANSCRIPT_HYDRATION_BYTES,
-  MAX_TRANSCRIPT_HYDRATION_EVENTS } from "../request-control.mjs";
+  MAX_TRANSCRIPT_HYDRATION_EVENTS, ROUTING_TRANSCRIPT_TIERS } from "../request-control.mjs";
 
 // Invoke with a fresh, explicit state fixture under the primary checkout's
 // output directory. Imports must follow environment isolation; no live state.
@@ -191,23 +191,15 @@ if (process.argv.includes("--measure-hydration")) {
       const manager = { readSessionContext: SessionManager.readSessionContext,
         async openBoundedAsync(target, { onTruncated, signal, ...limits }) {
           hydrationCalls++;
-          assert.deepEqual(limits, { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
-            maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 });
+          const tier = ROUTING_TRANSCRIPT_TIERS[hydrationCalls - 1];
+          assert.deepEqual(limits, { maxBytes: tier.maxBytes, maxEvents: tier.maxEvents - 2 });
           const bounded = await SessionManager.openBoundedAsync(target, { ...limits, signal, onTruncated });
           assert.equal(bounded.getHeader().type, "session");
-          assert.ok(bounded.getEntries().length + 1 <= MAX_TRANSCRIPT_HYDRATION_EVENTS);
-          if (dimension === "event-growth") assert.equal(bounded.getEntries().length + 1, MAX_TRANSCRIPT_HYDRATION_EVENTS - 1);
-          if (dimension === "boundary-growth") {
-            assert.equal(bounded.getEntries().length + 1, MAX_TRANSCRIPT_HYDRATION_EVENTS);
-            assert.equal(bounded.getEntries().filter((entry) => entry.type === "compaction").length, 1);
-          }
-          if (dimension === "sparse-boundary") {
-            assert.equal(bounded.getEntries().filter((entry) => entry.type === "message").length, 1);
-            assert.equal(bounded.getBranch().filter((entry) => entry.type === "message").length, 1);
-            assert.equal(bounded.getBranch()[0].parentId, null);
-          }
-          assert.ok(bounded.getEntries().reduce((bytes, entry) =>
-            bytes + Buffer.byteLength(JSON.stringify(entry), "utf8") + 1, 0) <= MAX_TRANSCRIPT_HYDRATION_BYTES);
+          assert.ok(bounded.getEntries().length + 1 <= tier.maxEvents);
+          if (dimension === "sparse-boundary") assert.equal(
+            bounded.getBranch().filter((entry) => entry.type === "message").length, hydrationCalls === 3 ? 1 : 0);
+          assert.ok([bounded.getHeader(), ...bounded.getEntries()].reduce((bytes, entry) =>
+            bytes + Buffer.byteLength(JSON.stringify(entry), "utf8") + 1, 0) <= tier.maxBytes);
           assert.equal(bounded.getEntries().some((entry) => entry.message?.idempotencyKey === "growth"), false);
           return bounded;
         } };
@@ -235,17 +227,70 @@ if (process.argv.includes("--measure-hydration")) {
       const projection = await access.projectRoutingContext(current.handle);
       if (["at-boundary", "sparse-boundary"].includes(dimension)) {
         assert.equal(before.eventCount, MAX_TRANSCRIPT_HYDRATION_EVENTS);
-        assert.deepEqual(projection,
-          { status: "unavailable", route: "main", reason: "exact_window_unavailable" });
+        assert.equal(projection.status, "available", JSON.stringify(projection));
+        assert.deepEqual(projection.context.history, dimension === "at-boundary" ?
+          { previousMessageCount: 5, historyTruncated: true } :
+          { previousMessageCount: 1, historyTruncated: false });
       } else assert.deepEqual(projection,
         { status: "unavailable", route: "main", reason: "transcript_hydration_bounds" });
       const hydrated = dimension.endsWith("growth") || ["at-boundary", "sparse-boundary"].includes(dimension);
-      assert.equal(hydrationCalls, hydrated ? 1 : 0);
-      assert.equal(statsCalls, hydrated ? 2 : 1);
+      assert.equal(hydrationCalls, dimension === "sparse-boundary" ? 3 : hydrated ? 1 : 0);
+      assert.equal(statsCalls, dimension === "sparse-boundary" ? 6 : hydrated ? 2 : 1);
       producer = null;
       assert.equal(modelCalls, 0);
     });
   }
+
+  test("native tier retries retain one admission fence, including a concurrent later append", async () => {
+    for (const [controls, expectedAttempts] of [[300, 2], [600, 3]]) {
+      const binding = await createBinding(`tiers-${controls}`);
+      const pair = await settledTurn(binding, "Jessica, clean the kitchen", `tiers-${controls}-prior`);
+      let writer = await SessionManager.openAsync(binding);
+      for (let i = 0; i < controls; i++) await writer.appendModelChange("openclaw", "delivery-mirror");
+      const reads = [];
+      let scopedAdmission;
+      const manager = {
+        readSessionContext(target, read, options) {
+          return SessionManager.readSessionContext(target, (messages, header) => {
+            scopedAdmission = options.admission;
+            try { return read(messages, header); }
+            finally { scopedAdmission = undefined; }
+          }, options);
+        },
+        async openBoundedAsync(target, options) {
+          const admission = structuredClone(scopedAdmission);
+          const tier = ROUTING_TRANSCRIPT_TIERS[reads.length];
+          assert.equal(options.maxBytes, tier.maxBytes);
+          assert.equal(options.maxEvents, tier.maxEvents - 2);
+          let truncated = false;
+          const snapshot = await SessionManager.openBoundedAsync(target, { ...options,
+            onTruncated() { truncated = true; options.onTruncated(); } });
+          const messages = snapshot.getBranch().filter((entry) => entry.type === "message");
+          reads.push({ admission, truncated, previousMessageCount: messages.length });
+          assert.equal(snapshot.getAppendParentId(), admission.effectiveParentId);
+          assert.ok(snapshot.getEntries().length + 1 <= tier.maxEvents);
+          assert.ok(!snapshot.getEntries().some((entry) => entry.id === admission.entryId));
+          if (controls === 600 && reads.length === 1) {
+            writer.appendMessage(assistant(binding, "PRIVATE CONCURRENT LATER TURN", "tiers-future"));
+          }
+          return snapshot;
+        },
+      };
+      const access = controller(binding, async () => workflow(), manager);
+      const current = await adopt(binding, "also the living room", `tiers-${controls}-current`, access);
+      writer = await SessionManager.openAsync(binding);
+      const projection = await access.projectRoutingContext(current.handle);
+      assert.equal(projection.status, "available", JSON.stringify(projection));
+      assert.equal(reads.length, expectedAttempts);
+      assert.ok(reads.slice(0, -1).every((read) => read.truncated && read.previousMessageCount === 0));
+      assert.equal(reads.at(-1).truncated, false);
+      assert.ok(reads.every((read) => JSON.stringify(read.admission) === JSON.stringify(current.handle.receipt)));
+      assert.deepEqual(projection.context.previous.map((entry) => entry.entryId), [pair.user, pair.assistant]);
+      assert.deepEqual(projection.context.history, { previousMessageCount: 2, historyTruncated: false });
+      assert.doesNotMatch(projection.serialized, /PRIVATE CONCURRENT LATER TURN/u);
+      assert.equal(modelCalls, 0);
+    }
+  });
 
   test("native recorder/direct-Main history survives reopen, compaction and later appends", async () => {
     const binding = await createBinding("custody", { peerId: "+15550000050" });
@@ -351,11 +396,11 @@ if (process.argv.includes("--measure-hydration")) {
     const projection = await access.projectRoutingContext(current.handle);
     assert.equal(projection.status, "available", JSON.stringify(projection));
     assert.equal(projection.context.older[0].text, "OLDER EXACT QUOTE\t\n");
+    const compactionWriter = await SessionManager.openAsync(binding);
     const compactingManager = { readSessionContext: SessionManager.readSessionContext.bind(SessionManager),
       async openBoundedAsync(...args) {
         const snapshot = await SessionManager.openBoundedAsync(...args);
-        const writer = await SessionManager.openAsync(binding);
-        writer.appendCompaction("CONCURRENT LOSSY SUMMARY", current.handle.receipt.entryId, 1000);
+        compactionWriter.appendCompaction("CONCURRENT LOSSY SUMMARY", current.handle.receipt.entryId, 1000);
         return snapshot;
       } };
     const compacting = controller(binding, async () => state, compactingManager);
@@ -367,15 +412,15 @@ if (process.argv.includes("--measure-hydration")) {
     assert.doesNotMatch(compacted.serialized, /CONCURRENT LOSSY SUMMARY/u);
     state = { ...state, revision: "workflow-fixture-2" };
     assert.equal((await access.revalidateProjection(projection)).reason, "workflow_context_changed");
+    const raceWriter = await SessionManager.openAsync(binding);
+    const raceEntries = raceWriter.getEntries();
+    const cutoff = raceEntries.findIndex((entry) => entry.id === current.handle.receipt.entryId);
+    assert.ok(cutoff >= 0);
+    const suffix = new Set(raceEntries.slice(cutoff).map((entry) => entry.id));
     const racingManager = { readSessionContext: SessionManager.readSessionContext.bind(SessionManager),
       async openBoundedAsync(...args) {
         const snapshot = await SessionManager.openBoundedAsync(...args);
-        const writer = await SessionManager.openAsync(binding);
-        const entries = writer.getEntries();
-        const cutoff = entries.findIndex((entry) => entry.id === current.handle.receipt.entryId);
-        assert.ok(cutoff >= 0);
-        const suffix = new Set(entries.slice(cutoff).map((entry) => entry.id));
-        writer.removeTrailingEntries((entry) => suffix.has(entry.id));
+        raceWriter.removeTrailingEntries((entry) => suffix.has(entry.id));
         return snapshot;
       } };
     const racing = controller(binding, async () => state, racingManager);

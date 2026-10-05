@@ -7,6 +7,11 @@ export const MAX_ROUTING_WORKFLOW_BYTES = 8192;
 export const MAX_ROUTING_REFERENCES = 16;
 export const MAX_TRANSCRIPT_HYDRATION_BYTES = 1048576;
 export const MAX_TRANSCRIPT_HYDRATION_EVENTS = 1024;
+export const ROUTING_TRANSCRIPT_TIERS = Object.freeze([
+  Object.freeze({ maxBytes: 262144, maxEvents: 256 }),
+  Object.freeze({ maxBytes: 524288, maxEvents: 512 }),
+  Object.freeze({ maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES, maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS }),
+]);
 const TRANSCRIPT_LIMITS = Object.freeze({ maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
   // Native maxEvents excludes the header and an optionally injected boundary.
   maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 });
@@ -272,10 +277,12 @@ export function createConversationContextController({
       requireContext(!recorder.isBlocked(), "admission_blocked");
       const receipt = recorder.getAdmissionReceipt();
       checkReceipt(receipt);
-      requireContext(exactText(recorder.getPersistedMessage()) === proposed.text, "current_text_mismatch");
+      const currentEntry = freeze({ type: "message", id: receipt.entryId,
+        message: jsonCopy(recorder.getPersistedMessage()) });
+      requireContext(projectMessage(currentEntry, true).text === proposed.text, "current_text_mismatch");
       const handle = freeze({ status: "available", receipt: jsonCopy(receipt) });
       adopted.set(handle, { receipt: handle.receipt, request: proposed.text,
-        requestId: admission.trusted.requestId });
+        requestId: admission.trusted.requestId, currentEntry });
       return handle;
     }),
 
@@ -288,28 +295,60 @@ export function createConversationContextController({
       signal?.throwIfAborted();
       checkBinding();
       checkReceipt(record.receipt);
-      let truncated = false;
-      // openAsync delegates to this public reader but does not expose its
-      // truncation callback. Normalized navigation cannot prove completeness.
-      const manager = await hydrate(() => SessionManager.openBoundedAsync(target,
-        { ...TRANSCRIPT_LIMITS, signal, onTruncated: () => { truncated = true; } }));
-      requireContext(!truncated, "exact_window_unavailable");
-      checkBinding();
-      checkReceipt(record.receipt);
-      const branch = manager.getBranch(record.receipt.entryId);
-      const currentEntry = branch.at(-1);
-      requireContext(manager.getSessionId() === target.sessionId &&
-        currentEntry?.id === record.receipt.entryId, "native_cutoff_unavailable");
+      let manager, priorBranch, previousEntries, previous, truncated;
+      for (const tier of ROUTING_TRANSCRIPT_TIERS) {
+        signal?.throwIfAborted();
+        checkBinding();
+        checkReceipt(record.receipt);
+        assertSync(assertAuthorized, binding, record.currentEntry);
+        truncated = false;
+        manager = await hydrate(() => {
+          let reading;
+          // Start synchronously inside the supported admission scope; the
+          // native worker captures this same before-current fence each time.
+          SessionManager.readSessionContext(target, (_messages, header) => {
+            requireContext(header?.id === target.sessionId, "native_context_unavailable");
+            reading = SessionManager.openBoundedAsync(target, { maxBytes: tier.maxBytes,
+              maxEvents: tier.maxEvents - 2, signal, onTruncated: () => { truncated = true; } });
+            // The synchronous transaction must not return a Promise. Contain
+            // rejection even if its closing authority check subsequently fails.
+            reading.catch(() => {});
+          }, { admission: record.receipt });
+          requireContext(reading, "native_cutoff_unavailable");
+          return reading;
+        });
+        signal?.throwIfAborted();
+        checkBinding();
+        checkReceipt(record.receipt);
+        assertSync(assertAuthorized, binding, record.currentEntry);
+        requireContext(manager.getSessionId() === target.sessionId &&
+          manager.getAppendParentId() === record.receipt.effectiveParentId, "native_cutoff_unavailable");
+        const branch = manager.getBranch();
+        requireContext(!branch.some((entry) => entry.id === record.receipt.entryId), "native_cutoff_unavailable");
+        const reset = branch.findLastIndex((entry) => entry.type === "reset");
+        priorBranch = branch.slice(reset + 1);
+        // Native selection walks backwards and stops at the first budget
+        // exclusion. Its active branch is a suffix, not a skip-and-fill sample.
+        // Normalized parent links alone would not establish this guarantee.
+        const conversationMessages = priorBranch.filter((entry) => entry.type === "message" &&
+          ["user", "assistant"].includes(entry.message?.role) && entry.message.display !== false &&
+          entry.message.excludeFromContext !== true &&
+          (entry.message.provenance === undefined || entry.message.provenance?.kind === "external_user"));
+        previousEntries = conversationMessages.slice(-ROUTING_PREVIOUS_MESSAGES);
+        previous = previousEntries.map((entry) => projectMessage(entry));
+        if (!truncated || previous.length === ROUTING_PREVIOUS_MESSAGES) break;
+        if (tier !== ROUTING_TRANSCRIPT_TIERS.at(-1)) {
+          requireContext(JSON.stringify(await workflows(record.receipt)) === JSON.stringify(before),
+            "workflow_context_changed");
+          signal?.throwIfAborted();
+          checkBinding();
+          checkReceipt(record.receipt);
+          manager = priorBranch = previousEntries = previous = undefined;
+        }
+      }
+      const currentEntry = record.currentEntry;
       const current = projectMessage(currentEntry, true);
       requireContext(current.text === record.request, "current_text_mismatch");
-      const reset = branch.findLastIndex((entry) => entry.type === "reset");
-      const priorBranch = branch.slice(reset + 1, -1);
-      const conversationMessages = priorBranch.filter((entry) => entry.type === "message" &&
-        ["user", "assistant"].includes(entry.message?.role) && entry.message.display !== false &&
-        entry.message.excludeFromContext !== true &&
-        (entry.message.provenance === undefined || entry.message.provenance?.kind === "external_user"));
-      const previousEntries = conversationMessages.slice(-ROUTING_PREVIOUS_MESSAGES);
-      const previous = previousEntries.map((entry) => projectMessage(entry));
       const includedEntries = [currentEntry, ...previousEntries];
       const alreadyIncluded = new Set([current.entryId, ...previous.map((entry) => entry.entryId)]);
       const positions = new Map(priorBranch.map((entry, index) => [entry.id, index]));
@@ -330,6 +369,7 @@ export function createConversationContextController({
       checkReceipt(record.receipt);
       requireContext(JSON.stringify(before) === JSON.stringify(after), "workflow_context_changed");
       const context = { current, previous, older, workflow: before,
+        history: { previousMessageCount: previous.length, historyTruncated: truncated },
         conversation: Object.fromEntries(["conversationRef", "channel", "accountId", "kind", "peerId",
           "threadId", "requesterId"].map((key) => [key, binding[key]])) };
       const serialized = JSON.stringify(context);
