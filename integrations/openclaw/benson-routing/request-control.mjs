@@ -330,10 +330,16 @@ export function createConversationContextController({
         // Native selection walks backwards and stops at the first budget
         // exclusion. Its active branch is a suffix, not a skip-and-fill sample.
         // Normalized parent links alone would not establish this guarantee.
-        const conversationMessages = priorBranch.filter((entry) => entry.type === "message" &&
-          ["user", "assistant"].includes(entry.message?.role) && entry.message.display !== false &&
-          entry.message.excludeFromContext !== true &&
-          (entry.message.provenance === undefined || entry.message.provenance?.kind === "external_user"));
+        const conversationMessages = priorBranch.filter((entry) => {
+          if (entry.type !== "message" || !["user", "assistant"].includes(entry.message?.role) ||
+              entry.message.display === false || entry.message.excludeFromContext === true) return false;
+          const provenance = entry.message.provenance;
+          if (provenance === undefined) return true;
+          requireContext(plain(provenance) &&
+            ["external_user", "inter_session", "internal_system"].includes(provenance.kind),
+          "input_provenance_unavailable");
+          return provenance.kind === "external_user";
+        });
         previousEntries = conversationMessages.slice(-ROUTING_PREVIOUS_MESSAGES);
         previous = previousEntries.map((entry) => projectMessage(entry));
         if (!truncated || previous.length === ROUTING_PREVIOUS_MESSAGES) break;

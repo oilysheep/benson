@@ -236,7 +236,7 @@ test("growth during bounded native hydration rejects the projection and preserve
 });
 
 test("zero through five available previous exact messages are valid, without retries on complete reads", async () => {
-  for (const count of [0, 1, 2, 4, 5]) {
+  for (const count of [0, 1, 2, 3, 4, 5]) {
     const f = fixture();
     f.entries.splice(0, 7 - count);
     f.entries[0].parentId = null;
@@ -252,9 +252,11 @@ test("zero through five available previous exact messages are valid, without ret
 
 test("deterministic tiers stop at complete reads or five safe previous messages, with at most three attempts", async () => {
   for (const reads of [
+    [{ count: 3, truncated: true }, { count: 5, truncated: true }],
     [{ count: 1, truncated: true }, { count: 2, truncated: false }],
     [{ count: 1, truncated: true }, { count: 2, truncated: true }, { count: 4, truncated: false }],
     [{ count: 1, truncated: true }, { count: 2, truncated: true }, { count: 2, truncated: true }],
+    [{ count: 3, truncated: true }, { count: 3, truncated: true }, { count: 3, truncated: true }],
     [{ count: 0, truncated: true }, { count: 0, truncated: true }, { count: 0, truncated: true }],
     [{ count: 5, truncated: true }],
   ]) {
@@ -280,7 +282,7 @@ test("deterministic tiers stop at complete reads or five safe previous messages,
 
 test("an unproven suffix, native failure, binding, generation or provenance failure never enlarges the read", async () => {
   for (const change of [
-    (f) => { f.native.onBounded = () => ({ count: 2, truncated: true, parentId: "future" }); },
+    (f) => { f.native.onBounded = () => ({ count: 3, truncated: true, parentId: "future" }); },
     (f) => { f.native.onBounded = () => ({ truncated: true, unfenced: true }); },
     (f) => { f.native.onOpen = () => { throw new Error("native read failed"); }; },
     (f) => { f.native.onOpen = () => { f.denied = true; }; },
@@ -299,6 +301,46 @@ test("an unproven suffix, native failure, binding, generation or provenance fail
     const projection = await f.controller.projectRoutingContext(adoption);
     assert.equal(projection.status, "unavailable");
     assert.equal(projection.route, "main");
+    assert.equal(Object.hasOwn(projection, "context"), false);
+    assert.equal(f.calls.hydration, 1);
+    assert.equal(f.calls.model, 0);
+  }
+});
+
+test("malformed visible provenance never becomes a complete or truncated safe suffix", async () => {
+  for (const provenance of [null, {}, { kind: "unknown" }, "external_user", ["external_user"]]) {
+    for (const role of ["user", "assistant"]) {
+      for (const truncated of [false, true]) {
+        const f = fixture();
+        f.entries.splice(0, 4);
+        f.entries[0].parentId = null;
+        f.entries[1].message.role = role;
+        f.entries[1].message.provenance = provenance;
+        f.native.onBounded = () => ({ count: 3, truncated });
+        const projection = await f.controller.projectRoutingContext(await f.adopt());
+        assert.equal(projection.status, "unavailable");
+        assert.equal(projection.reason, "input_provenance_unavailable");
+        assert.equal(projection.route, "main");
+        assert.equal(Object.hasOwn(projection, "context"), false);
+        assert.equal(f.calls.hydration, 1);
+        assert.equal(f.calls.model, 0);
+      }
+    }
+  }
+});
+
+test("recognized native internal provenance is omitted without treating it as malformed history", async () => {
+  for (const kind of ["internal_system", "inter_session"]) {
+    const f = fixture();
+    f.entries.splice(0, 4);
+    f.entries[0].parentId = null;
+    f.entries[1].message.role = "user";
+    f.entries[1].message.provenance = { kind };
+    const projection = await f.controller.projectRoutingContext(await f.adopt());
+    assert.equal(projection.status, "available");
+    assert.deepEqual(projection.context.previous.map((entry) => entry.entryId), ["m5", "m7"]);
+    assert.deepEqual(projection.context.history, { previousMessageCount: 2, historyTruncated: false });
+    assert.doesNotMatch(projection.serialized, /exact 6/u);
     assert.equal(f.calls.hydration, 1);
     assert.equal(f.calls.model, 0);
   }
