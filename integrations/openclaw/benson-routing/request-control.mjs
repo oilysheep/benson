@@ -5,6 +5,11 @@ export const ROUTING_PREVIOUS_MESSAGES = 5;
 export const MAX_ROUTING_CONTEXT_BYTES = 32768;
 export const MAX_ROUTING_WORKFLOW_BYTES = 8192;
 export const MAX_ROUTING_REFERENCES = 16;
+export const MAX_TRANSCRIPT_HYDRATION_BYTES = 1048576;
+export const MAX_TRANSCRIPT_HYDRATION_EVENTS = 1024;
+const TRANSCRIPT_LIMITS = Object.freeze({ maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
+  // Native maxEvents excludes the header and an optionally injected boundary.
+  maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 });
 const REASONS = new Set([
   "non_external", "command", "plugin_binding", "already_owned",
   "cancelled", "duplicate_or_recovery", "unsupported_input",
@@ -93,7 +98,7 @@ function exactText(message) {
 // assertion and the O07 read-only workflow projection. No registration or store
 // is created here. Serialized/model/channel records cannot recreate its handles.
 export function createConversationContextController({
-  SessionManager, getConversationSession, binding: suppliedBinding,
+  SessionManager, getConversationSession, readTranscriptStatsSync, binding: suppliedBinding,
   assertAuthorized, readWorkflowState,
 }) {
   const binding = freeze(jsonCopy(suppliedBinding));
@@ -109,6 +114,26 @@ export function createConversationContextController({
     .map((field) => [field, binding[field]])));
   const adopted = new WeakMap();
   const projections = new WeakMap();
+
+  function checkTranscriptBudget() {
+    requireContext(typeof readTranscriptStatsSync === "function", "transcript_stats_unavailable");
+    const stats = readTranscriptStatsSync(target);
+    if (stats && typeof stats.then === "function") Promise.resolve(stats).catch(() => {});
+    requireContext(plain(stats) && [stats.sizeBytes, stats.eventCount, stats.maxSeq]
+      .every((value) => Number.isSafeInteger(value) && value >= 0), "transcript_stats_unavailable");
+    // Native stats omit the final newline; bounded hydration charges it too.
+    requireContext(stats.sizeBytes + (stats.eventCount > 0 ? 1 : 0) <= TRANSCRIPT_LIMITS.maxBytes &&
+      stats.eventCount <= MAX_TRANSCRIPT_HYDRATION_EVENTS, "transcript_hydration_bounds");
+  }
+
+  async function hydrate(read) {
+    checkTranscriptBudget();
+    const manager = await read();
+    // Stats and hydration are separate snapshots. Native limits bound payload
+    // reads during growth; the second preflight rejects a now-oversized target.
+    checkTranscriptBudget();
+    return manager;
+  }
 
   function assertSync(assertion, ...args) {
     const result = assertion(...args);
@@ -263,10 +288,12 @@ export function createConversationContextController({
       signal?.throwIfAborted();
       checkBinding();
       checkReceipt(record.receipt);
-      // Full native hydration preserves exact originals across compaction. The
-      // admission-anchored native branch excludes later appends; generation and
-      // workflow checks surround hydration. No private transcript-version field.
-      const manager = await SessionManager.openAsync(target, undefined, undefined, signal);
+      let truncated = false;
+      // openAsync delegates to this public reader but does not expose its
+      // truncation callback. Normalized navigation cannot prove completeness.
+      const manager = await hydrate(() => SessionManager.openBoundedAsync(target,
+        { ...TRANSCRIPT_LIMITS, signal, onTruncated: () => { truncated = true; } }));
+      requireContext(!truncated, "exact_window_unavailable");
       checkBinding();
       checkReceipt(record.receipt);
       const branch = manager.getBranch(record.receipt.entryId);
@@ -340,7 +367,8 @@ export function createConversationContextController({
       checkBinding();
       checkReceipt(record.receipt);
       assertSync(assertCurrent);
-      const manager = await SessionManager.openModelContextAsync(target, { through: receipt });
+      const manager = await hydrate(() => SessionManager.openModelContextAsync(target,
+        { through: receipt, limits: TRANSCRIPT_LIMITS }));
       const entry = manager.getEntry(receipt.entryId);
       requireContext(entry?.message?.role === "assistant", "native_final_receipt_invalid");
       projectMessage(entry);
@@ -369,7 +397,7 @@ export function createConversationContextController({
           assertSync(assertCurrent);
         };
         assertFinal();
-        const manager = await SessionManager.openAsync(target);
+        const manager = await hydrate(() => SessionManager.openAsync(target, undefined, TRANSCRIPT_LIMITS));
         assertFinal();
         writeAttempted = true;
         const result = manager.appendMessageWithTranscriptAnchor(copy, { beforeFreshMessageCommit: assertFinal });

@@ -4,7 +4,8 @@ import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import test from "node:test";
-import { createConversationContextController } from "../request-control.mjs";
+import { createConversationContextController, MAX_TRANSCRIPT_HYDRATION_BYTES,
+  MAX_TRANSCRIPT_HYDRATION_EVENTS } from "../request-control.mjs";
 
 // Invoke with a fresh, explicit state fixture under the primary checkout's
 // output directory. Imports must follow environment isolation; no live state.
@@ -18,7 +19,8 @@ const packageRoot = process.env.OPENCLAW_PACKAGE_ROOT ?? resolve(homedir(), ".np
 assert.equal(JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")).version, "2026.9.6");
 const installed = (name) => import(pathToFileURL(join(packageRoot, "dist", name)).href);
 const { SessionManager } = await installed("plugin-sdk/agent-sessions.js");
-const { getConversationSession, upsertSessionEntry, deleteSessionEntry, resolveStorePath, getSessionEntry } =
+const { getConversationSession, upsertSessionEntry, deleteSessionEntry, resolveStorePath, getSessionEntry,
+  readTranscriptStatsSync } =
   await installed("plugin-sdk/session-store-runtime.js");
 // Only the fixture plays OpenClaw's host producer: the native recorder factory
 // and native address builder are not production Benson import dependencies.
@@ -34,8 +36,10 @@ function expectedState(binding) {
     sessionKey: binding.sessionKey, readConsistency: "latest" });
   return { abortedLastRun: entry.abortedLastRun, status: entry.status };
 }
-function controller(binding, readWorkflowState = async () => workflow(), manager = SessionManager) {
-  return createConversationContextController({ SessionManager: manager, getConversationSession, binding,
+function controller(binding, readWorkflowState = async () => workflow(), manager = SessionManager,
+  readStats = readTranscriptStatsSync) {
+  return createConversationContextController({ SessionManager: manager, getConversationSession,
+    readTranscriptStatsSync: readStats, binding,
     assertAuthorized: (actual) => { assert.deepEqual(actual, binding); }, readWorkflowState });
 }
 function input(binding, text, key, senderId = binding.requesterId) {
@@ -102,7 +106,52 @@ async function settledTurn(binding, text, key, senderId = binding.requesterId) {
   return { user: accepted.messageId, assistant: final.entryId };
 }
 
-if (process.argv.includes("--verify-restart")) {
+if (process.argv.includes("--measure-hydration")) {
+  // Synthetic Pi sizing evidence, using only the installed native producer and
+  // readers. Run each profile in a fresh process/state directory with --expose-gc.
+  const profile = process.argv[process.argv.indexOf("--measure-hydration") + 1];
+  const [messages, textBytes] = profile.split(":").map(Number);
+  assert.ok(Number.isSafeInteger(messages) && messages > 0 && messages <= 8192);
+  assert.ok(Number.isSafeInteger(textBytes) && textBytes > 0 && textBytes <= 65536);
+  assert.equal(typeof globalThis.gc, "function");
+  const binding = await createBinding("measurement");
+  let producer = await SessionManager.openAsync(binding);
+  for (let index = 0; index < messages; index++) {
+    producer.appendMessage(assistant(binding, "x".repeat(textBytes), `measure-${index}`));
+  }
+  producer.flushPendingPersistence();
+  producer = null;
+  globalThis.gc();
+  const runs = [];
+  for (const kind of ["full", "bounded"]) for (let index = 0; index < 3; index++) {
+    const before = process.memoryUsage();
+    const statsStart = performance.now();
+    const stats = readTranscriptStatsSync(binding);
+    const statsMs = performance.now() - statsStart;
+    const openStart = performance.now();
+    let reader = await SessionManager.openAsync(binding, undefined, kind === "bounded" ?
+      { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES, maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 } : undefined);
+    const openMs = performance.now() - openStart;
+    if (kind === "full") assert.equal(reader.getEntries().length, messages);
+    const after = process.memoryUsage();
+    runs.push({ kind, stats, statsMs, openMs, before, after,
+      maxRssKiB: process.resourceUsage().maxRSS });
+    reader = null;
+    globalThis.gc();
+  }
+  const evidence = { node: process.version, platform: process.platform, arch: process.arch,
+    boundedLimits: { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES, maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 },
+    openclaw: "2026.9.6", profile: { messages, textBytes }, runs, modelCalls };
+  writeFileSync(join(fixtureRoot, "hydration-measurement.json"), JSON.stringify(evidence, null, 2) + "\n");
+  console.log(JSON.stringify({ profile, stats: runs[0].stats,
+    statsMs: runs.map((run) => +run.statsMs.toFixed(2)),
+    openMs: runs.map((run) => +run.openMs.toFixed(2)),
+    rssDelta: runs.map((run) => run.after.rss - run.before.rss),
+    heapDelta: runs.map((run) => run.after.heapUsed - run.before.heapUsed),
+    maxRssKiB: Math.max(...runs.map((run) => run.maxRssKiB)), modelCalls }));
+  assert.equal(modelCalls, 0);
+  globalThis.fetch = originalFetch;
+} else if (process.argv.includes("--verify-restart")) {
   const retained = JSON.parse(readFileSync(join(fixtureRoot, "restart-fixture.json"), "utf8"));
   const resumed = await adopt(retained.binding, retained.text, retained.key);
   assert.equal(resumed.handle.receipt.entryId, retained.receipt.entryId);
@@ -117,6 +166,87 @@ if (process.argv.includes("--verify-restart")) {
   assert.equal(modelCalls, 0);
   console.log("NATIVE_P03_RESTART_PASS");
 } else {
+  for (const dimension of ["bytes", "events", "at-boundary", "sparse-boundary", "growth", "event-growth", "boundary-growth"]) {
+    test(`native ${dimension} hydration guard enforces bytes/events`, async () => {
+      const binding = await createBinding(`hydration-${dimension}`);
+      let producer = await SessionManager.openAsync(binding);
+      if (dimension === "bytes") {
+        producer.appendMessage(assistant(binding, "x".repeat(MAX_TRANSCRIPT_HYDRATION_BYTES), "oversized"));
+      } else if (dimension === "sparse-boundary") {
+        await adopt(binding, "exact earlier user", "sparse-earlier");
+        producer = await SessionManager.openAsync(binding);
+        for (let index = 0; index < MAX_TRANSCRIPT_HYDRATION_EVENTS - 3; index++) {
+          await producer.appendModelChange("openclaw", "delivery-mirror");
+        }
+      } else if (["events", "at-boundary"].includes(dimension)) {
+        // Include the header and adopted current turn in the total event count;
+        // both boundary cases remain below the independent byte ceiling.
+        const count = MAX_TRANSCRIPT_HYDRATION_EVENTS - (dimension === "at-boundary" ? 2 : 0);
+        for (let index = 0; index < count; index++) {
+          producer.appendMessage(assistant(binding, "x", `event-${index}`));
+        }
+      }
+      let hydrationCalls = 0;
+      let statsCalls = 0;
+      const manager = { readSessionContext: SessionManager.readSessionContext,
+        async openBoundedAsync(target, { onTruncated, signal, ...limits }) {
+          hydrationCalls++;
+          assert.deepEqual(limits, { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
+            maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 });
+          const bounded = await SessionManager.openBoundedAsync(target, { ...limits, signal, onTruncated });
+          assert.equal(bounded.getHeader().type, "session");
+          assert.ok(bounded.getEntries().length + 1 <= MAX_TRANSCRIPT_HYDRATION_EVENTS);
+          if (dimension === "event-growth") assert.equal(bounded.getEntries().length + 1, MAX_TRANSCRIPT_HYDRATION_EVENTS - 1);
+          if (dimension === "boundary-growth") {
+            assert.equal(bounded.getEntries().length + 1, MAX_TRANSCRIPT_HYDRATION_EVENTS);
+            assert.equal(bounded.getEntries().filter((entry) => entry.type === "compaction").length, 1);
+          }
+          if (dimension === "sparse-boundary") {
+            assert.equal(bounded.getEntries().filter((entry) => entry.type === "message").length, 1);
+            assert.equal(bounded.getBranch().filter((entry) => entry.type === "message").length, 1);
+            assert.equal(bounded.getBranch()[0].parentId, null);
+          }
+          assert.ok(bounded.getEntries().reduce((bytes, entry) =>
+            bytes + Buffer.byteLength(JSON.stringify(entry), "utf8") + 1, 0) <= MAX_TRANSCRIPT_HYDRATION_BYTES);
+          assert.equal(bounded.getEntries().some((entry) => entry.message?.idempotencyKey === "growth"), false);
+          return bounded;
+        } };
+      const access = controller(binding, async () => workflow(), manager, (target) => {
+        const stats = readTranscriptStatsSync(target);
+        statsCalls++;
+        if (dimension.endsWith("growth") && statsCalls === 1) {
+          // Grow after the preflight snapshot, before the actual native reader.
+          if (dimension === "growth") {
+            producer.appendMessage(assistant(binding, "x".repeat(MAX_TRANSCRIPT_HYDRATION_BYTES), "growth"));
+          } else {
+            if (dimension === "boundary-growth") producer.appendCompaction("existing native summary",
+              producer.getLeafId(), 100);
+            for (let index = 0; index < MAX_TRANSCRIPT_HYDRATION_EVENTS; index++) {
+              producer.appendMessage(assistant(binding, "x", `growth-${index}`));
+            }
+          }
+        }
+        return stats;
+      });
+      const current = await adopt(binding, "bounded current", `${dimension}-current`, access);
+      if (dimension.endsWith("growth")) producer = await SessionManager.openAsync(binding);
+      const before = readTranscriptStatsSync(binding);
+      if (dimension === "events") assert.ok(before.sizeBytes < MAX_TRANSCRIPT_HYDRATION_BYTES);
+      const projection = await access.projectRoutingContext(current.handle);
+      if (["at-boundary", "sparse-boundary"].includes(dimension)) {
+        assert.equal(before.eventCount, MAX_TRANSCRIPT_HYDRATION_EVENTS);
+        assert.deepEqual(projection,
+          { status: "unavailable", route: "main", reason: "exact_window_unavailable" });
+      } else assert.deepEqual(projection,
+        { status: "unavailable", route: "main", reason: "transcript_hydration_bounds" });
+      const hydrated = dimension.endsWith("growth") || ["at-boundary", "sparse-boundary"].includes(dimension);
+      assert.equal(hydrationCalls, hydrated ? 1 : 0);
+      assert.equal(statsCalls, hydrated ? 2 : 1);
+      producer = null;
+      assert.equal(modelCalls, 0);
+    });
+  }
+
   test("native recorder/direct-Main history survives reopen, compaction and later appends", async () => {
     const binding = await createBinding("custody", { peerId: "+15550000050" });
     const messages = [];
@@ -222,8 +352,8 @@ if (process.argv.includes("--verify-restart")) {
     assert.equal(projection.status, "available", JSON.stringify(projection));
     assert.equal(projection.context.older[0].text, "OLDER EXACT QUOTE\t\n");
     const compactingManager = { readSessionContext: SessionManager.readSessionContext.bind(SessionManager),
-      async openAsync(...args) {
-        const snapshot = await SessionManager.openAsync(...args);
+      async openBoundedAsync(...args) {
+        const snapshot = await SessionManager.openBoundedAsync(...args);
         const writer = await SessionManager.openAsync(binding);
         writer.appendCompaction("CONCURRENT LOSSY SUMMARY", current.handle.receipt.entryId, 1000);
         return snapshot;
@@ -238,8 +368,8 @@ if (process.argv.includes("--verify-restart")) {
     state = { ...state, revision: "workflow-fixture-2" };
     assert.equal((await access.revalidateProjection(projection)).reason, "workflow_context_changed");
     const racingManager = { readSessionContext: SessionManager.readSessionContext.bind(SessionManager),
-      async openAsync(...args) {
-        const snapshot = await SessionManager.openAsync(...args);
+      async openBoundedAsync(...args) {
+        const snapshot = await SessionManager.openBoundedAsync(...args);
         const writer = await SessionManager.openAsync(binding);
         const entries = writer.getEntries();
         const cutoff = entries.findIndex((entry) => entry.id === current.handle.receipt.entryId);

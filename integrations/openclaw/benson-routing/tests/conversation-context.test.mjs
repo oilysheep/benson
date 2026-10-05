@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createConversationContextController, MAX_ROUTING_CONTEXT_BYTES,
-  MAX_ROUTING_REFERENCES, MAX_ROUTING_WORKFLOW_BYTES } from "../request-control.mjs";
+  MAX_ROUTING_REFERENCES, MAX_ROUTING_WORKFLOW_BYTES, MAX_TRANSCRIPT_HYDRATION_BYTES,
+  MAX_TRANSCRIPT_HYDRATION_EVENTS } from "../request-control.mjs";
 
 function fixture(changes = {}) {
   const binding = { agentId: "main", channel: "whatsapp", accountId: "account-a",
@@ -25,13 +26,20 @@ function fixture(changes = {}) {
   const entries = Array.from({ length: 7 }, (_, index) => message(`m${index + 1}`,
     index % 2 ? "assistant" : "user", `  exact ${index + 1}\t\n`));
   entries.push(message("current", "user", source.request), message("future", "user", "PRIVATE FUTURE"));
+  entries.forEach((entry, index) => { entry.parentId = entries[index - 1]?.id ?? null; });
   let state = { status: "available", revision: "workflow-revision-1", active: [], pending: [] };
   let registry = { sessionKey: binding.sessionKey, sessionId: binding.sessionId };
   let denied = false;
   const deniedEntries = new Set();
-  const calls = { model: 0, hydration: 0, receipt: 0, append: 0, workflow: 0 };
+  const calls = { model: 0, stats: 0, hydration: 0, receipt: 0, append: 0, workflow: 0 };
   const infer = () => { calls.model++; throw new Error("inference forbidden"); };
   const native = {
+    readTranscriptStatsSync(target) {
+      calls.stats++;
+      assert.equal(target.sessionId, binding.sessionId);
+      return native.onStats ? native.onStats() : { eventCount: entries.length + 1,
+        maxSeq: entries.length, sizeBytes: Buffer.byteLength(JSON.stringify(entries), "utf8") };
+    },
     getConversationSession(params) {
       assert.equal(params.accountId, binding.accountId);
       assert.equal(params.peerId, binding.peerId);
@@ -40,6 +48,11 @@ function fixture(changes = {}) {
     },
     SessionManager: {
       generateSummary: infer, embedding: infer, agent: infer, semanticReranker: infer,
+      async openBoundedAsync(target, { signal, onTruncated, ...limits }) {
+        const manager = await this.openAsync(target, undefined, limits, signal);
+        if (native.truncated) onTruncated();
+        return manager;
+      },
       readSessionContext(_target, read, { admission }) {
         calls.receipt++;
         assert.equal(admission.entryId, receipt.entryId);
@@ -47,11 +60,14 @@ function fixture(changes = {}) {
         return read({ [Symbol.iterator]() { throw new Error("must not consume model context"); } },
           { id: binding.sessionId });
       },
-      async openAsync() {
+      async openAsync(_target, _cwd, limits) {
+        assert.deepEqual(limits, { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
+          maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 });
         calls.hydration++;
         await native.onOpen?.();
         return { getSessionId: () => binding.sessionId,
-          getBranch: (id) => entries.slice(0, entries.findIndex((entry) => entry.id === id) + 1),
+          getBranch: (id) => entries.slice(0, entries.findIndex((entry) => entry.id === id) + 1)
+            .map((entry, index) => ({ ...entry, parentId: entries[index - 1]?.id ?? null })),
           getEntry: (id) => entries.find((entry) => entry.id === id),
           appendMessageWithTranscriptAnchor(value, { beforeFreshMessageCommit }) {
             native.onBeforeFreshCommit?.();
@@ -62,7 +78,10 @@ function fixture(changes = {}) {
               anchor: { ...receipt, entryId: "final", rawSeq: 10 } };
           } };
       },
-      async openModelContextAsync(_target, { through }) {
+      async openModelContextAsync(_target, { through, limits }) {
+        calls.hydration++;
+        assert.deepEqual(limits, { maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
+          maxEvents: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2 });
         assert.equal(through.storePath, receipt.storePath);
         assert.equal(through.generation, receipt.generation);
         await native.onFinalVerify?.();
@@ -114,6 +133,7 @@ test("exact current and five same-conversation messages, no older discovery or i
 test("valid empty native window and workflow remain distinct from unavailable", async () => {
   const f = fixture();
   f.entries.splice(0, 7);
+  f.entries[0].parentId = null;
   const adoption = await f.adopt();
   const projection = await f.controller.projectRoutingContext(adoption);
   assert.equal(projection.status, "available");
@@ -123,6 +143,95 @@ test("valid empty native window and workflow remain distinct from unavailable", 
   const unavailable = await f.controller.projectRoutingContext(adoption);
   assert.deepEqual(unavailable, { status: "unavailable", route: "main", reason: "workflow_context_unavailable" });
   assert.equal(Object.hasOwn(unavailable, "context"), false);
+});
+
+test("transcript bytes/events are checked before hydration, including both exact boundaries", async () => {
+  for (const [stats, allowed] of [
+    [{ sizeBytes: MAX_TRANSCRIPT_HYDRATION_BYTES - 1, eventCount: 10, maxSeq: 9 }, true],
+    [{ sizeBytes: MAX_TRANSCRIPT_HYDRATION_BYTES, eventCount: 10, maxSeq: 9 }, false],
+    [{ sizeBytes: 1000, eventCount: MAX_TRANSCRIPT_HYDRATION_EVENTS, maxSeq: 1023 }, true],
+    [{ sizeBytes: 1000, eventCount: MAX_TRANSCRIPT_HYDRATION_EVENTS + 1, maxSeq: 1024 }, false],
+  ]) {
+    const f = fixture();
+    f.native.onStats = () => stats;
+    const projection = await f.controller.projectRoutingContext(await f.adopt());
+    assert.equal(projection.status, allowed ? "available" : "unavailable");
+    assert.equal(f.calls.hydration, allowed ? 1 : 0);
+    if (!allowed) assert.deepEqual(projection,
+      { status: "unavailable", route: "main", reason: "transcript_hydration_bounds" });
+    assert.equal(f.calls.model, 0);
+  }
+  const f = fixture();
+  f.entries[0].message.content = "x".repeat(MAX_TRANSCRIPT_HYDRATION_BYTES);
+  assert.equal((await f.controller.projectRoutingContext(await f.adopt())).reason, "transcript_hydration_bounds");
+  assert.equal(f.calls.hydration, 0);
+});
+
+test("unavailable, invalid or asynchronous native stats fail closed without hydration", async () => {
+  for (const value of [null, undefined, {}, { sizeBytes: -1, eventCount: 1, maxSeq: 0 },
+    { sizeBytes: 100, eventCount: 1.5, maxSeq: 0 },
+    { sizeBytes: 100, eventCount: 1, maxSeq: Number.MAX_SAFE_INTEGER + 1 },
+    { sizeBytes: "100", eventCount: 1, maxSeq: 0 }]) {
+    const f = fixture();
+    f.native.onStats = () => value;
+    const projection = await f.controller.projectRoutingContext(await f.adopt());
+    assert.equal(projection.reason, "transcript_stats_unavailable");
+    assert.equal(projection.route, "main");
+    assert.equal(f.calls.hydration, 0);
+    assert.equal(f.calls.model, 0);
+  }
+  const f = fixture();
+  f.native.onStats = async () => { throw new Error("stats must be synchronous"); };
+  assert.equal((await f.controller.projectRoutingContext(await f.adopt())).reason, "transcript_stats_unavailable");
+  await new Promise(setImmediate);
+  assert.equal(f.calls.hydration, 0);
+});
+
+test("growth during bounded native hydration rejects the projection and preserves final custody", async () => {
+  const f = fixture();
+  const adoption = await f.adopt();
+  f.native.onOpen = () => {
+    f.native.onStats = () => ({ sizeBytes: MAX_TRANSCRIPT_HYDRATION_BYTES,
+      eventCount: 10, maxSeq: 9 });
+  };
+  assert.equal((await f.controller.projectRoutingContext(adoption)).reason, "transcript_hydration_bounds");
+  assert.equal(f.calls.hydration, 1);
+  const final = await f.controller.appendFinal(adoption,
+    { role: "assistant", content: "final", idempotencyKey: "bounded-final",
+      __openclaw: { transport: { channel: f.binding.channel, conversationRef: f.binding.conversationRef } } }, () => {});
+  assert.equal(final.status, "unavailable");
+  assert.equal(final.recovery, "native_custody");
+  assert.equal(Object.hasOwn(final, "route"), false);
+  assert.equal(final.mayHaveAppended, false);
+  assert.equal(f.calls.append, 0);
+  assert.equal(f.calls.hydration, 1);
+  const verification = await f.controller.verifyFinalReceipt(adoption,
+    { ...f.receipt, entryId: "final", rawSeq: 10 }, () => {});
+  assert.equal(verification.status, "unavailable");
+  assert.equal(verification.reason, "transcript_hydration_bounds");
+  assert.equal(verification.recovery, "native_custody");
+  assert.equal(Object.hasOwn(verification, "route"), false);
+  assert.equal(f.calls.hydration, 1);
+  assert.equal(f.calls.model, 0);
+});
+
+test("omitted exact recent entries fail closed without requiring arbitrary older history", async () => {
+  const dense = fixture();
+  dense.native.truncated = true;
+  assert.equal((await dense.controller.projectRoutingContext(await dense.adopt())).reason, "exact_window_unavailable");
+  for (const omitted of [["m5"], ["m1", "m2", "m3", "m4", "m5", "m6"]]) {
+    const f = fixture();
+    const adoption = await f.adopt();
+    f.entries.splice(0, f.entries.length, ...f.entries.filter((entry) => !omitted.includes(entry.id)));
+    f.native.truncated = true;
+    assert.equal((await f.controller.projectRoutingContext(adoption)).reason, "exact_window_unavailable");
+  }
+  const f = fixture();
+  const adoption = await f.adopt();
+  f.entries.splice(0, 2);
+  const projection = await f.controller.projectRoutingContext(adoption);
+  assert.equal(projection.status, "available");
+  assert.deepEqual(projection.context.previous.map((entry) => entry.entryId), ["m3", "m4", "m5", "m6", "m7"]);
 });
 
 test("only explicit trusted workflow IDs retrieve older exact turns, in native order", async () => {
@@ -265,10 +374,13 @@ test("projection byte ceiling accepts the exact boundary and rejects one more UT
 
 test("compaction retains raw exact window; reset excludes earlier scope and references", async () => {
   const f = fixture();
-  f.entries.splice(7, 0, { type: "compaction", id: "summary", summary: "LOSSY SUMMARY", firstKeptEntryId: "m7" });
+  f.entries.splice(7, 0, { type: "compaction", id: "summary", parentId: "m7",
+    summary: "LOSSY SUMMARY", firstKeptEntryId: "m7" });
+  f.entries[8].parentId = "summary";
   const adoption = await f.adopt();
   assert.equal((await f.controller.projectRoutingContext(adoption)).context.previous.length, 5);
-  f.entries.splice(7, 1, { type: "reset", id: "reset" });
+  f.entries.splice(7, 1, { type: "reset", id: "reset", parentId: "m7" });
+  f.entries[8].parentId = "reset";
   const projection = await f.controller.projectRoutingContext(adoption);
   assert.equal(projection.status, "available");
   assert.deepEqual(projection.context.previous, []);
