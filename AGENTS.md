@@ -294,6 +294,13 @@ Use targeted tests while editing, then run broader affected validation once the
 bounded change is ready. Do not rerun unrelated already-passing suites unless the
 changed surface could invalidate them.
 
+Minimize redundant validation, not meaningful validation.
+
+Reuse still-valid validation evidence when the relevant code, contract, and
+acceptance surface have not changed. After each edit, rerun only validation
+invalidated by that edit; run the broader affected acceptance once the diff
+is stable, before the required reviewer gate.
+
 Use bounded equivalence classes for representative acceptance, but independently
 verify identities, mappings, permissions, and semantics that cannot be inferred.
 Use deterministic bounded waits, polls, and state checks for mechanical
