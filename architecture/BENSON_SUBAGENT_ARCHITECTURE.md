@@ -189,7 +189,10 @@ User / Channel -> OpenClaw native conversation / trusted admission
        +-> otherwise ordinary routing policy
               +-> Benson Main -> optional fresh domain children
               +-> fresh Direct Domain Agent
-  -> selected authorized execution/continuation
+  -> capacity/pending admission before execution
+       +-> eligible pre-execution policy rejection -> trusted NOT_STARTED workflow-final (Section 6.7)
+       |     -> Completion Control -> common Response Controller/final delivery path
+       +-> admitted selected authorized execution/continuation
        -> approved deterministic tools where needed -> verification
        -> owner result + explicit userResponse
   -> every agent: benson_complete -> deterministic completion validation
@@ -197,6 +200,7 @@ User / Channel -> OpenClaw native conversation / trusted admission
        +-> exhausted: runtime constructs RECOVERED completion if evidence suffices
                        otherwise FAILED report; no execution replay
   -> accepted Benson Agent Completion Protocol -> Completion Control
+       +-> nonfinal, no caller -> retain in existing workflow authority; no final response
        +-> trusted CALLER -> Main continuation / aggregation / final wording
        |     -> Main benson_complete -> accepted final workflow completion
        +-> trusted RESPONSE_CONTROLLER -> direct final-workflow projection
@@ -229,7 +233,7 @@ Benson owns routing policy, the versioned Benson Agent Completion Protocol and g
 
 Benson Main remains the central cognitive orchestrator for broad or unresolved contextual reasoning, multi-domain orchestration, and general semantic work. Main is not the owner of conversation history and is not necessarily invoked for an external request. A grounded single-domain continuation may follow Section 4 without Main; unresolved semantic dependencies still belong to Main.
 
-Main prepares domain briefs, evaluates cross-domain dependencies, aggregates validated structured completions, and owns the final user-facing message whenever it owns the workflow. It finalizes through benson_complete with the final-workflow kind of the Benson Agent Completion Protocol (the ResponseEnvelope role). Main is not the final delivery boundary. Historical evidence and current verification limits are recorded in Section 27.
+Main prepares domain briefs, evaluates cross-domain dependencies, aggregates validated structured completions, and owns the final user-facing message whenever it owns the workflow. Every Main run settles through benson_complete; only workflow-final settlement uses the final-workflow kind of the Benson Agent Completion Protocol (the ResponseEnvelope role). Main is not the final delivery boundary. Historical evidence and current verification limits are recorded in Section 27.
 
 ### 3.4 Domain sub-agents
 
@@ -291,7 +295,7 @@ Apply this order to each new external turn:
 
 1. Establish trusted admission, requester and canonical conversation identity; read bounded conversation and active/pending workflow context.
 2. Obtain and validate Decision Model evidence when enabled.
-3. Before ordinary routing, deterministically check whether the turn relates to an eligible active or pending workflow. Check the exact requester/authorized actor relationship, conversation, workflow, native run/session generation, lifecycle phase and domain continuation contract. Revalidate at admission to avoid a stale read racing completion, cancellation or replacement.
+3. Before ordinary routing, deterministically check whether the turn relates to an eligible active or pending workflow. Semantic evidence may identify a relation; sharing a chat/group never establishes workflow identity or steering authority. Check the exact requester/authorized actor relationship, conversation, workflow, native run/session generation, lifecycle phase and domain continuation contract. Revalidate at admission to avoid a stale read racing completion, cancellation or replacement.
 4. For a verified relation to an eligible workflow, continuation policy owns the admission: join the active workflow under Section 6.4 and continue its authorized run through a proven native binding, resume eligible pending work, or queue/wait/reject under Section 7. An inability to continue safely is not permission to start a competing run. A pending workflow whose run is terminal may require a fresh isolated activation with explicit context; it never resurrects hidden execution state. Once the workflow's terminal finalization begins, no later admission can join it; route that new admission through ordinary routing with current context, capacity and resource checks.
 5. Otherwise choose ordinary Main/direct routing. A direct route is eligible when the exact request plus bounded authorized context sufficiently establishes a supported single-domain task, with valid authority, capacity, resource ownership and completion handling. Context dependence alone does not require Main.
 
@@ -513,6 +517,8 @@ An isolated child is clean, not empty. OpenClaw loads the child's `AGENTS.md`, a
 
 The **Benson Agent Completion Protocol** is the single canonical versioned schema family for all Benson agent completions. Main, Jessica, Reminder, every current domain agent, and every future agent created or spawned under the Benson runtime must use it. No agent-to-agent, agent-to-Main, agent-to-Completion-Control, or agent-to-Response-Controller completion is consumed as free-form prose. Natural-language reasoning may remain inside an agent run; a completion crossing its boundary must be validated structured data.
 
+The same family also represents trusted deterministic control-plane workflow finals without creating a run (Section 6.7), including pre-activation rejection and reviewed pending terminal outcomes. This adds no executor or schema owner: run-origin records require run authority; control-plane records require current admission/workflow authority and positively established execution history. NOT_STARTED is valid only when the workflow never executed.
+
 TaskResultEnvelope and ResponseEnvelope name the domain-task and final-workflow roles within this family, not independent common contracts. Completion kind follows the authorized task/workflow role, not a private per-agent format. Future roles use the applicable kind or a reviewed versioned extension within this same family; they inherit all global finalization machinery unchanged. Field names and completion kinds below define semantics; exact wire encoding, schema technology, version negotiation/migration, and native binding belong to the implementation plan. Unsupported versions fail closed.
 
 ### 6.1 Execution selection and domain ownership
@@ -529,7 +535,7 @@ The trusted workflow binding determines the current final semantic owner:
 - Main-owned workflow: a domain child supplies its structured result and may include useful domain wording; its destination is CALLER/Main. Main owns aggregation and the final user-facing message.
 - Main-only workflow: Main owns the semantic answer without inventing a domain execution result.
 
-An agent does not choose final ownership or its completion destination by writing a field. CompletionRoute remains trusted orchestration state.
+Final semantic ownership identifies who composes an eventual final; it does not make every run by that agent workflow-final. An agent does not choose final ownership, completion scope, finality or disposition by writing a field. CompletionRoute remains trusted orchestration state.
 
 ### 6.3 One schema family; domain-task completion / TaskResultEnvelope
 
@@ -551,7 +557,7 @@ The domain-task kind retains the TaskResultEnvelope role:
 
 `userResponse` explicitly distinguishes:
 
-1. **Usable:** a bounded message and language/locale information consistent with the owning response contract. This is the normal finalization path; child wording remains subordinate to Main when routed to CALLER.
+1. **Usable:** a bounded message and language/locale information consistent with the owning response contract. It is final-delivery wording only in a workflow-final completion; retained nonfinal wording has no delivery authority, and child wording remains subordinate to Main when routed to CALLER.
 2. **Unavailable:** an explicit structured reason that no usable message is available. In an otherwise valid final-workflow completion this is eligible for bounded response fallback. A child may use this state without invoking fallback at the child boundary.
 3. **Missing or malformed:** a protocol violation, including a claimed usable state without a usable message. It must enter completion repair, never be heuristically converted to unavailable.
 
@@ -559,20 +565,23 @@ Important execution facts cannot exist only in prose. Model-authored `verified: 
 
 ### 6.4 ExecutionRoute and trusted CompletionRoute
 
-Execution owner answers who performs the task; completion destination answers who receives its accepted completion. Deterministic Benson/OpenClaw orchestration establishes admission identity, trusted requester/conversation/workflow binding, owner/run identity, caller/parent correlation where applicable, completionTarget (CALLER or RESPONSE_CONTROLLER), finality, and delivery policy before accepting a completion. Continuing a workflow preserves its trusted completion owner; classifier output cannot change that owner.
+Workflow is the logical task lifecycle; an Agent Run is a temporary execution that advances it. Run completion does not imply Workflow completion. A nonterminal workflow may span fresh isolated runs and durable intervals with no live LLM. Its reviewed completion policy defines the close condition and permitted terminal outcomes by domain and operation type, rather than agent identity alone. Deterministic authority binds that policy and evaluates its predicates against trusted evidence; successful tool execution, model wording and run exit cannot choose workflow finality.
+
+Execution owner answers who performs the task; completion disposition answers what happens to its accepted run result. Deterministic Benson/OpenClaw orchestration establishes admission identity, trusted requester/conversation/workflow binding, completion policy, owner/run identity, caller/parent correlation where applicable, finality and delivery policy before accepting a completion. CompletionRoute permits retention at the existing workflow owner for a nonfinal callerless result, CALLER delivery for a correlated child result, or RESPONSE_CONTROLLER delivery only for a workflow-final result. Continuing a workflow preserves its trusted completion owner and reviewed policy; classifier output cannot change them.
 
 **Shared final:** a later external admission deterministically accepted as a continuation, amendment or refinement of the same active workflow before terminal finalization begins joins that workflow. Each admission remains independently recorded in the canonical conversation and bound to the workflow. The joined workflow produces exactly one final-workflow completion and one final interactive delivery reflecting the latest accepted intent, accumulated in trusted admission order. Joined admissions do not independently produce final responses. The trusted workflow binding identifies its admitted membership and accepted-intent revision; these are control state, not model-authored authority or a new store.
 
-The existing lifecycle owner must serialize joining with entry into the workflow's terminal finalization: that entry closes membership and the accepted-intent revision before completion validation/repair and before transport freeze. The cutoff cannot wait for successful completion or delivery. Later admissions follow normal new-admission routing and cannot amend this workflow's completion or frozen payload. A child's terminal finalization closes that child's execution; it does not itself close a still-active Main-owned parent workflow. Duplicate events/retries for an already joined admission retain its original binding and never acquire a new final response. Section 7.5 governs whether a supported native binding can actually enforce this contract; unavailable proof keeps joining disabled.
+The existing lifecycle owner must serialize joining with entry into the workflow's terminal finalization, authorized only when the reviewed close condition is satisfied and the completion is workflow-final. That entry closes membership and the accepted-intent revision before completion validation/repair and before transport freeze. The cutoff cannot wait for successful completion or delivery. Later admissions follow normal new-admission routing and cannot amend this workflow's final completion or frozen payload. Nonfinal run settlement, including a direct domain run, does not close workflow membership; a child's settlement does not itself close a still-active Main-owned parent workflow. Duplicate events/retries for an already joined admission retain its original binding and never acquire a new final response. Section 7.5 governs whether a supported native binding can actually enforce this contract; unavailable proof keeps joining disabled.
 
-CompletionRoute is the completion portion of this trusted native orchestration state, not a second model-authored payload or new store. A Main-spawned domain child normally returns to CALLER/Main. An eligible direct-domain execution and Main's final interactive workflow go to RESPONSE_CONTROLLER. Agent text never selects the destination, recipient, channel, or session.
+CompletionRoute is the completion portion of this trusted native orchestration state, not a second model-authored payload or new store. A Main-spawned domain child normally returns to CALLER/Main. A nonfinal callerless result is retained with exact workflow/run/policy correlation and explicit next lifecycle state; it neither fabricates a caller nor enters Response Controller. Only workflow-final direct-domain or Main completions go to RESPONSE_CONTROLLER. Agent text never selects the disposition, destination, recipient, channel or session. Retention grants no automatic successor activation or delivery authority.
 
 ### 6.5 Benson Completion Control
 
-Completion Control deterministically binds accepted protocol completions to the committed lifecycle, checks expected ownership, version/kind, trusted correlation, provenance, finality, and duplicate/stale state, and routes to the pre-established continuation. Final-workflow acceptance also checks the closed admission membership and accepted-intent revision from Section 6.4; a stale candidate for an earlier intent cannot finalize the workflow. It uses the canonical validation contract; it does not own another schema family or another repair loop.
+Completion Control deterministically binds accepted protocol completions to the committed lifecycle, checks expected ownership, version/kind, reviewed completion policy, trusted correlation, provenance, finality and duplicate/stale state, and applies the established disposition. Final-workflow acceptance also checks the policy's close condition, closed admission membership and accepted-intent revision from Section 6.4; a stale candidate for an earlier intent cannot finalize the workflow. It uses the canonical validation contract; it does not own another schema family or another repair loop.
 
 - CALLER: deliver the accepted structured completion for the assigned task/workflow, including NORMAL/RECOVERED completions and canonical FAILED reports, to the correlated caller, normally Main. A child's locally final result does not confer finality for the parent's interactive workflow.
-- RESPONSE_CONTROLLER: deliver accepted final-workflow completion. For a direct domain-task completion, deterministically project it into the final-workflow kind within the same schema family and validate that projection.
+- Nonfinal retention: retain the accepted result of a settled run, including NORMAL/RECOVERED or FAILED, under existing durable workflow authority without a live caller or final response. The existing workflow owner applies the policy-bound next state; Completion Control neither settles runs nor owns waiting, recovery or later activation.
+- RESPONSE_CONTROLLER: deliver accepted workflow-final completion only. Project a direct domain-task completion into the final-workflow kind within the same schema family only when the reviewed close condition and trusted workflow-final binding hold; validate that projection. A nonfinal direct result is never projected or delivered as a final.
 
 Direct projection preserves every result's task status, NORMAL/RECOVERED/FAILED outcome, domain schema, evidence, warnings, errors, partial effects, uncertainty, pending context, and userResponse. It attaches only trusted workflow/source/finality/policy binding. It neither recomposes the message nor invokes Main or another agent run. The domain remains the final semantic owner.
 
@@ -586,13 +595,13 @@ A validated child completion resumes Main's existing workflow through the truste
 
 This ordinary workflow continuation precedes Main's terminal finalization. Once Main enters completion-only repair, it cannot spawn or mutate to repair its answer. A child's RECOVERED completion carries its actual task outcome without being downgraded to business failure. A FAILED report preserves known effects and uncertainty without claiming a complete trustworthy task result. Neither permits Main to repeat completed or uncertain child work.
 
-Main composes the final user-facing message inside its own workflow and submits a final-workflow completion to benson_complete. Completion Control then routes the accepted completion to Response Controller. Response Controller does not send an already completed direct workflow to Main for semantic rewriting.
+When its reviewed close condition is satisfied, Main composes the final user-facing message inside its workflow and submits a workflow-final completion to benson_complete. Completion Control then routes the accepted completion to Response Controller. A Main run that settles before that condition remains nonfinal under Section 6.4. Response Controller does not send an already completed direct workflow to Main for semantic rewriting.
 
 ### 6.7 Final-workflow completion / ResponseEnvelope
 
 The final-workflow kind fulfills the ResponseEnvelope role in the same versioned family. It carries common completion semantics plus:
 
-- trusted workflow correlation, closed membership of independently recorded admissions, accepted-intent revision, source agent/run, finality, and delivery-policy binding under Section 6.4;
+- trusted workflow correlation, closed membership of independently recorded admissions, accepted-intent revision, typed source authority (agent/run, or admission/workflow authority for control-plane terminalization below), finality, and delivery-policy binding under Section 6.4;
 - actual overall task/workflow outcome and separate runtime-assigned NORMAL/RECOVERED/FAILED completion outcome;
 - `results[]`, retaining each domain result's version, task identity, operation, status, verification scope, facts, warnings, errors, partial effects, uncertainty, and provenance;
 - grounded pending clarification/continuation state;
@@ -602,15 +611,36 @@ A direct domain normally contributes one result; Main may aggregate any bounded 
 
 The final semantic owner's wording is part of completion, not an alternative source of execution truth. Structured facts remain authoritative. The shared final addresses the latest accepted intent without silently dropping joined corrections or claiming they were applied merely because they were admitted. If an amendment could not be applied or its outcome is uncertain, preserve that limitation and any prior effects in the result and wording. The owner preserves exact relevant dates/times, warnings, partial effects, errors, and uncertainty in its response contract. Normal deterministic rendering belongs with the domain owner (Section 6.9), not Response Controller.
 
-### 6.8 Benson Response Controller: single interactive outbound boundary
+**Deterministic control-plane terminalization without a Run.** A new eligible workflow rejected before activation may terminate with positively proven NOT_STARTED, including active/pending overload. A pending workflow may also terminate without creating a run when authorized cancellation, reviewed expiry or permanent ineligibility satisfies its completion policy. The existing trusted workflow authority verifies current policy, authorization, generation, intent and execution history; atomically closes all accepted membership, including joined admissions; and excludes concurrent join/activation. Missing executor records or uncertain dispatch cannot establish NOT_STARTED. Prior settled runs and effects remain authoritative when pending work has already executed; no current run does not erase that history.
 
-Every interactive Benson workflow passes through exactly one Benson Response Controller before native delivery, including direct domain, Main-only, multi-domain, clarification, and failure responses.
+An activation denial for a child, successor or scheduled run within an existing workflow instead returns trusted denial evidence to its caller/lifecycle owner. It creates no run or agent completion and does not close the parent workflow. That owner may separately apply the parent's reviewed completion condition; an activation failure alone grants no workflow-final authority.
 
-Its normal work is deterministic: accept only validated final-workflow completions; validate trusted workflow/admission-membership/run/source/finality/correlation state; enforce one finalization and one final interactive delivery per workflow, shared by all joined admissions under Section 6.4; enforce delivery eligibility and bounded output constraints that need no general semantic interpretation; and hand the already-final message to native OpenClaw delivery. Duplicate/recovery events from any joined admission reuse the existing finalization rather than creating another one.
+The existing global finalization responsibility constructs and validates the typed canonical workflow-final record through the same common family, using the trusted terminal decision and truthful policy-owned deterministic wording. The workflow outcome reflects rejection, cancellation, expiry or permanent ineligibility as actually established; it is not an invented agent/domain failure. NORMAL accepts a valid deterministic control-plane final without claiming an agent ran or needed repair; run-origin outcome semantics in Section 6.10 remain unchanged. This path uses no model inference, agent repair, reporting agent or Response Model fallback.
+
+Completion Control follows the trusted RESPONSE_CONTROLLER disposition; Response Controller validates the typed source, finality and ordinary delivery eligibility. The result uses the same canonical final identity, transcript receipt, preparation/freeze and native delivery/recovery as run-origin finals. Terminalization fences pending activation and retires only that workflow's verified capacity reservations; it does not establish physical/resource release. Missing authority or uncertain execution/cleanup stays with existing recovery, never a guessed recipient, raw send or new reporting run.
+
+Duplicates, retries and restart reuse the terminal decision, closed membership, reservation-retirement evidence and one logical final instead of reevaluating the old workflow when capacity changes. Cleanup recovery cannot reactivate terminal work or release another workflow's claim. A delivery-eligible closed workflow receives one final for its whole membership; terminal work never reopens. Native lifecycle/persistence and delivery remain the existing owners: no extra store, queue, dispatcher, scheduler or lifecycle owner. The plan must specify version/compatibility for these typed sources; missing legacy run fields alone never establish them.
+
+### 6.8 Interactive outbound classes and final-response gate
+
+Interactive user communication has two distinct classes:
+
+| Class | Architectural semantics |
+| --- | --- |
+| Progress notification | Optional nonterminal communication that an LLM may initiate multiple times inside an active agentic loop under reviewed policy. It does not end the run, close workflow membership, constitute Benson completion, release resource ownership or replace/suppress the final response. Delivery may be best-effort. |
+| Final response | Terminal workflow communication governed by the Benson Agent Completion Protocol, Completion Control, Response Controller, preparation/freeze and native delivery/recovery. Exactly one logical final serves the workflow's closed membership; progress does not change that invariant. |
+
+Every interactive final response passes through exactly one Benson Response Controller before native delivery, including direct domain, Main-only, multi-domain, clarification, failure and deterministic control-plane terminal responses.
+
+Its normal work is deterministic: accept only validated final-workflow completions; validate trusted workflow/admission-membership/typed-source/finality/correlation state, including run identity for run-origin records and admission/workflow authority with verified terminal condition and execution history for control-plane records; enforce one finalization and one final interactive delivery per workflow, shared by all joined admissions under Section 6.4; enforce delivery eligibility and bounded output constraints that need no general semantic interpretation; and hand the already-final message to native OpenClaw delivery. Duplicate/recovery events from any joined admission reuse the existing finalization rather than creating another one.
 
 The controller is neither the normal response composer nor a semantic reviewer of arbitrary Hebrew/English prose. It cannot establish prose truth through general language interpretation, execute domains, rerun Main, change execution facts, or restore mutation authority. The final semantic owner and its domain response contract own wording fidelity. Bounds/structure checks are not proof of arbitrary prose truth.
 
-Only explicit unavailable userResponse in an otherwise valid completion enables the narrow fallback below. Malformed completions belong to global finalization, not response fallback. No agent or fallback bypasses this outbound gate.
+Only explicit unavailable userResponse in an otherwise valid completion enables the narrow fallback below. Malformed completions belong to global finalization, not response fallback. No agent or fallback bypasses this final-response gate.
+
+Progress uses a generic Benson-owned deterministic boundary, conceptually `emit_progress(...)`; this is not a selected API or a new transport. The LLM may propose when an allowed notification is useful; deterministic Benson enforcement applies each domain's reviewed event, evidence, bounds and delivery policy. Recipient, conversation/thread, account and transport come exclusively from trusted current workflow/admission authority. No agent receives unrestricted `message.send`, arbitrary target selection or direct channel credentials. Select the exact implementation and registration only after supported OpenClaw runtime/delivery discovery; reuse native transport without another dispatcher, queue, store, scheduler or messaging system.
+
+The boundary admits progress only for an authorized active run and eligible nonterminal workflow; it cannot be used to escape completion-only repair or impersonate a final. Domain owners retain factual/evidence predicates. Progress delivery is communication evidence, never proof of domain success, physical completion, stop or resource release. Missing/failed best-effort delivery must not fail valid execution or cause replay; a reviewed domain may explicitly require delivery and define failure handling through the ordinary lifecycle, without granting replay or release authority.
 
 ### 6.9 Owner composition and bounded Response Model fallback
 
@@ -626,13 +656,14 @@ If the one-shot fallback is unavailable, fails, or violates its bounded contract
 
 ### 6.10 Global terminal finalization and completion-only repair
 
-`benson_complete` names the conceptual terminal primitive of the Benson Agent Completion Protocol. It is infrastructure-owned, automatically applied to every Benson-managed agent run, and mandatory before successful completion is accepted. It is not a claim that an OpenClaw API with this name exists.
+`benson_complete` names the conceptual run-settlement primitive of the Benson Agent Completion Protocol. It terminates/settles the current run and closes the workflow only when its reviewed completion condition is satisfied and the completion is workflow-final. It is infrastructure-owned, automatically applied to every Benson-managed agent run, and mandatory before successful completion is accepted. It is not a claim that an OpenClaw API with this name exists.
 
-For the workflow's final semantic owner, entry into this terminal protocol first closes admission membership and accepted intent under Section 6.4, including on cancellation, timeout or failure. Neither a rejected candidate nor recovery reopens joining; the later transport freeze is not the admission cutoff.
+Every run enters irreversible completion-only processing when its execution settles. Only a workflow-final disposition authorized by the reviewed completion policy invokes the existing workflow owner's atomic membership/intent close transition under Section 6.4 before candidate validation. Cancellation, timeout, failure or uncertain finalization closes the workflow only if it satisfies a reviewed terminal condition; a run-only outcome can leave the workflow nonterminal. A nonfinal settlement preserves open workflow membership while the run stays terminal. Neither repair nor recovery reopens a closed workflow or terminal run; the later transport freeze is not the admission cutoff.
 
 ```text
 Agentic execution / semantic composition
   -> settle domain execution; bind known facts and outstanding uncertainty
+  -> bind reviewed policy and disposition; close workflow intent only if workflow-final
   -> benson_complete(candidate)
   -> deterministic schema + trusted evidence validation
        +-> accepted agent completion: NORMAL -> Completion Control / continuation
@@ -651,7 +682,7 @@ On rejection return a precise structured error to the same run (failure code, af
 
 **Completion retry is not task retry.** Once execution is settled and repair starts, deterministic runtime capability policy disables state-changing/domain mutation tools and any delegation or escape route that could execute work indirectly. Do not reopen them on retry, provider substitution, timeout, or restart. Only narrowly justified read-only access to already-existing evidence may remain. Unknown in-flight effects stay uncertain and under their existing reconciliation owner; repair does not infer zero execution from missing output.
 
-Completion outcome is assigned by deterministic runtime, independently of the task/workflow's business outcome:
+For run-origin records, completion outcome is assigned by deterministic runtime, independently of the task/workflow's business outcome; Section 6.7 defines deterministic control-plane finals:
 
 | Outcome | Meaning |
 | --- | --- |
@@ -663,7 +694,7 @@ After exhaustion the LLM has no further obligation or attempt budget. Runtime ap
 
 For RECOVERED, runtime may provide domain-local deterministic wording or the protocol's explicit unavailable userResponse state; lack of wording alone does not imply FAILED. For FAILED, runtime emits a schema-valid evidence-preserving failure report, explicitly reporting the inability to establish complete task/workflow semantics. That report is not a successful reconstruction of the missing completion. Preserve all known verified outcomes, warnings, errors, partial effects and uncertainty, using unknown/not-applicable fields where appropriate rather than fabricating business data. Both paths use the original trusted binding and canonical validation; inability to establish binding stays under native recovery, never an invented route. Model-authored outcome labels are not authoritative. Response fallback and native delivery recovery cannot change this completion outcome or authorize execution.
 
-Raw malformed output never crosses as completion; downstream consumers receive only accepted canonical records, including RECOVERED completions and valid FAILED reports. An infrastructure crash can delay delivery; it does not permit raw-output release or imply successful finalization. Native recovery preserves terminal phase, closed admission membership and accepted-intent revision, budget, evidence, completion outcome, accepted record identity, and no-replay restrictions through existing lifecycle/persistence ownership, without a second completion store.
+Raw malformed output never crosses as completion; downstream consumers receive only accepted canonical records, including RECOVERED completions and valid FAILED reports. An infrastructure crash can delay settlement or delivery; it does not permit raw-output release or imply successful finalization. Native recovery preserves run-terminal phase, trusted completion policy/disposition, workflow membership and accepted-intent revision (including irreversible closure when workflow-final), budget, evidence, completion outcome, accepted record identity and no-replay restrictions through existing lifecycle/persistence ownership, without a second completion store. NORMAL/RECOVERED/FAILED alone cannot promote a nonfinal result to workflow-final.
 
 Every agent's AGENTS.md documents the obligation and its domain result contract. Native/provider structured-output constraints should additionally constrain generation where supported. Neither prompts nor provider schema support is the enforcement/trust boundary. Runtime validation and terminal interception are mandatory even if the model omits benson_complete or emits ordinary prose. Adding an agent must not require private finalizers, validators, retry state machines, or enforcement hooks.
 
@@ -671,7 +702,7 @@ The implementation plan must inspect the installed OpenClaw lifecycle/hooks/tool
 
 ### 6.11 Scheduled delivery is a separate capability
 
-Scheduled durable notifications intentionally delivered later remain the native runtime capability in Section 17, distinct from the interactive response boundary. Creating a reminder receives its interactive acknowledgment through Response Controller; later notification delivery follows the authorized durable job route. Any scheduled Benson agent run still inherits the global completion protocol; a deterministic notification payload does not need an agent run merely to use it.
+Scheduled durable notifications intentionally delivered later remain the native runtime capability in Section 17, distinct from active-run progress and the interactive final-response boundary. Creating a reminder receives its interactive acknowledgment through Response Controller; later notification delivery follows the authorized durable job route. Any scheduled Benson agent run still inherits the global completion protocol; a deterministic notification payload does not need an agent run merely to use it.
 
 Preserve deterministic notification intents' authorization, native correlation, idempotency, and failure semantics. Notification failure never reruns or rolls back verified domain work and does not grant agent-owned interactive channel access.
 
@@ -761,7 +792,7 @@ Reuse native lifecycle/session/task state for domain identity, native run/sessio
 
 Compose a trusted control-plane view from these owners; the concept does not authorize a duplicate execution/session ledger. If required correlation or durable concurrency state is missing, first verify supported session extensions or existing domain metadata. A new persistence surface still requires a separately justified and approved design. Reminder/Calendar links, device capability state and audit records retain their existing domain owners.
 
-Persist enough to distinguish a live executor, admitted/queued work, suspended/pending workflow, terminal run, and an uncertain orphan after restart. A missing terminal timestamp or an old session row alone is not liveness. An LLM run may finish while its physical workflow or pending clarification remains active; release each kind of ownership only on its own verified lifecycle condition. Remaining physical/pending state does not reopen a finalized interactive workflow: a later admission uses normal new-admission routing with that explicit context.
+Persist enough to distinguish a live executor, admitted/queued work, suspended/pending workflow, terminal run, and an uncertain orphan after restart. A missing terminal timestamp or an old session row alone is not liveness. A workflow may span multiple short-lived agent runs and remain nonterminal between them. Pending work is bounded durable workflow/domain state, not a waiting agent run or a new Benson queue/service. An LLM run may finish while its physical workflow or pending clarification remains active; release each kind of ownership only on its own verified lifecycle condition. Remaining physical/pending state does not reopen a finalized interactive workflow: a later admission uses normal new-admission routing with that explicit context.
 
 ### 7.5 Waiting and long-running work
 
@@ -776,7 +807,7 @@ For a normal delegated run:
 - allow native delivery of the child completion event only after global finalization has accepted its canonical protocol record;
 - do not replace completion delivery with polling loops over session history, task lists, shell sleep, or process state.
 
-For a direct run there need not be a waiting Main turn; use native lifecycle completion with the pre-established Response Controller destination. Completion events never re-enter new-request classification.
+For a direct run there need not be a waiting Main turn. Use native lifecycle completion with the trusted policy/finality/disposition binding: retain a callerless nonfinal result at existing workflow authority; route to Response Controller only when workflow-final eligible (Section 6.4). Completion events never re-enter new-request classification.
 
 Long-running or externally delayed operations should use an approved durable deterministic worker, native job/condition mechanism, or scheduler instead of keeping an LLM turn alive indefinitely. Waiting state and dependencies must be explicit and restart-safe; this does not authorize a new infrastructure boundary.
 
@@ -822,13 +853,13 @@ When an alternative is necessary, document the evidence and the architectural re
 
 ### 7.7 Agent capacity and resource ownership
 
-Every domain-agent identity must have an explicit reviewed deterministic concurrency contract before runtime admission. It defines maximum simultaneously active runs across all callers and entry paths, what active/suspended/queued means for counting, continuation eligibility, capacity-exhaustion behavior, bounded queue/wait/reject policy, requester/workflow isolation, and restart/recovery reconciliation. Missing policy or uncertain ownership fails closed for new execution. The LLM never sets its own parallelism or bypasses a full capacity limit through another session.
+Keep Conversation, Workflow, Agent Run and Physical Resource distinct: a conversation binds authorized history; a workflow binds admitted intent and its logical task lifecycle; a run is a temporary executor; a resource has independently verified mutation ownership and release. Section 6.4's reviewed domain/operation completion policy determines workflow closure independently of run settlement. Neither shared conversation nor semantic similarity grants continuation or resource authority. A terminal run is never reopened; an eligible nonterminal workflow may activate a fresh isolated run with explicit durable state between runs. A terminal workflow remains closed even when domain effects or resource reconciliation continue.
 
-Specific limits belong to domain contracts/configuration after review. A single-run Jessica policy and bounded-parallel Reminder policy are illustrative candidates, not values approved here. Native process lanes, per-session serialization and per-parent child limits may help implement capacity; none alone proves a global per-domain-agent limit. Admission and reservation must exclude races across Main children, direct routes, scheduled work and other authorized activations without introducing a second scheduler.
+Every domain-agent identity must have an explicit reviewed deterministic capacity/resource policy before runtime admission. Domains select finite active and pending limits, read-only versus mutation rules, busy/overload disposition and recovery conditions; Benson provides generic deterministic enforcement at supported native boundaries. Domain owners retain resource semantics and evidence predicates. Native process lanes, per-session serialization and per-parent child limits alone do not establish global per-domain capacity. Count and reserve across direct routes, Main children, scheduled work and other authorized activations; no LLM may set parallelism or bypass a full limit through another session.
 
-Keep three identities separate: `Jessica` (agent type/identity), `Jessica R123` (temporary run), and the Dreame robot (shared physical resource). A workflow may outlive a run, and a run count is not a resource lock. For Jessica, at most one physical mutation workflow may own the robot at a time unless a future reviewed design proves otherwise. Multiple read-only runs may have a different policy. Domain deterministic boundaries enforce resource acquisition, mutation authorization, verified release and recovery; unknown effects retain reconciliation ownership and block conflicting mutations.
+Bound pending state at its existing durable owner, deduplicate by trusted admission/workflow identity and reject overload truthfully rather than accumulate work. Pending work needs no live LLM session. On verified availability, revalidate requester authority, intent, lifecycle/generation, capacity and current domain/resource preconditions before a fresh isolated activation. Missing policy, unsupported durable activation or uncertain ownership fails closed; no new queue, scheduler, store or service follows from pending semantics.
 
-Resource ownership must reject stale actors after cancellation/restart/reassignment at the mutation boundary; an expiring lock or timeout alone does not prove the old actor stopped. Use existing domain/native transaction, identity and fencing mechanisms where suitable. No new lock service is prescribed. A second user's request cannot steer the current owner's workflow without explicit trusted authority; policy may queue, wait, reject or admit separate work only where both the agent-capacity and resource contracts allow it.
+Domain deterministic boundaries enforce resource acquisition, mutation authorization, verified release and stale-owner fencing at the actual side-effect boundary. Run/workflow success, cancellation, timeout, failure or restart does not itself prove physical completion or release. Unknown or partial effects retain reconciliation ownership and block conflicting mutations; an expired timer is insufficient. A start acknowledgment is not physical completion. Exact later completion may produce an authorized final without keeping the original run alive, subject to the existing final/notification identity and delivery rules; it never reopens or duplicates an accepted workflow final.
 
 ---
 
@@ -1249,7 +1280,7 @@ Review provider privacy/data handling before household content is transmitted. E
 
 ## 14. User-facing communication
 
-The final semantic owner composes the normal user-facing message: the direct domain agent on eligible direct routes, Main on Main-owned workflows. Benson Response Controller remains the single deterministic interactive outbound gate (Section 6.8). Agents cannot deliver directly; accepted wording proceeds through preparation, freeze, and native delivery (Section 6.12).
+For run-origin workflows, the final semantic owner composes the final user-facing message: the direct domain agent on eligible direct routes, Main on Main-owned workflows. Section 6.7's control-plane terminalization instead supplies trusted deterministic wording without creating a run. Benson Response Controller remains the single deterministic interactive final-response gate (Section 6.8). An active agent may request policy-controlled nonterminal progress through Benson's deterministic boundary; it cannot deliver directly. Accepted final wording proceeds through preparation, freeze, and native delivery (Section 6.12).
 
 ### 14.1 Family experience
 
@@ -1264,7 +1295,7 @@ Responses should focus on:
 
 They should not receive internal IDs, tool names, paths, logs, or orchestration details unless explicitly appropriate.
 
-### 14.2 Sub-agent communication prohibition
+### 14.2 Sub-agent communication authority
 
 Sub-agents must not send directly to:
 
@@ -1272,7 +1303,7 @@ Sub-agents must not send directly to:
 - voice channels;
 - other user-facing channels.
 
-They submit domain-task completions through benson_complete and trusted Completion Control. Main submits final-workflow completion through the same protocol. Direct domain completions are projected into the final-workflow kind before Response Controller; no agent bypasses global finalization or the interactive outbound boundary.
+They may initiate approved nonterminal progress only through Section 6.8's generic deterministic boundary with trusted workflow recipient binding. This grants no unrestricted messaging tool or channel/recipient authority. They submit domain-task completions through benson_complete and trusted Completion Control. Main submits final-workflow completion through the same protocol. Final-eligible direct domain completions are projected into the final-workflow kind before Response Controller; progress never bypasses or substitutes for global terminal finalization.
 
 ### 14.3 Truthful finalization
 
@@ -1630,7 +1661,7 @@ These are target architecture acceptance examples, not implementation tests or c
 
 User: "Tell Jessica to clean the kitchen."
 
-The admission has no related active/pending workflow. Decision evidence identifies Jessica and a supported single-domain request. The Request Controller validates context, authority, capacity and resource eligibility and commits `executionOwner = Jessica`, `completionTarget = RESPONSE_CONTROLLER`.
+The admission has no related active/pending workflow. Decision evidence identifies Jessica and a supported single-domain request. This example uses an explicitly reviewed verified-start completion scope under Section 6.4. The Request Controller validates context, authority, capacity and resource eligibility and commits `executionOwner = Jessica`; RESPONSE_CONTROLLER becomes eligible only when that scope's verified close condition holds.
 
 ```text
 User -> native conversation/admission -> bounded context -> Decision Model
@@ -1643,7 +1674,7 @@ User -> native conversation/admission -> bounded context -> Decision Model
   -> final approved message -> prepare -> freeze -> native queue -> delivery
 ```
 
-Jessica is the final semantic owner. A known verified started result uses its domain-local template: "Jessica started cleaning the kitchen." Ordinary accepted fast-path execution requires no Main or Response Model inference. The final wording must reflect the verified domain outcome: accepted or started cleaning is not completed cleaning. A completion claim is allowed only if the domain result demonstrates completion.
+Jessica is the final semantic owner. Under this verified-start scope, a known verified started result uses its domain-local template: "Jessica started cleaning the kitchen." Under physical-completion scope, the same start result settles only the run and is retained nonfinal while the workflow waits; final ownership alone cannot project it into a final. Ordinary accepted fast-path execution requires no Main or Response Model inference. The final wording must reflect the verified domain outcome: accepted or started cleaning is not completed cleaning. A completion claim is allowed only if the domain result demonstrates completion.
 
 The same general shape applies to an eligible direct Reminder request; the Reminder agent and deterministic tools retain scheduling semantics, authorization, and verification. It never gains interactive delivery authority.
 
@@ -1752,7 +1783,7 @@ An otherwise valid final-workflow completion with explicit unavailable userRespo
 
 Jessica's deterministic tool evidence verifies cleaning started, but its first completion omits userResponse. benson_complete rejects it with a structured missing-field error. Runtime disables mutations and execution delegation; Jessica can repair only the completion using existing evidence. She cannot issue clean_room again.
 
-If Jessica supplies a valid completion within budget, the original trusted route receives NORMAL. If her attempts are exhausted but trusted evidence establishes the complete clean_room task result, runtime constructs RECOVERED: verified successful cleaning start stays task success, with warnings/partial effects and uncertainty about eventual physical completion preserved. If required task evidence or meaning cannot be established, runtime emits a FAILED report retaining whatever is known; it does not erase the observed start. CALLER/Main consumes the actual task outcome and separate completion outcome, or direct projection takes the same semantics to Response Controller. Neither path repeats cleaning or claims physical completion from a start. Even if a repaired payload supplies a different destination, trusted CompletionRoute remains unchanged.
+If Jessica supplies a valid completion within budget, the original trusted route receives NORMAL. If her attempts are exhausted but trusted evidence establishes the complete clean_room task result, runtime constructs RECOVERED: verified successful cleaning start stays task success, with warnings/partial effects and uncertainty about eventual physical completion preserved. If required task evidence or meaning cannot be established, runtime emits a FAILED report retaining whatever is known; it does not erase the observed start. CALLER/Main consumes the actual task outcome and separate completion outcome; a callerless nonfinal result is retained at the workflow owner, and only a policy-eligible workflow-final result is projected to Response Controller. None of these dispositions repeats cleaning or claims physical completion from a start. Repair/reconstruction cannot change the trusted completion policy or promote a nonfinal result to workflow-final; even if a repaired payload supplies a different destination, trusted CompletionRoute remains unchanged.
 
 ### 24.7 Frozen delivery recovery and missing progress events
 
@@ -1796,8 +1827,10 @@ Before approving a domain or major workflow, verify these design/implementation 
 
 ### Completion Control and workflow continuation
 
-- [ ] Completion Control binds canonical validation to lifecycle ownership, rejects duplicate/stale events, and follows trusted CALLER/RESPONSE_CONTROLLER routes.
-- [ ] Direct projection preserves the domain's facts and wording; Main children return to Main without owning final delivery.
+- [ ] Completion Control binds canonical validation to lifecycle ownership, rejects duplicate/stale events, and applies trusted nonfinal retention/CALLER/workflow-final RESPONSE_CONTROLLER dispositions.
+- [ ] Run settlement closes workflow membership only for a policy-eligible workflow-final completion; domain/operation policy is independent of agent identity and resource release.
+- [ ] New-workflow pre-activation rejection proves NOT_STARTED; activation denial inside an existing workflow returns to its caller/lifecycle owner without closing the parent. Authorized pending cancellation/expiry/permanent ineligibility uses trusted control-plane final authority without creating a run, atomically closes joined membership and retires only verified capacity reservations. One eligible final uses the ordinary Response Controller/native path; duplicate/restart never fabricates execution, erases prior effects or reopens the workflow.
+- [ ] Direct projection preserves the domain's facts and wording only when workflow-final eligible; nonfinal direct/Main results remain durable without a fabricated caller or final response. Main children return to Main without owning final delivery.
 - [ ] Main aggregation preserves every result's version, identity, status, verification scope, warnings, and effects for bounded collections of any admitted size.
 - [ ] Workflow continuation is distinct from terminal repair; dependencies use deterministic predicates over verified facts.
 - [ ] Native suspension is nonterminal; long-running dependencies use explicit durable state without LLM polling.
@@ -1809,7 +1842,8 @@ Before approving a domain or major workflow, verify these design/implementation 
 - [ ] The final semantic owner composes normal wording; simple domain results prefer deterministic domain-local templates.
 - [ ] Structured facts remain authoritative; accepted/started/completed, failure, warnings, partial effects, and uncertainty remain distinct.
 - [ ] userResponse is mandatory and discriminates usable versus explicitly unavailable; missing/malformed state is a protocol violation.
-- [ ] Response Controller is the single deterministic interactive gate, not normal composer or general semantic prose reviewer.
+- [ ] Response Controller is the single deterministic interactive final-response gate, not normal composer or general semantic prose reviewer.
+- [ ] Optional repeated active-run progress uses the generic bounded Benson policy boundary and trusted recipient authority; it never finalizes, closes membership, releases ownership, suppresses the final or grants direct messaging access. Best-effort failure cannot replay execution.
 - [ ] Only otherwise valid explicit-unavailable final completions enable the one-shot tool-free Response Model.
 - [ ] Fallback has no hidden context, tools, mutation, workflow, or delivery authority; failure uses truthful deterministic wording.
 - [ ] No second model reviews arbitrary first-model prose; schema checks do not pretend to prove free-text truth.
@@ -1836,15 +1870,15 @@ Before approving a domain or major workflow, verify these design/implementation 
 2. Request Controller supplies bounded native conversation/workflow context and checks continuation before ordinary routing. Deterministic policy binds one authorized action/owner; classification grants no authority (Sections 4 and 5.3).
 3. Domains own internal reasoning and approved tool selection. Deterministic tools own authorization, execution, persistence, verification, and reconciliation.
 4. All Benson agent runs inherit one versioned Benson Agent Completion Protocol. TaskResultEnvelope and ResponseEnvelope are domain-task and final-workflow roles in that family.
-5. Every terminal run uses infrastructure-owned benson_complete. No raw final answer, prompt convention, or provider schema constraint replaces deterministic runtime validation.
+5. Every terminal run uses infrastructure-owned benson_complete to settle that run. Workflow closure additionally requires its reviewed domain/operation close condition and trusted workflow-final disposition; a nonterminal workflow may span fresh isolated runs with durable state between them. No raw final answer, prompt convention, or provider schema constraint replaces deterministic runtime validation.
 6. Trusted runtime/tool evidence establishes identity, correlation, authorization, route, provenance, verification, and delivery policy. Model claims alone cannot establish them.
-7. Completion Control binds accepted structured completions to trusted CALLER or RESPONSE_CONTROLLER destinations and rejects stale/duplicate/uncorrelated events.
-8. Final semantic ownership determines normal wording: direct domain for direct workflows, Main for Main-owned workflows. Domains prefer local deterministic templates for simple verified shapes.
+7. Completion Control retains callerless nonfinal results under existing workflow authority or delivers accepted structured completions to trusted CALLER or workflow-final RESPONSE_CONTROLLER destinations. Only eligible workflow-final direct results are projected; stale/duplicate/uncorrelated events cannot advance them.
+8. Run-origin final semantic ownership determines normal wording: direct domain for eligible direct finals, Main for Main-owned finals. Deterministic control-plane finals use trusted policy-owned wording under Section 6.7. Domains prefer local deterministic templates for simple verified shapes.
 9. Structured facts remain authoritative; wording cannot inflate outcomes or erase warnings, failures, partial effects, or uncertainty.
 10. userResponse explicitly distinguishes usable and unavailable. Missing/malformed state triggers completion repair, never accidental response fallback.
 11. Repair is bounded and completion-only in the same run. Runtime disables mutations and execution delegation; no completed or uncertain work is replayed.
-12. NORMAL means benson_complete accepted the agent's completion. After exhausted or impossible agent repair, sufficient trusted evidence permits runtime-built RECOVERED completion preserving the actual task/workflow outcome; only inability to establish complete trustworthy completion is FAILED. Its canonical failure report preserves known facts/effects/uncertainty. Exhaustion is not business failure, and malformed output never crosses the boundary.
-13. Every interactive workflow passes through one deterministic Response Controller before native delivery. It enforces trusted finality, eligibility, bounds, and one final-workflow completion/delivery shared by all independently recorded joined admissions, reflecting the latest accepted intent. Joining closes when workflow terminal finalization begins; later admissions use normal new-admission routing (Section 6.4). The controller does not own ordinary composition or semantic prose review.
+12. NORMAL accepts a valid run-origin completion through benson_complete or an explicitly typed deterministic control-plane workflow final under Section 6.7; it does not imply workflow success or an agent-produced final. For exhausted or impossible run-origin repair, sufficient trusted evidence permits runtime-built RECOVERED completion preserving the actual task/workflow outcome; only inability to establish complete trustworthy completion is FAILED. Its canonical failure report preserves known facts/effects/uncertainty. Exhaustion is not business failure, and malformed output never crosses the boundary.
+13. Every interactive final response passes through one deterministic Response Controller before native delivery. It enforces trusted finality, eligibility, bounds, and one final-workflow completion/delivery shared by all independently recorded joined admissions, reflecting the latest accepted intent. Joining closes when workflow terminal finalization begins; later admissions use normal new-admission routing (Section 6.4). Optional repeated active-run progress uses a distinct generic Benson policy boundary with trusted recipients, changes no run/workflow/resource finality and cannot replace the final. Neither boundary grants agents direct channel authority; Response Controller does not own ordinary composition or semantic prose review.
 14. The tool-free, one-shot Response Model is only fallback for valid explicit-unavailable final completion. Failure uses deterministic truthful wording; neither fallback repairs protocol failures nor reopens execution.
 15. Final approved message -> prepare -> freeze -> existing OpenClaw outbound queue -> sendPrepared/provider. Queued != delivered. Recovery reuses the frozen payload without re-rendering or rerunning agents.
 16. Execution evidence is independent of progress/UI events. Incomplete evidence is uncertain and cannot prove zero execution. Finalization/delivery failure never reauthorizes work.
