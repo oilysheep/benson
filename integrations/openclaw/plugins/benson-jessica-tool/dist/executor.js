@@ -17,7 +17,9 @@ const sortObject = (value) => Array.isArray(value) ? value.map(sortObject) :
     .sort(([a], [b]) => a.localeCompare(b)).map(([key, item]) => [key, sortObject(item)])) : value;
 const validTime = (value) => typeof value === 'string' && Number.isFinite(Date.parse(value));
 
-function fail(operation, code, stage, message, { active = null, sideEffects = 'none', retryMode = 'none' } = {}, now = new Date()) {
+function fail(operation, code, stage, message, { active = null,
+  sideEffects = Object.keys(active?.appliedSettings ?? {}).length ? 'observed' : 'none',
+  retryMode = 'none' } = {}, now = new Date()) {
   const data = active ? {
     operationId: active.operationId,
     rooms: active.plan.rooms.map((room) => room.slug),
@@ -317,13 +319,54 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
       throw new DomainError('EPOCH_UNTRUSTED', 'identity', 'Trusted external request epoch is unavailable');
     }
     const key = digest([DEVICE, auth.subject, epoch]);
-    return { request, key, requestHash: digest(sortObject(request)) };
+    return { request, key, requesterId: auth.subject, requestEpoch: epoch,
+      requestHash: digest(sortObject(request)) };
+  }
+
+  function stateUnavailable(operation, active = null) {
+    return fail(operation, 'RESOURCE_STATE_UNAVAILABLE', 'verification',
+      'Jessica ownership cannot be verified; retain known effects and reconcile read-only',
+      { active, sideEffects: Object.keys(active?.appliedSettings ?? {}).length ? 'observed' : 'possible',
+        retryMode: 'reconcile' }, current());
+  }
+
+  function observedStep(active, step, verdict) {
+    return { ...active, lastObservation: verdict.observation,
+      appliedSettings: step.kind === 'setting' ?
+        { ...active.appliedSettings, [step.name]: step.value } : active.appliedSettings };
   }
 
   function pending(active, code = 'OPERATION_PENDING') {
+    try {
+      const canonical = state.operation(active.operationId);
+      if (canonical?.kind === 'terminal') return canonical.value;
+      if (canonical?.value) {
+        if (!state.matchesOperation(active, canonical.value)) return stateUnavailable(active.plan.operation, active);
+        active = { ...canonical.value,
+          lastObservation: canonical.value.lastObservation ?? active.lastObservation,
+          appliedSettings: { ...active.appliedSettings, ...canonical.value.appliedSettings } };
+      }
+    } catch {
+      return stateUnavailable(active.plan.operation, active);
+    }
     return fail(active.plan.operation, code, 'verification', 'Operation needs read-only reconciliation',
       { active, sideEffects: active.appliedSettings && Object.keys(active.appliedSettings).length ? 'observed' : 'possible',
         retryMode: 'reconcile' }, current());
+  }
+
+  function recoverMatching(key, requestHash, operation, expected = null) {
+    // History is written before active state is cleared. Reading it second
+    // also covers a finalization between the original admission reads.
+    const active = state.active();
+    const prior = state.history(key);
+    if (prior) return prior.requestHash === requestHash ? prior.result :
+      fail(operation, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', {}, current());
+    if (!active || active.requestKey !== key) return null;
+    if (active.requestHash !== requestHash) return fail(operation, 'EPOCH_CONFLICT', 'precondition',
+      'Request epoch belongs to a different operation', {}, current());
+    if (active.phase === 'terminal') return state.finish(active, active.result);
+    if (expected && active.phase === 'prepared' && state.matchesSnapshot(expected, active)) return null;
+    return pending(expected && state.matchesOperation(expected, active) ? expected : active);
   }
 
   async function poll(active, step) {
@@ -340,7 +383,7 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
     return { kind: 'pending' };
   }
 
-  async function advance(active) {
+  async function advance(active, remember) {
     const key = active.requestKey;
     const steps = stepsFor(active);
     while (active.stepIndex < steps.length) {
@@ -356,9 +399,10 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
       } catch (error) {
         if (error instanceof DomainError && ['MAP_CHANGED', 'MAP_STALE', 'ROOM_MAP_MISMATCH', 'WORKFLOW_CHANGED'].includes(error.code)) {
           const result = fail(active.plan.operation, error.code, error.stage, error.message, { active }, current());
-          return state.finish(key, active.requestHash, active.planHash, result);
+          return state.finish(active, result);
         }
-        return fail(active.plan.operation, 'READ_UNAVAILABLE', 'precondition', 'Fresh pre-dispatch state is unavailable',
+        return recoverMatching(key, active.requestHash, active.plan.operation, active) ??
+          fail(active.plan.operation, 'READ_UNAVAILABLE', 'precondition', 'Fresh pre-dispatch state is unavailable',
           { active, retryMode: 'read_only' }, current());
       }
       if (evidence.status.state !== active.before.state ||
@@ -379,70 +423,72 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
              evidence.chargingStatus?.sourceUpdatedAt !== active.before.chargingStatus?.sourceUpdatedAt))) {
         const result = fail(active.plan.operation, 'PRECONDITION_CHANGED', 'precondition', 'Vacuum changed before dispatch',
           { active }, current());
-        return state.finish(key, active.requestHash, active.planHash, result);
+        return state.finish(active, result);
       }
       if (active.plan.underTestId && (registry.underTest?.id !== active.plan.underTestId ||
           current().getTime() >= Date.parse(registry.underTest.expiresAt))) {
         const sideEffects = Object.keys(active.appliedSettings ?? {}).length ? 'observed' : 'none';
         const result = fail(active.plan.operation, 'CANARY_SCOPE_EXPIRED', 'precondition',
           'Under-test scope expired before dispatch', { active, sideEffects }, current());
-        return state.finish(key, active.requestHash, active.planHash, result);
+        return state.finish(active, result);
       }
       if (active.plan.underTestId && !state.claimUnderTest(active.plan.underTestId, key,
         active.operationId, current())) {
         const result = fail(active.plan.operation, 'CANARY_ALREADY_USED', 'precondition', 'Under-test dispatch has already been claimed',
           { active }, current());
-        return state.finish(key, active.requestHash, active.planHash, result);
+        return state.finish(active, result);
       }
-      const claimed = state.transition(key, ['prepared'], (value) =>
-        value.stepIndex === active.stepIndex ? { ...value, phase: 'dispatching',
-          dispatchStartedAt: current().toISOString() } : undefined);
-      if (!claimed.changed) return pending(state.active() ?? active);
+      const claimed = state.claimMutation(active, current());
+      if (!claimed.changed) return pending(active);
       active = claimed.active;
+      remember(active);
       hooks.afterDispatchMarker?.(structuredClone(active));
+      if (!state.mutationCurrent(active)) return pending(active, 'RESOURCE_OWNER_STALE');
       let accepted = false;
       try { accepted = (await driver.dispatch(step))?.accepted === true; }
       catch { /* A broken connection after POST cannot prove no side effect. */ }
       hooks.afterPost?.(structuredClone(active));
-      const moved = state.transition(key, ['dispatching'], (value) =>
-        value.stepIndex === active.stepIndex ? { ...value, phase: 'verifying',
-          dispatch: accepted ? 'accepted' : 'unknown' } : undefined);
-      if (!moved.changed) return pending(state.active() ?? active);
+      const moved = state.settleMutation(active, accepted);
+      if (!moved.changed) return pending(active);
       active = moved.active;
+      remember(active);
       hooks.afterAcceptedState?.(structuredClone(active));
       const verdict = await poll(active, step);
       if (verdict.kind === 'mismatch' || verdict.kind === 'pending') {
         const code = verdict.kind === 'mismatch' ? 'TARGET_MISMATCH' : 'VERIFICATION_TIMEOUT';
-        const updated = state.transition(key, ['verifying'], (value) => ({ ...value, phase: 'uncertain',
+        state.transition(active, ['verifying'], (value) => ({ ...value, phase: 'uncertain',
           lastObservation: verdict.observation ?? null }));
-        return pending(updated.active ?? active, code);
+        return pending(active, code);
       }
+      const verified = observedStep(active, step, verdict);
+      remember(verified);
       if (active.dispatch !== 'accepted') {
-        const updated = state.transition(key, ['verifying'], (value) => ({ ...value, phase: 'uncertain',
+        state.transition(active, ['verifying'], (value) => ({ ...value, phase: 'uncertain',
           lastObservation: verdict.observation,
           appliedSettings: step.kind === 'setting' ? { ...value.appliedSettings, [step.name]: step.value } : value.appliedSettings }));
-        return pending(updated.active ?? active, 'DISPATCH_UNCERTAIN');
+        return pending(verified, 'DISPATCH_UNCERTAIN');
       }
       if (step.kind === 'setting') {
-        const updated = state.transition(key, ['verifying'], (value) => ({ ...value,
+        const updated = state.transition(active, ['verifying'], (value) => ({ ...value,
           phase: 'prepared', stepIndex: value.stepIndex + 1,
           before: { ...verdict.observation, taskId: evidence.taskId ?? null, taskScope: evidence.taskScope ?? null,
             taskStatus: active.plan.roomTaskSignal ? structuredClone(evidence.taskStatus) : null,
             settings: verdict.settings, settingSources: verdict.settingSources },
           appliedSettings: { ...value.appliedSettings, [step.name]: step.value },
         }));
-        if (!updated.changed) return pending(state.active() ?? active);
+        if (!updated.changed) return pending(verified);
         active = updated.active;
+        remember(active);
         continue;
       }
       let result;
       try { result = actionSuccess(active, verdict.outcome, verdict.observation, current()); }
       catch {
-        const updated = state.transition(key, ['verifying'], (value) => ({ ...value, phase: 'uncertain',
+        state.transition(active, ['verifying'], (value) => ({ ...value, phase: 'uncertain',
           lastObservation: verdict.observation }));
-        return pending(updated.active ?? active, 'INTEGRITY_UNVERIFIED');
+        return pending(verified, 'INTEGRITY_UNVERIFIED');
       }
-      return state.finish(key, active.requestHash, active.planHash, result);
+      return state.finish(active, result);
     }
     throw new Error('Jessica execution plan has no command step');
   }
@@ -450,9 +496,12 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
   async function execute(rawRequest, context) {
     let operation = EXECUTE_OPERATIONS.includes(rawRequest?.operation) ? rawRequest.operation : null;
     let key;
+    let requestHash;
+    let lastKnown = null;
     try {
       const derived = identityAndKey(rawRequest, context);
-      const { request, requestHash } = derived;
+      const { request } = derived;
+      requestHash = derived.requestHash;
       key = derived.key;
       operation = request.operation;
       const prior = state.history(key);
@@ -462,12 +511,18 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
       if (existing?.requestKey === key && existing.requestHash !== requestHash) {
         return fail(operation, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', {}, current());
       }
+      if (existing?.requestKey === key) lastKnown = existing;
       if (existing?.requestKey === key && existing.phase === 'terminal') {
-        return state.finish(key, requestHash, existing.planHash, existing.result);
+        return state.finish(existing, existing.result);
       }
       if (existing?.requestKey === key && existing.phase !== 'prepared') return pending(existing);
       if (existing && existing.requestKey !== key) {
-        return fail(operation, 'CONFLICT_UNRESOLVED', 'precondition', 'Another Jessica operation is unresolved', {}, current());
+        return recoverMatching(key, requestHash, operation) ??
+          fail(operation, 'CONFLICT_UNRESOLVED', 'precondition', 'Another Jessica operation is unresolved', {}, current());
+      }
+      if (!existing && state.resource().owner) {
+        return recoverMatching(key, requestHash, operation) ?? fail(operation, 'RESOURCE_BUSY', 'precondition',
+          'Jessica physical ownership has not been verifiably released; try later', {}, current());
       }
       const evidence = await driver.read();
       const plan = core.prepareExecute(request, context.identity, evidence, current());
@@ -479,85 +534,110 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
       }
       if (!existing) {
         const intent = { version: '1', requestKey: key, requestHash, planHash,
+          requesterId: derived.requesterId, requestEpoch: derived.requestEpoch,
           operationId: `j4-${digest([key, requestHash]).slice(0,32)}`, plan, phase: 'prepared', stepIndex: 0,
           before, suctionAlreadySet: plan.settings?.suction !== undefined &&
             before.settings.suction === plan.settings.suction,
           appliedSettings: {}, lastObservation: null, createdAt: current().toISOString() };
         const reservation = state.reserve(intent);
+        const raced = reservation.completed ?? state.history(key);
+        if (raced) {
+          return raced.requestHash === requestHash ? raced.result :
+            fail(operation, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', {}, current());
+        }
+        if (reservation.kind === 'busy') {
+          return recoverMatching(key, requestHash, operation) ?? fail(operation, 'RESOURCE_BUSY', 'precondition',
+            'Jessica physical ownership has not been verifiably released; try later', {}, current());
+        }
         if (reservation.kind === 'conflict') {
-          return fail(operation, 'CONFLICT_UNRESOLVED', 'precondition', 'Another Jessica operation is unresolved', {}, current());
+          return recoverMatching(key, requestHash, operation) ??
+            fail(operation, 'CONFLICT_UNRESOLVED', 'precondition', 'Another Jessica operation is unresolved', {}, current());
         }
         existing = reservation.active;
         if (existing.requestHash !== requestHash || existing.planHash !== planHash) {
           return fail(operation, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', {}, current());
         }
-        const raced = state.history(key);
-        if (raced) {
-          state.transition(key, ['prepared'], () => null);
-          return raced.requestHash === requestHash ? raced.result :
-            fail(operation, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', {}, current());
-        }
+        lastKnown = existing;
+        if (existing.phase === 'terminal') return state.finish(existing, existing.result);
+        if (existing.phase !== 'prepared') return pending(existing);
       }
       hooks.afterIntent?.(structuredClone(existing));
-      return await advance(existing);
+      return await advance(existing, (value) => { lastKnown = value; });
     } catch (error) {
-      const active = key ? state.active() : null;
-      if (active && active.requestKey === key && active.phase !== 'prepared') return pending(active, 'EXECUTION_UNCERTAIN');
+      try {
+        const recovered = key ? recoverMatching(key, requestHash, operation, lastKnown) : null;
+        if (recovered) return recovered;
+      }
+      catch {
+        return stateUnavailable(operation, lastKnown);
+      }
       const known = error instanceof DomainError;
       return fail(operation, known ? error.code : 'EXECUTION_UNAVAILABLE', known ? error.stage : 'verification',
         known ? error.message : 'Jessica execution is unavailable',
-        active && active.requestKey === key ? { active, retryMode: 'read_only' } : {}, current());
+        lastKnown ? { active: lastKnown, retryMode: 'read_only' } : {}, current());
     }
   }
 
   async function reconcile(rawRequest, context) {
     let operation = EXECUTE_OPERATIONS.includes(rawRequest?.operation) ? rawRequest.operation : null;
+    let key, requestHash;
+    let lastKnown = null;
     try {
-      const { request, key, requestHash } = identityAndKey(rawRequest, context);
+      const derived = identityAndKey(rawRequest, context);
+      const { request } = derived;
+      ({ key, requestHash } = derived);
       operation = request.operation;
       const prior = state.history(key);
       if (prior) return prior.requestHash === requestHash ? prior.result :
         fail(operation, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', {}, current());
       const active = state.active();
       if (!active || active.requestKey !== key || active.requestHash !== requestHash) {
-        return fail(operation, 'OPERATION_NOT_FOUND', 'precondition', 'No matching Jessica intent exists', {}, current());
+        return recoverMatching(key, requestHash, operation) ??
+          fail(operation, 'OPERATION_NOT_FOUND', 'precondition', 'No matching Jessica intent exists', {}, current());
       }
-      if (active.phase === 'terminal') return state.finish(key, requestHash, active.planHash, active.result);
-      if (active.phase === 'prepared') return fail(operation, 'NOT_DISPATCHED', 'verification',
+      lastKnown = active;
+      if (active.phase === 'terminal') return state.finish(active, active.result);
+      if (active.phase === 'prepared') return recoverMatching(key, requestHash, operation, active) ?? fail(operation, 'NOT_DISPATCHED', 'verification',
         'Intent exists but dispatch was not marked', { active, retryMode: 'read_only' }, current());
       const step = stepsFor(active)[active.stepIndex];
       let verdict;
       try { verdict = verifyStep(active, step, await driver.read(), current(), registry); }
       catch { verdict = { kind: 'pending' }; }
       if (verdict.kind !== 'verified') {
-        const updated = state.transition(key, ['dispatching', 'verifying', 'uncertain'],
+        state.transition(active, ['dispatching', 'verifying', 'uncertain'],
           (value) => ({ ...value, phase: 'uncertain', lastObservation: verdict.observation ?? value.lastObservation }));
-        return pending(updated.active ?? active, verdict.kind === 'mismatch' ? 'TARGET_MISMATCH' : 'RECONCILIATION_UNRESOLVED');
+        return pending(active, verdict.kind === 'mismatch' ? 'TARGET_MISMATCH' : 'RECONCILIATION_UNRESOLVED');
       }
+      lastKnown = observedStep(active, step, verdict);
       if (step.kind === 'setting') {
-        const partial = { ...active, appliedSettings: { ...active.appliedSettings, [step.name]: step.value },
-          lastObservation: verdict.observation };
-        const updated = state.transition(key, ['dispatching', 'verifying', 'uncertain'], () => partial);
-        if (!updated.changed) return pending(state.active() ?? active);
+        const partial = lastKnown;
+        const updated = state.transition(active, ['dispatching', 'verifying', 'uncertain'], () => partial);
+        if (!updated.changed) return pending(partial);
         const result = fail(operation, 'PARTIAL_SETTING_APPLIED', 'verification',
           'A setting changed; the cleaning command was not sent',
           { active: partial, sideEffects: 'observed' }, current());
-        return state.finish(key, requestHash, active.planHash, result);
+        return state.finish(updated.active, result);
       }
       if (active.dispatch !== 'accepted') {
-        const updated = state.transition(key, ['dispatching', 'verifying', 'uncertain'],
+        state.transition(active, ['dispatching', 'verifying', 'uncertain'],
           (value) => ({ ...value, phase: 'uncertain', lastObservation: verdict.observation }));
-        return pending(updated.active ?? active, 'DISPATCH_UNCERTAIN');
+        return pending(lastKnown, 'DISPATCH_UNCERTAIN');
       }
       let result;
       try { result = actionSuccess(active, verdict.outcome, verdict.observation, current()); }
       catch { return pending(active, 'INTEGRITY_UNVERIFIED'); }
-      return state.finish(key, requestHash, active.planHash, result);
+      return state.finish(active, result);
     } catch (error) {
+      try {
+        const recovered = key ? recoverMatching(key, requestHash, operation, lastKnown) : null;
+        if (recovered) return recovered;
+      } catch { return stateUnavailable(operation, lastKnown); }
       const known = error instanceof DomainError;
       return fail(operation, known ? error.code : 'RECONCILIATION_UNAVAILABLE',
         known ? error.stage : 'verification', known ? error.message : 'Jessica reconciliation is unavailable',
-        {}, current());
+        { active: lastKnown,
+          sideEffects: Object.keys(lastKnown?.appliedSettings ?? {}).length ? 'observed' : known ? 'none' : 'possible',
+          retryMode: lastKnown ? 'reconcile' : 'none' }, current());
     }
   }
 
