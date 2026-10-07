@@ -7,7 +7,7 @@ import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
 import { createPluginStateSyncKeyedStore } from '/home/oa/.npm-global/lib/node_modules/openclaw/dist/plugin-sdk/plugin-state-store-runtime.js';
 import { createJessicaExecutor } from '../dist/executor.js';
-import { JESSICA_STATE_OPTIONS } from '../dist/operation-state.js';
+import { createOperationState, JESSICA_STATE_OPTIONS } from '../dist/operation-state.js';
 import { createSocketDriver, startFakeHa } from './fake-ha.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -19,7 +19,21 @@ const clean = { operation: 'clean', target: { kind: 'rooms', rooms: ['salon'] } 
 const identity = { source: 'trusted_runtime', senderId: 'oren', channelKind: 'direct', perSenderVerified: true };
 const context = (requestEpoch) => ({ identity, requestEpoch });
 
-async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], map = mapFixture, underTest = false) {
+// Synthetic release exercises reuse mechanics, not Jessica physical proof.
+function releaseFixtureResource(f) {
+  const state = createOperationState(f.store, { verifyRelease: (owner, evidence) =>
+    evidence?.kind === 'fixture-physical-terminal' && evidence.operationId === owner.operationId &&
+    evidence.generation === owner.generation });
+  const owner = state.resource().owner;
+  assert.equal(state.releaseResource(owner, { kind: 'fixture-physical-terminal',
+    operationId: owner.operationId, generation: owner.generation }), true);
+  Object.assign(f.server.state.status, { state: 'docked', activeSegments: [], currentSegment: null });
+  f.server.state.taskStatus.state = 'completed';
+}
+
+async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], map = mapFixture, underTest = false,
+  wrapDriver = (driver) => driver) {
+  const expiresAt = new Date(Date.now() + 3_600_000).toISOString();
   const dir = mkdtempSync(join(tmpdir(), 'benson-jessica-stage4-'));
   const stateRoot = join(dir, 'state-root');
   const socketPath = join(dir, 'ha.sock');
@@ -35,7 +49,7 @@ async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], m
   }
   if (underTest === 'suction') {
     registry.underTest = { id: 'stage7-suction-test', capability: 'clean_settings', room: 'guest_bathroom',
-      settings: { suction: 'strong' }, expiresAt: '2026-09-27T20:00:00+03:00', maxDispatches: 2 };
+      settings: { suction: 'strong' }, expiresAt, maxDispatches: 2 };
   } else if (underTest === true) {
     delete registry.capabilities.find((cap) => cap.name === 'clean_single_room').verifiedRooms;
     for (const name of ['pause', 'dock']) {
@@ -44,20 +58,20 @@ async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], m
       delete control.verifiedRooms;
     }
     registry.underTest = { id: 'stage6-test-canary', capability: 'clean_single_room', room: 'guest_bathroom', subject: 'oren',
-      expiresAt: '2026-09-27T20:00:00+03:00', maxDispatches: 1 };
+      expiresAt, maxDispatches: 1 };
   } else if (underTest === 'multi') {
     registry.capabilities.find((cap) => cap.name === 'clean_multi_room').support = 'reported';
     registry.underTest = { id: 'fc2-multi-test', capability: 'clean_multi_room',
       rooms: ['living_room', 'hallway'], subject: 'oren',
-      expiresAt: '2026-09-27T20:00:00+03:00', maxDispatches: 1 };
+      expiresAt, maxDispatches: 1 };
   } else if (underTest === 'home') {
     registry.underTest = { id: 'fc2-home-test', capability: 'clean_home', subject: 'oren',
       reviewedGeometrySha256: 'de38293681d645b1b6ef43435140650b0857745e22beab905b2dbd4f2e69aa7c',
-      expiresAt: '2026-09-30T20:00:00+03:00', maxDispatches: 1 };
+      expiresAt, maxDispatches: 1 };
   } else if (underTest === 'multi-pause') {
     registry.underTest = { id: 'fc2-pause-multi-fixture', capability: 'pause',
       rooms: ['living_room', 'hallway'], subject: 'oren',
-      expiresAt: '2026-09-30T20:00:00+03:00', maxDispatches: 1 };
+      expiresAt, maxDispatches: 1 };
   } else if (underTest === 'hallway-pause') {
     const cleanCapability = registry.capabilities.find((cap) => cap.name === 'clean_single_room');
     cleanCapability.verifiedRooms = cleanCapability.verifiedRooms.filter((item) =>
@@ -65,7 +79,7 @@ async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], m
     const pauseCapability = registry.capabilities.find((cap) => cap.name === 'pause');
     pauseCapability.verifiedRooms = pauseCapability.verifiedRooms.filter((item) => item.room === 'guest_bathroom');
     registry.underTest = { id: 'fc2-pause-hallway-fixture', capability: 'pause', room: 'hallway',
-      subject: 'oren', expiresAt: '2026-09-29T20:00:00+03:00', maxDispatches: 1 };
+      subject: 'oren', expiresAt, maxDispatches: 1 };
   } else if (underTest === 'pause') {
     const pause = registry.capabilities.find((cap) => cap.name === 'pause');
     pause.support = 'reported';
@@ -73,7 +87,7 @@ async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], m
     pause.provenance = 'Deterministic canary fixture';
     delete pause.verifiedRooms;
     registry.underTest = { id: 'fc1-pause-canary-test', capability: 'pause', room: 'guest_bathroom',
-      subject: 'oren', expiresAt: '2026-09-27T20:00:00+03:00', maxDispatches: 1 };
+      subject: 'oren', expiresAt, maxDispatches: 1 };
   } else if (underTest === 'dock') {
     const dock = registry.capabilities.find((cap) => cap.name === 'dock');
     dock.support = 'reported';
@@ -81,7 +95,7 @@ async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], m
     dock.provenance = 'Deterministic canary fixture';
     delete dock.verifiedRooms;
     registry.underTest = { id: 'fc1-dock-canary-test', capability: 'dock', room: 'guest_bathroom',
-      subject: 'oren', expiresAt: '2026-09-27T20:00:00+03:00', maxDispatches: 1 };
+      subject: 'oren', expiresAt, maxDispatches: 1 };
   }
   for (const name of capabilities) {
     const cap = registry.capabilities.find((item) => item.name === name);
@@ -99,9 +113,9 @@ async function fixture(t, behavior = {}, capabilities = ['clean_single_room'], m
     ...JESSICA_STATE_OPTIONS, env: { ...process.env, OPENCLAW_STATE_DIR: stateRoot },
   });
   const engine = createJessicaExecutor({ registryConfig: registry, policyConfig: policy, store,
-    driver: createSocketDriver(socketPath), wait: () => Promise.resolve(),
+    driver: wrapDriver(createSocketDriver(socketPath)), wait: () => Promise.resolve(),
     pollCounts: { clean: 3, setting: 2 } });
-  return { dir, stateRoot, socketPath, server, store, engine };
+  return { dir, stateRoot, socketPath, server, store, engine, registry };
 }
 
 test('one-room under-test dispatch uses fresh HA task and exact segment evidence once', async (t) => {
@@ -118,7 +132,7 @@ test('one-room under-test dispatch uses fresh HA task and exact segment evidence
   f.server.state.status.activeSegments = null;
   f.server.state.taskStatus.state = 'completed';
   const second = await f.engine.execute(request, context('canary-second'));
-  assert.equal(second.error.code, 'CANARY_ALREADY_USED');
+  assert.equal(second.error.code, 'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 
@@ -165,7 +179,7 @@ test('scoped suction read-back precedes one verified guest bathroom clean', asyn
   f.server.state.taskStatus.state = 'completed';
   f.server.state.settings.suction = 'standard';
   f.server.state.deviceSuction = 'standard';
-  assert.equal((await f.engine.execute(request, context('second-suction-canary'))).error.code, 'CANARY_ALREADY_USED');
+  assert.equal((await f.engine.execute(request, context('second-suction-canary'))).error.code, 'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 2);
 });
 
@@ -291,6 +305,43 @@ test('single-room success is bound to one POST and an epoch-stable result', asyn
   assert.equal(f.server.state.posts.length, 1);
 });
 
+test('P04 started result and an uncorrelated idle observation do not release physical ownership', async (t) => {
+  const f = await fixture(t);
+  const first = await f.engine.execute(clean, context('p04-owner'));
+  assert.equal(first.status, 'success');
+  assert.equal(first.data.outcome, 'started');
+  assert.equal(f.engine.state.active(), null);
+  f.server.state.status.state = 'docked';
+  f.server.state.status.activeSegments = null;
+  f.server.state.status.currentSegment = null;
+  f.server.state.taskStatus.state = 'completed';
+  const second = await f.engine.execute(clean, context('p04-competing'));
+  assert.equal(second.error?.code, 'RESOURCE_BUSY');
+  assert.equal(f.server.state.posts.length, 1);
+  assert.deepEqual(await f.engine.execute(clean, context('p04-owner')), first);
+  for (const senderId of ['oren', 'ilana']) {
+    const control = await f.engine.execute({ operation: 'pause' }, {
+      identity: { ...identity, senderId }, requestEpoch: `p04-new-control-${senderId}`,
+    });
+    assert.equal(control.error.code, 'RESOURCE_BUSY');
+  }
+  assert.equal(f.server.state.posts.length, 1);
+});
+
+test('P04 invalid native ownership returns a structured refusal without a mutation', async (t) => {
+  const f = await fixture(t);
+  f.store.register('device:jessica-vacuum', { version: '1', active: null });
+  const outcome = await f.engine.execute(clean, context('p04-unprovable-owner'));
+  assert.equal(outcome.status, 'failure');
+  assert.equal(outcome.error.code, 'RESOURCE_STATE_UNAVAILABLE');
+  assert.equal(outcome.error.sideEffects, 'possible');
+  const recovered = await f.engine.reconcile(clean, context('p04-unprovable-owner'));
+  assert.equal(recovered.error.code, 'RESOURCE_STATE_UNAVAILABLE');
+  assert.equal(recovered.error.sideEffects, 'possible');
+  assert.equal(f.server.state.posts.length, 0);
+  assert.deepEqual(f.store.lookup('device:jessica-vacuum'), { version: '1', active: null });
+});
+
 test('Oren-only multi-room canary rejects other sets and settings before POST, then dispatches once', async (t) => {
   const f = await fixture(t, { noTaskId: true, initialSegments: null }, [], mapFixture, 'multi');
   const request = { operation: 'clean', target: { kind: 'rooms', rooms: ['living_room', 'hallway'] } };
@@ -316,7 +367,7 @@ test('Oren-only multi-room canary rejects other sets and settings before POST, t
   f.server.state.status.activeSegments = null;
   f.server.state.taskStatus.state = 'completed';
   assert.equal((await f.engine.execute(request, context('multi-canary-second'))).error.code,
-    'CANARY_ALREADY_USED');
+    'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 
@@ -411,7 +462,7 @@ test('FC2 hallway pause uses the one-shot claim and fresh current-room evidence'
   f.server.state.status.state = 'cleaning';
   f.server.state.taskStatus = { state: 'room_cleaning', sourceUpdatedAt: new Date(Date.now() - 4_000).toISOString() };
   const second = await f.engine.execute({ operation: 'pause' }, context('oren-hallway-pause-again'));
-  assert.equal(second.error.code, 'CANARY_ALREADY_USED');
+  assert.equal(second.error.code, 'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 
@@ -454,7 +505,7 @@ test('one-shot pause canary binds Oren and cannot be reused', async (t) => {
   f.server.state.status.state = 'cleaning';
   activeRoom(f);
   const second = await f.engine.execute({ operation: 'pause' }, context('oren-second'));
-  assert.equal(second.error.code, 'CANARY_ALREADY_USED');
+  assert.equal(second.error.code, 'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 
@@ -491,7 +542,7 @@ test('one-shot dock canary binds Oren and cannot be reused', async (t) => {
   f.server.state.status.activeSegments = [10];
   activeRoom(f);
   const second = await f.engine.execute({ operation: 'dock' }, context('dock-oren-second'));
-  assert.equal(second.error.code, 'CANARY_ALREADY_USED');
+  assert.equal(second.error.code, 'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 
@@ -533,7 +584,7 @@ test('one-shot home canary binds Oren, reviewed geometry and new device AUTO_CLE
   f.server.state.taskStatus.state = 'completed';
   f.server.state.taskDevice.value = 0;
   const second = await f.engine.execute(request, context('home-second'));
-  assert.equal(second.error.code, 'CANARY_ALREADY_USED');
+  assert.equal(second.error.code, 'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 
@@ -614,7 +665,8 @@ test('crash after marker preserves uncertainty and blocks all resend', async (t)
   assert.equal((await f.engine.execute(clean, context('crash-marker-epoch'))).error.code, 'OPERATION_PENDING');
   assert.equal((await f.engine.execute(clean, context('another-message'))).error.code, 'CONFLICT_UNRESOLVED');
   assert.equal((await f.engine.reconcile(clean, context('crash-marker-epoch'))).error.code, 'RECONCILIATION_UNRESOLVED');
-  assert.equal(f.engine.state.active().phase, 'uncertain');
+  assert.equal(f.engine.state.active().phase, 'dispatching');
+  assert.notEqual(f.engine.state.resource().inFlight, null);
   assert.equal(f.server.state.posts.length, 0);
 });
 
@@ -667,9 +719,451 @@ test('partial setting change is reported and cleaning is not dispatched', async 
   assert.equal(f.engine.state.active().phase, 'uncertain');
 });
 
+test('P04 delayed setting reconciliation cannot overwrite a newer accepted command or its final result', { timeout: 10_000 }, async (t) => {
+  for (const afterFinal of [false, true]) await t.test(afterFinal ? 'after finalization' : 'after command acceptance', async (t) => {
+    const barrier = () => {
+      let release;
+      const promise = new Promise((resolve) => { release = resolve; });
+      return { promise, release };
+    };
+    const settingPoll = barrier(), resumeSetting = barrier();
+    const capturedReconcile = barrier(), resumeReconcile = barrier();
+    const commandPoll = barrier(), resumeCommand = barrier();
+    let reads = 0;
+    const f = await fixture(t, {}, [], mapFixture, 'verified-suction', (driver) => ({
+      ...driver,
+      async read() {
+        const call = ++reads;
+        const evidence = await driver.read();
+        if (call === 3) { settingPoll.release(); await resumeSetting.promise; }
+        if (call === 4) { capturedReconcile.release(); await resumeReconcile.promise; }
+        if (call === 6) { commandPoll.release(); await resumeCommand.promise; }
+        return evidence;
+      },
+    }));
+    t.after(() => { resumeSetting.release(); resumeReconcile.release(); resumeCommand.release(); });
+    const request = { operation: 'clean', target: { kind: 'rooms', rooms: ['guest_bathroom'] },
+      settings: { suction: 'strong' } };
+    const ctx = context(`p04-delayed-reconcile-${afterFinal}`);
+    const executing = f.engine.execute(request, ctx);
+    await settingPoll.promise;
+    const reconciling = f.engine.reconcile(request, ctx);
+    await capturedReconcile.promise;
+    resumeSetting.release();
+    await commandPoll.promise;
+    assert.equal(f.engine.state.active().stepIndex, 1);
+    assert.equal(f.engine.state.active().dispatch, 'accepted');
+    let result;
+    if (afterFinal) { resumeCommand.release(); result = await executing; }
+    resumeReconcile.release();
+    const reconciled = await reconciling;
+    if (afterFinal) assert.deepEqual(reconciled, result);
+    else {
+      assert.equal(reconciled.error.code, 'OPERATION_PENDING');
+      assert.equal(reconciled.error.sideEffects, 'observed');
+      assert.equal(f.engine.state.active().stepIndex, 1);
+      assert.equal(f.engine.state.active().dispatch, 'accepted');
+      resumeCommand.release();
+      result = await executing;
+    }
+    assert.equal(result.status, 'success', result.error?.code);
+    assert.equal(result.data.outcome, 'started');
+    assert.deepEqual(result.data.appliedSettings, { suction: 'strong' });
+    assert.equal(f.server.state.posts.length, 2);
+    assert.deepEqual(await f.engine.reconcile(request, ctx), result);
+    assert.deepEqual(await f.engine.execute(request, ctx), result);
+    assert.equal(f.server.state.posts.length, 2);
+    assert.equal(f.engine.state.active(), null);
+    assert.equal(f.engine.state.resource().owner.operationId, result.data.operationId);
+  });
+});
+
+test('P04 a delayed same-epoch duplicate preserves accepted execution and its canonical final', { timeout: 10_000 }, async (t) => {
+  for (const afterFinal of [false, true]) await t.test(afterFinal ? 'after finalization' : 'after acceptance', async (t) => {
+    const barrier = () => {
+      let release;
+      const promise = new Promise((resolve) => { release = resolve; });
+      return { promise, release };
+    };
+    const capturedDuplicate = barrier(), resumeDuplicate = barrier();
+    const verifying = barrier(), resumeVerification = barrier();
+    let reads = 0;
+    const f = await fixture(t, {}, ['clean_single_room'], mapFixture, false, (driver) => ({
+      ...driver,
+      async read() {
+        const call = ++reads;
+        const evidence = await driver.read();
+        if (call === 1) { capturedDuplicate.release(); await resumeDuplicate.promise; }
+        if (call === 4) { verifying.release(); await resumeVerification.promise; }
+        return evidence;
+      },
+    }));
+    t.after(() => { resumeDuplicate.release(); resumeVerification.release(); });
+    const ctx = context(`p04-delayed-duplicate-${afterFinal}`);
+    const duplicate = f.engine.execute(clean, ctx);
+    await capturedDuplicate.promise;
+    const executing = f.engine.execute(clean, ctx);
+    await verifying.promise;
+    let result;
+    if (afterFinal) { resumeVerification.release(); result = await executing; }
+    resumeDuplicate.release();
+    const repeated = await duplicate;
+    if (afterFinal) assert.deepEqual(repeated, result);
+    else {
+      assert.equal(repeated.error.code, 'OPERATION_PENDING');
+      assert.equal(f.engine.state.active().phase, 'verifying');
+      assert.equal(f.engine.state.active().dispatch, 'accepted');
+      resumeVerification.release();
+      result = await executing;
+    }
+    assert.equal(result.status, 'success', result.error?.code);
+    assert.equal(result.data.outcome, 'started');
+    assert.deepEqual(await f.engine.execute(clean, ctx), result);
+    assert.deepEqual(await f.engine.reconcile(clean, ctx), result);
+    assert.equal(f.server.state.posts.length, 1);
+    assert.equal(f.engine.state.active(), null);
+    assert.equal(f.engine.state.resource().owner.operationId, result.data.operationId);
+  });
+});
+
+test('P04 a history miss before concurrent finalization preserves execute and reconcile success', async (t) => {
+  const f = await fixture(t);
+  const ctx = context('p04-history-read-race');
+  const result = await f.engine.execute(clean, ctx);
+  assert.equal(result.status, 'success', result.error?.code);
+  const before = f.store.lookup('device:jessica-vacuum');
+  let stale = true;
+  const racedStore = {
+    lookup(key) {
+      const current = f.store.lookup(key);
+      // The first history read predates completion; later native reads see it.
+      if (stale && key.startsWith('request:')) { stale = false; return undefined; }
+      return current;
+    },
+    update: (...args) => f.store.update(...args),
+    registerIfAbsent: (...args) => f.store.registerIfAbsent(...args),
+  };
+  const duplicate = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: racedStore,
+    driver: createSocketDriver(f.socketPath), wait: () => Promise.resolve(), pollCounts: { clean: 3 } });
+  assert.deepEqual(await duplicate.execute(clean, ctx), result);
+  assert.equal(stale, false);
+  stale = true;
+  assert.deepEqual(await duplicate.reconcile(clean, ctx), result);
+  assert.equal(stale, false);
+  assert.equal(f.server.state.posts.length, 1);
+  assert.deepEqual(f.store.lookup('device:jessica-vacuum'), before);
+});
+
+test('P04 a delayed pre-dispatch read failure recovers newer pending or canonical final state', { timeout: 10_000 }, async (t) => {
+  for (const afterFinal of [false, true]) await t.test(afterFinal ? 'after finalization' : 'after acceptance', async (t) => {
+    const barrier = () => {
+      let release;
+      const promise = new Promise((resolve) => { release = resolve; });
+      return { promise, release };
+    };
+    const delayed = barrier(), failRead = barrier(), verifying = barrier(), resumeVerification = barrier();
+    let reads = 0;
+    const f = await fixture(t, {}, ['clean_single_room'], mapFixture, false, (driver) => ({
+      ...driver,
+      async read() {
+        const call = ++reads;
+        const evidence = await driver.read();
+        if (call === 2) {
+          delayed.release(); await failRead.promise;
+          throw Error('Fixture delayed pre-dispatch read failure');
+        }
+        if (call === 5) { verifying.release(); await resumeVerification.promise; }
+        return evidence;
+      },
+    }));
+    t.after(() => { failRead.release(); resumeVerification.release(); });
+    const ctx = context(`p04-delayed-read-failure-${afterFinal}`);
+    const duplicate = f.engine.execute(clean, ctx);
+    await delayed.promise;
+    const executing = f.engine.execute(clean, ctx);
+    await verifying.promise;
+    let result;
+    if (afterFinal) { resumeVerification.release(); result = await executing; }
+    failRead.release();
+    const recovered = await duplicate;
+    if (afterFinal) assert.deepEqual(recovered, result);
+    else {
+      assert.equal(recovered.error.code, 'OPERATION_PENDING');
+      assert.equal(recovered.error.sideEffects, 'possible');
+      assert.equal(f.engine.state.active().dispatch, 'accepted');
+      resumeVerification.release();
+      result = await executing;
+    }
+    assert.equal(result.status, 'success', result.error?.code);
+    assert.deepEqual(await f.engine.execute(clean, ctx), result);
+    assert.deepEqual(await f.engine.reconcile(clean, ctx), result);
+    assert.equal(f.server.state.posts.length, 1);
+    assert.equal(f.engine.state.resource().owner.operationId, result.data.operationId);
+  });
+});
+
+test('P04 pre-dispatch failures preserve a previously verified setting effect', async (t) => {
+  for (const kind of ['read', 'map', 'precondition']) await t.test(kind, async (t) => {
+    let reads = 0;
+    const f = await fixture(t, {}, [], mapFixture, 'verified-suction', (driver) => ({
+      ...driver,
+      async read() {
+        const evidence = await driver.read();
+        if (++reads === 4) {
+          if (kind === 'read') throw Error('Fixture read unavailable after setting');
+          if (kind === 'map') evidence.map.mapId = 'fixture-changed-map';
+          if (kind === 'precondition') evidence.status.state = 'paused';
+        }
+        return evidence;
+      },
+    }));
+    const request = { operation: 'clean', target: { kind: 'rooms', rooms: ['guest_bathroom'] },
+      settings: { suction: 'strong' } };
+    const ctx = context(`p04-effects-${kind}`);
+    const result = await f.engine.execute(request, ctx);
+    const codes = { read: 'READ_UNAVAILABLE', map: 'MAP_CHANGED', precondition: 'PRECONDITION_CHANGED' };
+    assert.equal(result.error.code, codes[kind]);
+    assert.deepEqual(result.data.appliedSettings, { suction: 'strong' });
+    assert.equal(result.error.sideEffects, 'observed');
+    assert.equal(result.data.outcome, 'unknown');
+    assert.equal(result.data.dispatch, 'unknown');
+    assert.deepEqual(f.server.state.posts.map(step => step.kind), ['setting']);
+    if (kind === 'read') assert.equal(f.engine.state.active().phase, 'prepared');
+    else {
+      assert.equal(f.engine.state.active(), null);
+      assert.deepEqual(await f.engine.execute(request, ctx), result);
+      assert.deepEqual(await f.engine.reconcile(request, ctx), result);
+    }
+    assert.equal(f.engine.state.resource().owner.operationId, result.data.operationId);
+  });
+});
+
+test('P04 intermittent pending-state lookup failures preserve structured known effects without replay', async (t) => {
+  const f = await fixture(t, {}, [], mapFixture, 'verified-suction');
+  const request = { operation: 'clean', target: { kind: 'rooms', rooms: ['guest_bathroom'] },
+    settings: { suction: 'strong' } };
+  const ctx = context('p04-pending-lookup-failure');
+  const interrupted = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: f.store,
+    driver: createSocketDriver(f.socketPath), wait: () => Promise.resolve(), pollCounts: { clean: 3, setting: 2 },
+    hooks: { afterDispatchMarker(active) { if (active.stepIndex === 1) throw Error('Fixture lost command actor'); } } });
+  assert.equal((await interrupted.execute(request, ctx)).error.sideEffects, 'observed');
+  const before = f.store.lookup('device:jessica-vacuum');
+  assert.equal(before.active.phase, 'dispatching');
+  assert.deepEqual(before.active.appliedSettings, { suction: 'strong' });
+  assert.notEqual(before.resource.inFlight, null);
+  let reads = 0;
+  const flakyStore = {
+    lookup(key) {
+      if (key === 'device:jessica-vacuum' && ++reads % 2 === 0) throw Error('Fixture intermittent native read failure');
+      return f.store.lookup(key);
+    },
+    update: (...args) => f.store.update(...args),
+    registerIfAbsent: (...args) => f.store.registerIfAbsent(...args),
+  };
+  const retry = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: flakyStore,
+    driver: createSocketDriver(f.socketPath), wait: () => Promise.resolve(), pollCounts: { clean: 3 } });
+  for (const call of [retry.execute, retry.reconcile]) {
+    const result = await call(request, ctx);
+    assert.equal(result.status, 'failure');
+    assert.equal(result.error.code, 'RESOURCE_STATE_UNAVAILABLE');
+    assert.equal(result.error.sideEffects, 'observed');
+    assert.equal(result.error.retryMode, 'reconcile');
+    assert.deepEqual(result.data.appliedSettings, { suction: 'strong' });
+    assert.equal(result.data.outcome, 'unknown');
+    assert.equal(result.data.dispatch, 'unknown');
+    assert.deepEqual(f.store.lookup('device:jessica-vacuum'), before);
+    assert.deepEqual(f.server.state.posts.map(step => step.kind), ['setting']);
+  }
+});
+
+test('P04 catch recovery preserves a canonical final written between native reads', async (t) => {
+  const f = await fixture(t);
+  const ctx = context('p04-catch-history-race');
+  const canonical = await f.engine.execute(clean, ctx);
+  assert.equal(canonical.status, 'success', canonical.error?.code);
+  const before = f.store.lookup('device:jessica-vacuum');
+  let phase = 'initial-failure';
+  const racedStore = {
+    lookup(key) {
+      if (key.startsWith('request:') && phase === 'initial-failure') {
+        phase = 'before-final';
+        throw Error('Fixture initial native read failed');
+      }
+      if (key.startsWith('request:') && phase === 'before-final') return undefined;
+      if (key === 'device:jessica-vacuum' && phase === 'before-final') phase = 'finalized';
+      return f.store.lookup(key);
+    },
+    update: (...args) => f.store.update(...args),
+    registerIfAbsent: (...args) => f.store.registerIfAbsent(...args),
+  };
+  const retry = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: racedStore,
+    driver: createSocketDriver(f.socketPath), wait: () => Promise.resolve(), pollCounts: { clean: 3 } });
+  for (const call of [retry.execute, retry.reconcile]) {
+    phase = 'initial-failure';
+    assert.deepEqual(await call(clean, ctx), canonical);
+    assert.equal(phase, 'finalized');
+    assert.deepEqual(f.store.lookup('device:jessica-vacuum'), before);
+    assert.equal(f.server.state.posts.length, 1);
+  }
+});
+
+test('P04 a sustained native outage retains the last verified setting facts without dispatch or release', async (t) => {
+  for (const [method, read] of [['execute', 3], ['execute', 4], ['reconcile', 1]]) await t.test(
+    method === 'reconcile' ? 'read-only reconciliation' : read === 3 ? 'before verified facts persist' : 'after verified facts persist', async (t) => {
+    const f = await fixture(t, {}, [], mapFixture, 'verified-suction');
+    let outage = false, reads = 0;
+    const unavailable = () => { if (outage) throw Error('Fixture sustained native outage'); };
+    const failingStore = {
+      lookup(key) { unavailable(); return f.store.lookup(key); },
+      update(...args) { unavailable(); return f.store.update(...args); },
+      registerIfAbsent(...args) { unavailable(); return f.store.registerIfAbsent(...args); },
+    };
+    const driver = createSocketDriver(f.socketPath);
+    const engine = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: failingStore,
+      driver: { ...driver, async read() {
+        const evidence = await driver.read();
+        if (++reads === read) {
+          outage = true;
+          if (read === 4) throw Error('Fixture HA read failed after verified setting');
+        }
+        return evidence;
+      } }, wait: () => Promise.resolve(), pollCounts: { clean: 3, setting: 2 } });
+    const request = { operation: 'clean', target: { kind: 'rooms', rooms: ['guest_bathroom'] },
+      settings: { suction: 'strong' } };
+    const ctx = context(`p04-sustained-outage-${method}-${read}`);
+    if (method === 'reconcile') {
+      const interrupted = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: f.store,
+        driver, wait: () => Promise.resolve(), pollCounts: { clean: 3, setting: 2 },
+        hooks: { afterAcceptedState() { throw Error('Fixture interrupted setting verification'); } } });
+      assert.equal((await interrupted.execute(request, ctx)).error.retryMode, 'reconcile');
+      assert.equal(f.engine.state.active().phase, 'verifying');
+    }
+    const result = await engine[method](request, ctx);
+    assert.equal(result.status, 'failure');
+    assert.equal(result.error.code, 'RESOURCE_STATE_UNAVAILABLE');
+    assert.equal(result.error.sideEffects, 'observed');
+    assert.equal(result.error.retryMode, 'reconcile');
+    assert.deepEqual(result.data.appliedSettings, { suction: 'strong' });
+    assert.equal(result.data.outcome, 'unknown');
+    assert.equal(result.data.dispatch, 'unknown');
+    assert.deepEqual(f.server.state.posts.map(step => step.kind), ['setting']);
+    const durable = f.store.lookup('device:jessica-vacuum');
+    assert.equal(durable.resource.owner.operationId, result.data.operationId);
+    assert.equal(durable.active.phase, read === 4 ? 'prepared' : 'verifying');
+  });
+});
+
+test('P04 delayed observations retain their own canonical result after verified release and reassignment', { timeout: 10_000 }, async (t) => {
+  for (const method of ['execute', 'reconcile']) await t.test(method, async (t) => {
+    const f = await fixture(t);
+    const options = { registryConfig: f.registry, policyConfig: policy, store: f.store,
+      wait: () => Promise.resolve(), pollCounts: { clean: 1 } };
+    const interrupted = createJessicaExecutor({ ...options, driver: createSocketDriver(f.socketPath),
+      hooks: { afterAcceptedState() { throw Error('Fixture interrupted verification'); } } });
+    const ctx = context(`p04-reassigned-observation-${method}`);
+    if (method === 'reconcile') assert.equal((await interrupted.execute(clean, ctx)).error.retryMode, 'reconcile');
+    let entered, resume, reads = 0;
+    const reading = new Promise(resolve => { entered = resolve; });
+    const released = new Promise(resolve => { resume = resolve; });
+    t.after(() => resume());
+    const driver = createSocketDriver(f.socketPath);
+    const delayed = createJessicaExecutor({ ...options, driver: { ...driver, async read() {
+      const evidence = await driver.read();
+      if (++reads === (method === 'execute' ? 3 : 1)) {
+        entered(); await released;
+        throw Error('Fixture late observation unavailable');
+      }
+      return evidence;
+    } } });
+    const pending = delayed[method](clean, ctx);
+    await reading;
+    const canonical = await f.engine.reconcile(clean, ctx);
+    assert.equal(canonical.status, 'success', canonical.error?.code);
+    releaseFixtureResource(f);
+    const next = await interrupted.execute(clean, context(`p04-next-owner-${method}`));
+    assert.equal(next.error.retryMode, 'reconcile');
+    assert.notEqual(next.data.operationId, canonical.data.operationId);
+    const before = f.store.lookup('device:jessica-vacuum');
+    resume();
+    assert.deepEqual(await pending, canonical);
+    assert.deepEqual(f.store.lookup('device:jessica-vacuum'), before);
+    assert.equal(f.server.state.posts.length, 2);
+  });
+});
+
+test('P04 a duplicate delayed across completion and release cannot reacquire ownership', { timeout: 10_000 }, async (t) => {
+  const f = await fixture(t);
+  let entered, resume;
+  const reading = new Promise(resolve => { entered = resolve; });
+  const released = new Promise(resolve => { resume = resolve; });
+  t.after(() => resume());
+  const driver = createSocketDriver(f.socketPath);
+  const delayed = createJessicaExecutor({ registryConfig: f.registry, policyConfig: policy, store: f.store,
+    wait: () => Promise.resolve(), pollCounts: { clean: 1 }, driver: { ...driver, async read() {
+      const evidence = await driver.read();
+      entered(); await released;
+      return evidence;
+    } } });
+  const ctx = context('p04-released-duplicate');
+  const duplicate = delayed.execute(clean, ctx);
+  await reading;
+  const canonical = await f.engine.execute(clean, ctx);
+  assert.equal(canonical.status, 'success', canonical.error?.code);
+  releaseFixtureResource(f);
+  const before = f.store.lookup('device:jessica-vacuum');
+  resume();
+  assert.deepEqual(await duplicate, canonical);
+  assert.deepEqual(f.store.lookup('device:jessica-vacuum'), before);
+  assert.equal(f.server.state.posts.length, 1);
+  const next = await f.engine.execute(clean, context('p04-released-eligible-next'));
+  assert.equal(next.status, 'success', next.error?.code);
+  assert.equal(f.server.state.posts.length, 2);
+});
+
+test('P04 reconciliation before a dispatch acknowledgment preserves live settlement authority', { timeout: 10_000 }, async (t) => {
+  for (const kind of ['setting', 'command']) await t.test(kind, async (t) => {
+    let posted, resume;
+    const applied = new Promise((resolve) => { posted = resolve; });
+    const acknowledgment = new Promise((resolve) => { resume = resolve; });
+    const f = await fixture(t, {}, [], mapFixture, 'verified-suction', (driver) => ({
+      ...driver,
+      async dispatch(step) {
+        const result = await driver.dispatch(step);
+        if (step.kind === kind) { posted(); await acknowledgment; }
+        return result;
+      },
+    }));
+    t.after(() => resume());
+    const request = { operation: 'clean', target: { kind: 'rooms', rooms: ['guest_bathroom'] },
+      settings: { suction: 'strong' } };
+    const ctx = context(`p04-reconcile-before-ack-${kind}`);
+    const executing = f.engine.execute(request, ctx);
+    await applied;
+    const before = f.engine.state.active();
+    const pin = f.engine.state.resource().inFlight;
+    assert.equal(before.phase, 'dispatching');
+    const reconciled = await f.engine.reconcile(request, ctx);
+    assert.equal(reconciled.status, 'failure');
+    assert.equal(reconciled.error.retryMode, 'reconcile');
+    assert.deepEqual(f.engine.state.active(), before, 'observations cannot invalidate dispatch settlement');
+    assert.deepEqual(f.engine.state.resource().inFlight, pin);
+    assert.equal(before.dispatch, 'unknown', 'a prior step acknowledgment cannot authorize this step');
+    resume();
+    const result = await executing;
+    assert.equal(result.status, 'success', result.error?.code);
+    assert.equal(result.data.outcome, 'started');
+    assert.deepEqual(result.data.appliedSettings, { suction: 'strong' });
+    assert.equal(f.engine.state.active(), null);
+    assert.equal(f.engine.state.resource().inFlight, null);
+    assert.equal(f.engine.state.resource().owner.operationId, result.data.operationId);
+    assert.deepEqual(await f.engine.reconcile(request, ctx), result);
+    assert.equal(f.server.state.posts.length, 2);
+  });
+});
+
 test('two processes serialize one device and the second sees conflict', async (t) => {
   const f = await fixture(t, { holdPostMs: 1_500 });
-  assert.equal(f.store.registerIfAbsent('device:jessica-vacuum', { version: '1', active: null }), true);
+  assert.equal(f.store.registerIfAbsent('fixture:native-initialized', { ready: true }), true);
   const first = worker(f, 'process-one');
   await until(() => f.engine.state.active()?.phase === 'dispatching');
   const second = await worker(f, 'process-two');
@@ -697,7 +1191,7 @@ test('FC2 multi-room pause claims once and verifies fresh task pause on exact pa
   f.server.state.status.state = 'cleaning';
   activeRoom(f);
   assert.equal((await f.engine.execute(request, context('oren-multi-pause-second'))).error.code,
-    'CANARY_ALREADY_USED');
+    'RESOURCE_BUSY');
   assert.equal(f.server.state.posts.length, 1);
 });
 

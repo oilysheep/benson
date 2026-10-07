@@ -242,16 +242,17 @@ test('operation index storage failure leaves a terminal claim for read-only reco
   };
   const stateStore = createOperationState(store);
   const intent = { requestKey: 'one', requestHash: 'request', planHash: 'plan',
-    operationId: 'j4-test', phase: 'prepared' };
+    operationId: 'j4-test', phase: 'prepared', stepIndex: 0,
+    requestEpoch: 'native-test-run', requesterId: 'oren' };
   assert.equal(stateStore.reserve(intent).kind, 'reserved');
   const result = { schemaVersion: '1', domain: 'jessica-vacuum',
     data: { operationId: intent.operationId, outcome: 'started' } };
-  assert.throws(() => stateStore.finish('one', 'request', 'plan', result), /index conflicts/);
+  assert.throws(() => stateStore.finish(stateStore.active(), result), /index conflicts/);
   assert.equal(stateStore.active().phase, 'terminal');
   assert.equal(stateStore.history('one'), undefined);
   assert.equal(stateStore.operation('j4-test').kind, 'terminal');
   full = false;
-  assert.equal(stateStore.finish('one', 'request', 'plan', result), result);
+  assert.equal(stateStore.finish(stateStore.active(), result), result);
   assert.equal(stateStore.active(), null);
   assert.equal(stateStore.operation('j4-test').value, result);
 });
@@ -319,7 +320,7 @@ test('native execute adapter applies policy and an exact verified room target', 
   assert.equal(posts, 1);
   const wrongRoom = factory({ ...directContext, sessionKey: 'agent:jessica-vacuum:subagent:canary-2' });
   assert.equal((await wrongRoom.execute('call', { operation: 'clean', target: { kind: 'rooms', rooms: ['west_balcony'] } })).error.code,
-    'ROOM_DISABLED');
+    'RESOURCE_BUSY');
   assert.equal(posts, 1);
   const noSession = factory(directContext);
   assert.equal((await noSession.execute('call', request)).error.code, 'EPOCH_UNTRUSTED');
