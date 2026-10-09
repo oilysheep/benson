@@ -1,3 +1,7 @@
+> **Historical deployment record — precedence clarified 2026-10-09.** The chronological sections below retain their original stage-time facts and recovery evidence. Early CLI/allowlist/source-copy descriptions do not establish current deployment or authorize restoring removed executables. Use the latest valid snapshot and focused inspection for installed state, the [Architecture](../../architecture/BENSON_SUBAGENT_ARCHITECTURE.md) for target ownership, the [root Implementation Plan](../../BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md) for event-driven migration and the [Full Capability Plan](FULL_CAPABILITY_PLAN.md) for accepted domain scope. No shared event service, pending-cleaning feature or deferred conditional action is claimed deployed by this documentation update.
+
+> The revised Architecture is approved; source admission, no-Run validation, native delivery and exact physical completion remain distinct implementation proofs. Future trusted external-start device alerts cannot imply task completion or ownership release. D5's proposed hours remain unapproved for runtime implementation. Apply the root Plan's migration/rollback gates before any deployment; this record authorizes none.
+
 # Jessica source and deployment
 
 `src/` is the Benson-owned source baseline imported in Stage 1. Each file was

@@ -1,3 +1,13 @@
+# Jessica migration plan — historical Stages 0–8
+
+**Historical evidence, retained 2026-10-09.** The original migration plan below preserves its decisions, stage results and recovery references. Its startup instructions, proposed architecture and relative words such as “current” apply to that historical stage; they are not instructions to restart Stage 0 or restore legacy runtime paths.
+
+Current system ownership: [Architecture](../../architecture/BENSON_SUBAGENT_ARCHITECTURE.md). Current event-driven migration/proof gates: [root Implementation Plan](../../BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md). Current device capabilities, physical predicates and FC work: [Full Capability Plan](FULL_CAPABILITY_PLAN.md). P01–P04 evidence and archived P05 are tracked in the root Plan. The General Workflow target is superseded; deferred conditional actions remain explicitly retained. This banner changes documentation only and claims no event-driven deployment.
+
+Oren approved the revised Architecture. Its common admission/Response ownership and typed no-Run handling govern future work; trusted device alerts do not establish task completion or release. The root Plan separates those proof gates. Full Capability Plan §7.4 pending-start hours remain unapproved for runtime implementation; neither this historical plan nor documentation review activates them.
+
+---
+
 **תוכנית האב ל־Jessica: לשמר את סוכן התחום, להחליף את גבול הביצוע, ולהחזיר יכולות בהדרגה לפי ראיות.**
 
 הבדיקה בוצעה בקריאה בלבד. לא שונו קבצים, הגדרות או שירותים; לא נוצרו checkpoints; לא הופעל `jessica-control` ולא נשלחו פקודות פיזיות לשואב.
