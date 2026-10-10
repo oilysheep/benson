@@ -1,4 +1,4 @@
-import { CONTROL_CONTRACT_VERSION, createTaskEnvelope } from "./envelope.mjs";
+import { CONTROL_CONTRACT_VERSION, createTaskEnvelope, validateNoRunOutcome } from "./envelope.mjs";
 
 export const MAX_CLASSIFIER_REQUEST_BYTES = 8192;
 export const ROUTING_PREVIOUS_MESSAGES = 5;
@@ -60,6 +60,116 @@ export function projectRequestAdmission(nativeAdmission) {
     throw new TypeError("blocked_admission_invalid");
   }
   return Object.freeze({ kind, reason });
+}
+
+// Inactive ED02 contract. No ingress, issuer, claim store or dispatch is installed.
+// These function dependencies belong to trusted source/domain owners; serialized
+// payloads cannot supply them. Contract fixtures do not establish native custody.
+export const SOURCE_ADMISSION_VERSION = 1;
+const SOURCE_SCOPES = ["read", "reconcile", "notify", "action"];
+const SOURCE_INPUT_FIELDS = ["schemaVersion", "kind", "source", "domain", "scope", "request"];
+const SOURCE_FIELDS = ["type", "ref", "inputId"];
+const SOURCE_AUTHORITY_FIELDS = ["inputId", "sourceType", "sourceRef", "domain", "subject",
+  "authorityRef", "authorityRevision", "scopes", "expiresAt", "status", "cancelled",
+  "replayState", "commitment"];
+
+function sourceExact(value, fields) {
+  if (!plain(value) || Reflect.ownKeys(value).length !== fields.length ||
+      !fields.every((field) => Object.hasOwn(value, field) &&
+        Object.hasOwn(Object.getOwnPropertyDescriptor(value, field), "value"))) {
+    throw new TypeError("source_contract_shape");
+  }
+}
+function sourceSync(result) {
+  if (result && typeof result.then === "function") {
+    Promise.resolve(result).catch(() => {});
+    throw new TypeError("source_authority_must_be_synchronous");
+  }
+  return result;
+}
+function sourceAssertion(assertion, ...args) {
+  const result = sourceSync(assertion(...args));
+  if (result !== true && result !== undefined) throw new TypeError("source_authority_rejected");
+}
+
+export function createSourceAdmissionController({ readAuthority, assertCurrent, assertDomainOutcome, now }) {
+  if (![readAuthority, assertCurrent, assertDomainOutcome, now].every((part) => typeof part === "function")) {
+    throw new TypeError("source_authority_dependencies_unavailable");
+  }
+  // Branding protects in-process correlation only; it is not durable deduplication.
+  const admissions = new WeakSet();
+  function clock() {
+    const time = sourceSync(now());
+    if (!Number.isSafeInteger(time) || time < 0 || time > 8640000000000000) {
+      throw new TypeError("source_clock_invalid");
+    }
+    return time;
+  }
+  function authority(input, expected = null) {
+    sourceAssertion(assertCurrent, input);
+    const grant = sourceSync(readAuthority(input));
+    sourceExact(grant, SOURCE_AUTHORITY_FIELDS);
+    if (!["subject", "authorityRef", "authorityRevision"].every((key) => identifier(grant[key])) ||
+        grant.inputId !== input.source.inputId || grant.sourceType !== input.source.type ||
+        grant.sourceRef !== input.source.ref || grant.domain !== input.domain ||
+        !Array.isArray(grant.scopes) || grant.scopes.length < 1 || grant.scopes.length > SOURCE_SCOPES.length ||
+        Reflect.ownKeys(grant.scopes).length !== grant.scopes.length + 1 ||
+        Array.from({ length: grant.scopes.length }, (_, i) =>
+          Object.getOwnPropertyDescriptor(grant.scopes, String(i)))
+          .some((descriptor) => !descriptor || !Object.hasOwn(descriptor, "value")) ||
+        grant.scopes.some((scope) => !SOURCE_SCOPES.includes(scope)) ||
+        new Set(grant.scopes).size !== grant.scopes.length || !grant.scopes.includes(input.scope) ||
+        grant.status !== "active" || grant.cancelled !== false ||
+        grant.replayState !== "fresh" || grant.commitment !== "uncommitted" ||
+        !Number.isSafeInteger(grant.expiresAt) || grant.expiresAt <= clock()) {
+      throw new TypeError("source_grant_rejected");
+    }
+    if (expected && (grant.authorityRef !== expected.ref || grant.authorityRevision !== expected.revision ||
+        grant.subject !== expected.subject)) throw new TypeError("source_grant_replaced");
+    return { authority: { ref: grant.authorityRef, revision: grant.authorityRevision, subject: grant.subject },
+      scopes: [...grant.scopes] };
+  }
+  function check(admission) {
+    if (!admissions.has(admission)) throw new TypeError("source_admission_unowned");
+    return authority(admission, admission.authority);
+  }
+  return Object.freeze({
+    admit(raw) {
+      sourceExact(raw, SOURCE_INPUT_FIELDS);
+      sourceExact(raw.source, SOURCE_FIELDS);
+      if (raw.schemaVersion !== SOURCE_ADMISSION_VERSION || raw.kind !== "benson.source-input" ||
+          !["user", "ha", "automation"].includes(raw.source.type) ||
+          !identifier(raw.source.ref) || !identifier(raw.source.inputId) ||
+          !["jessica-vacuum", "reminder"].includes(raw.domain) || !SOURCE_SCOPES.includes(raw.scope) ||
+          typeof raw.request !== "string" || !raw.request.trim() ||
+          Buffer.byteLength(raw.request, "utf8") > MAX_CLASSIFIER_REQUEST_BYTES) {
+        throw new TypeError("source_input_invalid");
+      }
+      const input = freeze({ schemaVersion: raw.schemaVersion, kind: raw.kind,
+        source: { ...raw.source }, domain: raw.domain, scope: raw.scope, request: raw.request });
+      const captured = authority(input);
+      const admission = freeze({ ...input, kind: "benson.source-admission",
+        authority: captured.authority, admittedAt: clock() });
+      authority(admission, admission.authority);
+      admissions.add(admission);
+      return admission;
+    },
+    assertCurrent(admission) { check(admission); },
+    validateOutcome(admission, raw) {
+      check(admission);
+      const outcome = validateNoRunOutcome(raw, admission);
+      // Domain evidence and notification eligibility remain the domain's decision.
+      sourceAssertion(assertDomainOutcome, outcome, admission);
+      const current = check(admission);
+      if (outcome.notification !== null && !current.scopes.includes("notify")) {
+        throw new TypeError("source_notification_scope_missing");
+      }
+      if (outcome.evidence.observedAt !== null && Date.parse(outcome.evidence.observedAt) > clock()) {
+        throw new TypeError("source_evidence_in_future");
+      }
+      return outcome;
+    },
+  });
 }
 
 class ContextUnavailable extends Error {}
