@@ -128,6 +128,80 @@ function freeze(value) {
   }
   return value;
 }
+// Separate inactive no-Run variant; legacy Run/Response versions stay unchanged.
+export const NO_RUN_OUTCOME_VERSION = 1;
+export const NO_RUN_DISPOSITIONS = Object.freeze([
+  "handled", "no-change", "suppressed", "rejected", "reasoning-required", "unresolved", "failed",
+]);
+const NO_RUN_KEYS = ["schemaVersion", "kind", "admission", "disposition", "evidence",
+  "effects", "reconciliation", "notification", "error"];
+const NO_RUN_ADMISSION_KEYS = ["inputId", "sourceType", "sourceRef", "authorityRef",
+  "authorityRevision", "domain", "subject"];
+
+// Shape/correlation validation is not authentication or domain authorization.
+// The Request Controller accepts this only with its own live admission handle
+// and the owning domain's synchronous evidence/permission assertion.
+export function validateNoRunOutcome(raw, admission) {
+  const value = boundedCopy(raw);
+  exact(value, NO_RUN_KEYS, "no_run_shape");
+  exact(value.admission, NO_RUN_ADMISSION_KEYS, "no_run_admission_shape");
+  if (value.schemaVersion !== NO_RUN_OUTCOME_VERSION || value.kind !== "benson.no-run" ||
+      !NO_RUN_DISPOSITIONS.includes(value.disposition) ||
+      admission?.schemaVersion !== 1 || admission.kind !== "benson.source-admission") {
+    fail("no_run_version_or_disposition");
+  }
+  const expected = { inputId: admission.source?.inputId, sourceType: admission.source?.type,
+    sourceRef: admission.source?.ref, authorityRef: admission.authority?.ref,
+    authorityRevision: admission.authority?.revision, domain: admission.domain,
+    subject: admission.authority?.subject };
+  if (!NO_RUN_ADMISSION_KEYS.every((key) => identifier(expected[key]) &&
+      value.admission[key] === expected[key])) fail("no_run_admission_mismatch");
+  exact(value.evidence, ["ref", "observedAt", "freshness", "facts"], "no_run_evidence_shape");
+  if ((value.evidence.ref !== null && !identifier(value.evidence.ref)) ||
+      (value.evidence.observedAt !== null && !timestamp(value.evidence.observedAt)) ||
+      !["fresh", "stale", "unknown"].includes(value.evidence.freshness) ||
+      (value.evidence.freshness === "fresh" && (value.evidence.ref === null ||
+        value.evidence.observedAt === null || value.evidence.facts === null)) ||
+      (["handled", "no-change"].includes(value.disposition) && value.evidence.freshness !== "fresh")) {
+    fail("no_run_evidence_invalid");
+  }
+  exact(value.effects, ["status", "refs"], "no_run_effects_shape");
+  if (!["none", "known", "possible"].includes(value.effects.status) ||
+      !Array.isArray(value.effects.refs) || value.effects.refs.length > MAX_RESPONSE_RESULTS ||
+      !value.effects.refs.every(identifier) || new Set(value.effects.refs).size !== value.effects.refs.length ||
+      (value.effects.status === "none") !== (value.effects.refs.length === 0)) fail("no_run_effects_invalid");
+  exact(value.reconciliation, ["required", "reason"], "no_run_reconciliation_shape");
+  if (typeof value.reconciliation.required !== "boolean" ||
+      (value.reconciliation.required ? !identifier(value.reconciliation.reason) :
+        value.reconciliation.reason !== null) ||
+      (value.effects.status === "possible" && !value.reconciliation.required)) {
+    fail("no_run_reconciliation_invalid");
+  }
+  if (value.error !== null) {
+    exact(value.error, ["code", "message", "retryable"], "no_run_error_shape");
+    if (!identifier(value.error.code) || typeof value.error.message !== "string" ||
+        !value.error.message.trim() || value.error.message.length > MAX_RENDERED_TEXT ||
+        typeof value.error.retryable !== "boolean") fail("no_run_error_invalid");
+  }
+  if (["failed", "unresolved", "rejected"].includes(value.disposition) !== (value.error !== null)) {
+    fail("no_run_error_disposition_mismatch");
+  }
+  if (value.notification !== null) {
+    exact(value.notification, ["identity", "policyRevision", "evidenceRef", "route", "content"],
+      "no_run_notification_shape");
+    exact(value.notification.route, ["recipient", "channel", "accountId", "target"],
+      "no_run_notification_route_shape");
+    if (["suppressed", "rejected"].includes(value.disposition) ||
+        value.evidence.freshness !== "fresh" ||
+        !["identity", "policyRevision", "evidenceRef"].every((key) => identifier(value.notification[key])) ||
+        value.notification.evidenceRef !== value.evidence.ref ||
+        !Object.values(value.notification.route).every(identifier) ||
+        typeof value.notification.content !== "string" || !value.notification.content.trim() ||
+        value.notification.content.length > MAX_RENDERED_TEXT) fail("no_run_notification_invalid");
+  }
+  return freeze(value);
+}
+
 function candidate(value) {
   if (value === null) return null;
   exact(value, ["text", "language"], "candidate_shape");
