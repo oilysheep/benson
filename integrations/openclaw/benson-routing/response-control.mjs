@@ -2,6 +2,7 @@ import {
   RESPONSE_CONTRACT_VERSION,
   validateRenderedOutput,
   validateResponseEnvelope,
+  NATIVE_READ_OUTCOME_VERSION,
 } from './envelope.mjs';
 import { renderPresentation } from './presentation.mjs';
 
@@ -68,7 +69,9 @@ function safeFailure(response, language) {
 }
 
 /** Pure final response policy. OpenClaw owns transcript, transport and recovery. */
-export function controlResponse(raw, { language, timezone, now } = {}) {
+export function controlResponse(raw, options = {}) {
+  if (raw?.kind === 'benson.no-run') return controlReadResponse(raw, options);
+  const { language, timezone, now } = options;
   const response = validateResponseEnvelope(raw);
   if (!LANGUAGES.has(language)) fail('response_language_invalid');
   if (typeof now !== 'string' || !/^\d{4}-\d\d-\d\dT/u.test(now) ||
@@ -104,4 +107,28 @@ export function controlResponse(raw, { language, timezone, now } = {}) {
     }
   }
   fail('response_mode_unavailable');
+}
+
+// Same-invocation reply preparation, not notification authority or transport.
+// The existing admission owner authenticates/correlates; the domain owns facts
+// and wording. No domain registry, Run identity or model fallback belongs here.
+function controlReadResponse(raw, { controller, admission, renderOutcome } = {}) {
+  if (typeof controller?.validateOutcome !== 'function' ||
+      typeof controller?.assertCurrent !== 'function' || typeof renderOutcome !== 'function') {
+    fail('response_read_dependencies_unavailable');
+  }
+  const outcome = controller.validateOutcome(admission, raw);
+  if (outcome.schemaVersion !== NATIVE_READ_OUTCOME_VERSION) fail('response_read_version');
+  if (['suppressed', 'reasoning-required'].includes(outcome.disposition)) {
+    controller.assertCurrent(admission);
+    return Object.freeze({ mode: 'suppressed', outcome, rendered: null });
+  }
+  const candidate = renderOutcome(outcome);
+  if (candidate && typeof candidate.then === 'function') {
+    Promise.resolve(candidate).catch(() => {});
+    fail('response_read_renderer_must_be_synchronous');
+  }
+  const rendered = validateRenderedOutput(candidate);
+  controller.assertCurrent(admission);
+  return Object.freeze({ mode: 'deterministic', outcome, rendered });
 }

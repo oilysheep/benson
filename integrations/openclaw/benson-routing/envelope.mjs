@@ -130,6 +130,7 @@ function freeze(value) {
 }
 // Separate inactive no-Run variant; legacy Run/Response versions stay unchanged.
 export const NO_RUN_OUTCOME_VERSION = 1;
+export const NATIVE_READ_OUTCOME_VERSION = 2;
 export const NO_RUN_DISPOSITIONS = Object.freeze([
   "handled", "no-change", "suppressed", "rejected", "reasoning-required", "unresolved", "failed",
 ]);
@@ -144,17 +145,21 @@ const NO_RUN_ADMISSION_KEYS = ["inputId", "sourceType", "sourceRef", "authorityR
 export function validateNoRunOutcome(raw, admission) {
   const value = boundedCopy(raw);
   exact(value, NO_RUN_KEYS, "no_run_shape");
-  exact(value.admission, NO_RUN_ADMISSION_KEYS, "no_run_admission_shape");
-  if (value.schemaVersion !== NO_RUN_OUTCOME_VERSION || value.kind !== "benson.no-run" ||
-      !NO_RUN_DISPOSITIONS.includes(value.disposition) ||
-      admission?.schemaVersion !== 1 || admission.kind !== "benson.source-admission") {
+  const nativeRead = value.schemaVersion === NATIVE_READ_OUTCOME_VERSION;
+  if ((!nativeRead && value.schemaVersion !== NO_RUN_OUTCOME_VERSION) || value.kind !== "benson.no-run" ||
+      !NO_RUN_DISPOSITIONS.includes(value.disposition) || admission?.kind !== "benson.source-admission" ||
+      admission.schemaVersion !== value.schemaVersion) {
     fail("no_run_version_or_disposition");
   }
-  const expected = { inputId: admission.source?.inputId, sourceType: admission.source?.type,
+  const expected = nativeRead ? { authorityKind: admission.authority?.kind,
+    callId: admission.callId, domain: admission.domain, subject: admission.authority?.subject }
+    : { inputId: admission.source?.inputId, sourceType: admission.source?.type,
     sourceRef: admission.source?.ref, authorityRef: admission.authority?.ref,
     authorityRevision: admission.authority?.revision, domain: admission.domain,
     subject: admission.authority?.subject };
-  if (!NO_RUN_ADMISSION_KEYS.every((key) => identifier(expected[key]) &&
+  exact(value.admission, nativeRead ? Object.keys(expected) : NO_RUN_ADMISSION_KEYS, "no_run_admission_shape");
+  if ((nativeRead && (expected.authorityKind !== "native-invocation" || admission.scope !== "read")) ||
+      !Object.keys(expected).every((key) => identifier(expected[key]) &&
       value.admission[key] === expected[key])) fail("no_run_admission_mismatch");
   exact(value.evidence, ["ref", "observedAt", "freshness", "facts"], "no_run_evidence_shape");
   if ((value.evidence.ref !== null && !identifier(value.evidence.ref)) ||
@@ -199,6 +204,9 @@ export function validateNoRunOutcome(raw, admission) {
         typeof value.notification.content !== "string" || !value.notification.content.trim() ||
         value.notification.content.length > MAX_RENDERED_TEXT) fail("no_run_notification_invalid");
   }
+  // Same-call reads cannot authorize durable effects, reconciliation or outbound.
+  if (nativeRead && (value.effects.status !== "none" || value.reconciliation.required ||
+      value.notification !== null)) fail("native_read_effects_or_notification");
   return freeze(value);
 }
 

@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "files": ["dist", "openclaw.plugin.json"],
-  "peerDependencies": { "openclaw": ">=2026.9.4" },
+  "peerDependencies": { "openclaw": ">=2026.9.6" },
   "openclaw": { "extensions": ["./dist/index.js"] }
 }

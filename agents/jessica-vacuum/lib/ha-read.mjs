@@ -45,9 +45,11 @@ const STATISTICS = Object.freeze([
   ['currentCleanedArea', 'm²', 'number'],
 ]);
 
-export async function haFetch(path, init = {}, fetchImpl = fetch) {
+export async function haFetch(path, init = {}, fetchImpl = fetch, assertCurrent = () => {}) {
+  assertCurrent();
   const token = (await readFile(TOKEN_FILE, 'utf8')).trim();
   if (!token) deny('READ_UNAVAILABLE', 'verification', 'Home Assistant credential is unavailable');
+  assertCurrent();
   return fetchImpl(`${HA_URL}${path}`, {
     ...init,
     headers: { Authorization: `Bearer ${token}`, Accept: 'application/json', ...init.headers },
@@ -55,8 +57,8 @@ export async function haFetch(path, init = {}, fetchImpl = fetch) {
   });
 }
 
-export async function readVacuumState(fetchImpl = fetch) {
-  const response = await haFetch(`/api/states/${VACUUM_ENTITY}`, { method: 'GET' }, fetchImpl);
+export async function readVacuumState(fetchImpl = fetch, assertCurrent = () => {}) {
+  const response = await haFetch(`/api/states/${VACUUM_ENTITY}`, { method: 'GET' }, fetchImpl, assertCurrent);
   if (!response.ok) deny('READ_UNAVAILABLE', 'verification', 'Home Assistant state is unavailable');
   const state = await response.json();
   if (!state || state.entity_id !== VACUUM_ENTITY || typeof state.state !== 'string' ||
@@ -66,8 +68,8 @@ export async function readVacuumState(fetchImpl = fetch) {
   return { state, observedAt: new Date().toISOString() };
 }
 
-export async function readJessicaSensors(fetchImpl = fetch) {
-  const response = await haFetch('/api/states', { method: 'GET' }, fetchImpl);
+export async function readJessicaSensors(fetchImpl = fetch, assertCurrent = () => {}) {
+  const response = await haFetch('/api/states', { method: 'GET' }, fetchImpl, assertCurrent);
   if (!response.ok) deny('READ_UNAVAILABLE', 'verification', 'Home Assistant sensors are unavailable');
   const states = await response.json();
   if (!Array.isArray(states)) deny('READ_INVALID', 'verification', 'Home Assistant sensor inventory is invalid');

@@ -1,6 +1,9 @@
 import { isDeepStrictEqual } from 'node:util';
 import canonicalRecipients from "../../../../../agents/reminder-service/config/recipients.json" with { type: "json" };
-import { normalizeLegacyTaskResult } from "../../../benson-routing/envelope.mjs";
+import { normalizeLegacyTaskResult, NATIVE_READ_OUTCOME_VERSION, RESPONSE_CONTRACT_VERSION } from "../../../benson-routing/envelope.mjs";
+import { createSourceAdmissionController, NATIVE_READ_ADMISSION_VERSION } from "../../../benson-routing/request-control.mjs";
+import { controlResponse } from "../../../benson-routing/response-control.mjs";
+import { formatUserDatetime } from "../../../../../shared/benson-datetime.mjs";
 
 const nonEmptyString = { type: "string", minLength: 1, pattern: "\\S" };
 
@@ -109,6 +112,122 @@ export function reminderSchemaForRuntimeRoute(definition, route) {
     schema.properties.requesterId.enum = [route.requesterId];
   }
   return schema;
+}
+
+// Main delegates intent. Identity, read authorization and discovery stay in
+// this existing owner and the deterministic Reminder Service; no child Run.
+export function createReminderTaskToolFactory({ jsonResult, validateJsonSchemaValue,
+  runReminderService, clock = () => new Date() }) {
+  if (![jsonResult, validateJsonSchemaValue, runReminderService].every(value => typeof value === 'function')) {
+    throw new TypeError('reminder_task_dependencies_unavailable');
+  }
+  const definition = REMINDER_TOOL_DEFINITIONS.find(item => item.name === 'benson_reminder_list');
+  return context => {
+    if (context.agentId !== 'main' || typeof context.assertInvocationCurrent !== 'function') return null;
+    return {
+      name: 'reminder_task', label: 'Reminder task',
+      description: 'Delegate a full Reminder list to its deterministic domain entry. No mutation or child Run.',
+      parameters: { type: 'object', properties: { operation: { const: 'list' } },
+        required: ['operation'], additionalProperties: false },
+      executionMode: 'sequential',
+      async execute(callId, request, signal) {
+        if (!request || Object.getPrototypeOf(request) !== Object.prototype ||
+            Reflect.ownKeys(request).length !== 1 ||
+            Object.getOwnPropertyDescriptor(request, 'operation')?.value !== 'list') {
+          throw new TypeError('reminder_task_intent_invalid');
+        }
+        const route = resolveReminderRuntimeRoute(context);
+        if (!route) throw new TypeError('reminder_task_requester_untrusted');
+        const controller = createSourceAdmissionController({
+          invocation: { callId, domain: 'reminder', subject: route.requesterId },
+          now: () => clock().getTime(),
+          assertCurrent() { signal?.throwIfAborted(); return context.assertInvocationCurrent(); },
+          assertDomainOutcome(outcome) {
+            assertReminderListResult(outcome.evidence.facts);
+            if (outcome.disposition !== (outcome.evidence.facts.status === 'success' ? 'handled' : 'failed') ||
+                (outcome.disposition === 'failed' && outcome.error?.code !== outcome.evidence.facts.error.code)) {
+              throw new TypeError('reminder_task_evidence_mismatch');
+            }
+          },
+        });
+        const admission = controller.admit({ schemaVersion: NATIVE_READ_ADMISSION_VERSION,
+          kind: 'benson.source-input', domain: 'reminder', scope: 'read', request: JSON.stringify(request) });
+        let facts;
+        try {
+          facts = await executeReminderTool(definition, { requesterId: route.requesterId }, signal, {
+            validateJsonSchemaValue, runtimeRoute: route,
+            runtimeSchema: reminderSchemaForRuntimeRoute(definition, route),
+            runReminderService: (params, operationSignal) => {
+              controller.assertCurrent(admission);
+              return runReminderService(params, operationSignal);
+            },
+          });
+          controller.assertCurrent(admission);
+          assertReminderListResult(facts);
+        } catch {
+          controller.assertCurrent(admission);
+          facts = { status: 'failure', operation: 'list', verified: false, warnings: [],
+            error: { code: 'REMINDER_READ_UNAVAILABLE', message: 'Reminder list could not be verified', retryable: true } };
+        }
+        if (facts.status === 'failure') {
+          // Discovery has no effects to reconstruct. Preserve the safe reason
+          // code without transferring backend diagnostics to Main's context.
+          facts = { status: 'failure', operation: 'list', verified: false, warnings: [],
+            error: { code: facts.error.code, message: 'Reminder list could not be verified',
+              retryable: facts.error.retryable === true } };
+        }
+        const response = controlResponse({
+          schemaVersion: NATIVE_READ_OUTCOME_VERSION, kind: 'benson.no-run',
+          admission: { authorityKind: admission.authority.kind, callId: admission.callId,
+            domain: admission.domain, subject: admission.authority.subject },
+          disposition: facts.status === 'success' ? 'handled' : 'failed',
+          evidence: { ref: callId, observedAt: clock().toISOString(), freshness: 'fresh', facts },
+          effects: { status: 'none', refs: [] }, reconciliation: { required: false, reason: null },
+          notification: null, error: facts.status === 'failure' ? {
+            code: facts.error.code, message: 'Reminder list could not be verified', retryable: facts.error.retryable === true,
+          } : null,
+        }, { controller, admission, renderOutcome: outcome => renderReminderListOutcome(outcome, clock()) });
+        const result = jsonResult(response.outcome);
+        result.content.push({ type: 'text', text: response.rendered.message });
+        controller.assertCurrent(admission);
+        return result;
+      },
+    };
+  };
+}
+
+function assertReminderListResult(result) {
+  if (!result || result.operation !== 'list' || !Array.isArray(result.warnings) ||
+      !['success', 'failure'].includes(result.status)) throw new TypeError('reminder_list_invalid');
+  if (result.status === 'failure') {
+    if (result.verified === true || !result.error || typeof result.error.code !== 'string') {
+      throw new TypeError('reminder_list_failure_invalid');
+    }
+    return;
+  }
+  if (result.verified !== true || result.error != null || !Array.isArray(result.matches) ||
+      result.warnings.length !== 0 ||
+      !Number.isSafeInteger(result.matchCount) || result.matchCount !== result.matches.length ||
+      result.matches.some(item => !item || item.schemaVersion !== 4 ||
+        typeof item.reminderId !== 'string' || !item.reminderId.trim() ||
+        !['active', 'paused'].includes(item.status) || typeof item.content !== 'string' || !item.content.trim() ||
+        !Array.isArray(item.schedules) || item.schedules.length === 0 ||
+        item.schedules.some(schedule => !schedule || !['one-shot', 'recurring'].includes(schedule.type) ||
+          typeof schedule.timezone !== 'string' ||
+          (schedule.type === 'one-shot' ? typeof schedule.resolvedTime !== 'string' : typeof schedule.cron !== 'string'))) ||
+      new Set(result.matches.map(item => item.reminderId)).size !== result.matches.length) {
+    throw new TypeError('reminder_list_incomplete');
+  }
+}
+
+function renderReminderListOutcome(outcome, now) {
+  const facts = outcome.evidence.facts;
+  const message = outcome.disposition !== 'handled'
+    ? 'לא ניתן לאמת כעת את רשימת התזכורות. לא בוצע שינוי.'
+    : facts.matchCount === 0 ? 'לא נמצאו תזכורות הנגישות לך.'
+      : facts.matches.map((item, index) => `${index + 1}. ${item.content} (${item.status === 'active' ? 'פעילה' : 'מושהית'}); ${item.schedules.map(schedule =>
+        schedule.type === 'one-shot' ? formatUserDatetime(schedule.resolvedTime, schedule.timezone, { now }) : 'לפי לוח זמנים חוזר').join('; ')}`).join('\n');
+  return { schemaVersion: RESPONSE_CONTRACT_VERSION, message };
 }
 
 const canonicalRecipientId = {

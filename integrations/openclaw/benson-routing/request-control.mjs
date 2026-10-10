@@ -66,6 +66,7 @@ export function projectRequestAdmission(nativeAdmission) {
 // These function dependencies belong to trusted source/domain owners; serialized
 // payloads cannot supply them. Contract fixtures do not establish native custody.
 export const SOURCE_ADMISSION_VERSION = 1;
+export const NATIVE_READ_ADMISSION_VERSION = 2;
 const SOURCE_SCOPES = ["read", "reconcile", "notify", "action"];
 const SOURCE_INPUT_FIELDS = ["schemaVersion", "kind", "source", "domain", "scope", "request"];
 const SOURCE_FIELDS = ["type", "ref", "inputId"];
@@ -92,9 +93,21 @@ function sourceAssertion(assertion, ...args) {
   if (result !== true && result !== undefined) throw new TypeError("source_authority_rejected");
 }
 
-export function createSourceAdmissionController({ readAuthority, assertCurrent, assertDomainOutcome, now }) {
-  if (![readAuthority, assertCurrent, assertDomainOutcome, now].every((part) => typeof part === "function")) {
+export function createSourceAdmissionController({ readAuthority, assertCurrent, assertDomainOutcome, now,
+  invocation }) {
+  if (![assertCurrent, assertDomainOutcome, now].every((part) => typeof part === "function") ||
+      (invocation === undefined ? typeof readAuthority !== "function" : readAuthority !== undefined)) {
     throw new TypeError("source_authority_dependencies_unavailable");
+  }
+  // Trusted factory dependencies, never model arguments. The call ID correlates
+  // this invocation only; it is neither original input identity nor a grant.
+  if (invocation !== undefined) {
+    sourceExact(invocation, ["callId", "domain", "subject"]);
+    if (!identifier(invocation.callId) || !identifier(invocation.subject) ||
+        !identifier(invocation.domain)) {
+      throw new TypeError("native_read_context_invalid");
+    }
+    invocation = Object.freeze({ ...invocation });
   }
   // Branding protects in-process correlation only; it is not durable deduplication.
   const admissions = new WeakSet();
@@ -131,10 +144,29 @@ export function createSourceAdmissionController({ readAuthority, assertCurrent, 
   }
   function check(admission) {
     if (!admissions.has(admission)) throw new TypeError("source_admission_unowned");
+    if (invocation !== undefined) {
+      sourceAssertion(assertCurrent, admission);
+      return { scopes: ["read"] };
+    }
     return authority(admission, admission.authority);
   }
   return Object.freeze({
     admit(raw) {
+      if (invocation !== undefined) {
+        sourceExact(raw, ["schemaVersion", "kind", "domain", "scope", "request"]);
+        if (raw.schemaVersion !== NATIVE_READ_ADMISSION_VERSION || raw.kind !== "benson.source-input" ||
+            raw.domain !== invocation.domain || raw.scope !== "read" ||
+            typeof raw.request !== "string" || !raw.request.trim() ||
+            Buffer.byteLength(raw.request, "utf8") > MAX_CLASSIFIER_REQUEST_BYTES) {
+          throw new TypeError("native_read_input_invalid");
+        }
+        sourceAssertion(assertCurrent);
+        const admission = freeze({ ...raw, kind: "benson.source-admission",
+          callId: invocation.callId, authority: { kind: "native-invocation", subject: invocation.subject },
+          admittedAt: clock() });
+        admissions.add(admission);
+        return admission;
+      }
       sourceExact(raw, SOURCE_INPUT_FIELDS);
       sourceExact(raw.source, SOURCE_FIELDS);
       if (raw.schemaVersion !== SOURCE_ADMISSION_VERSION || raw.kind !== "benson.source-input" ||

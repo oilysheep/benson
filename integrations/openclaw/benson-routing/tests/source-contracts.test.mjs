@@ -49,6 +49,82 @@ function notification() {
       accountId: "fixture-account", target: "fixture-target" }, content: "Fixture observation only." };
 }
 
+// Same-call read contract fixture, not a host-issued invocation or native proof.
+function nativeReadFixture(overrides = {}) {
+  const state = { live: true };
+  const controller = createSourceAdmissionController({
+    invocation: { callId: 'fixture-native-call', domain: 'jessica-vacuum', subject: 'fixture-reader' },
+    assertCurrent: () => { assert.ok(state.live, 'invocation closed'); }, now: () => epoch,
+    assertDomainOutcome: (value) => { validateResult(value.evidence.facts, null, new Date(epoch)); }, ...overrides,
+  });
+  const raw = { schemaVersion: 2, kind: 'benson.source-input', domain: 'jessica-vacuum',
+    scope: 'read', request: '{"operation":"status"}' };
+  const admission = controller.admit(raw);
+  const value = { schemaVersion: 2, kind: 'benson.no-run',
+    admission: { authorityKind: 'native-invocation', callId: admission.callId,
+      domain: admission.domain, subject: admission.authority.subject }, disposition: 'handled',
+    evidence: { ref: admission.callId, observedAt: facts.data.observedAt, freshness: 'fresh', facts: clone(facts) },
+    effects: { status: 'none', refs: [] }, reconciliation: { required: false, reason: null },
+    notification: null, error: null };
+  return { state, controller, admission, raw, value };
+}
+
+test('explicit native read uses live same-call authority without a durable grant or original input ID', () => {
+  const f = nativeReadFixture();
+  assert.deepEqual(clone(f.controller.validateOutcome(f.admission, f.value)), f.value);
+  assert.equal(f.admission.source, undefined);
+  assert.equal(f.admission.authority.ref, undefined);
+  assert.ok(Object.isFrozen(f.admission.authority));
+  // Repeated pure reads are permitted. This call ID is not a replay/effect key.
+  assert.doesNotThrow(() => f.controller.admit(f.raw));
+  assert.throws(() => fixture().controller.admit(f.raw));
+  assert.throws(() => f.controller.admit(input()));
+});
+
+test('native read rejects widened scopes, foreign destinations, mixed versions and authority fields', () => {
+  const f = nativeReadFixture();
+  for (const raw of [{ ...f.raw, scope: 'action' }, { ...f.raw, scope: 'notify' },
+    { ...f.raw, scope: 'reconcile' }, { ...f.raw, domain: 'reminder' }, { ...f.raw, schemaVersion: 3 },
+    { ...f.raw, subject: 'forged' }, { ...f.raw, source: input().source },
+    { ...f.raw, request: 'א'.repeat(4097) }]) assert.throws(() => f.controller.admit(raw));
+  for (const key of Object.keys(f.value.admission)) {
+    assert.throws(() => f.controller.validateOutcome(f.admission,
+      { ...f.value, admission: { ...f.value.admission, [key]: 'foreign' } }));
+  }
+  for (const version of [1, 3]) assert.throws(() => f.controller.validateOutcome(f.admission,
+    { ...f.value, schemaVersion: version }));
+});
+
+test('native read cannot produce effects, reconciliation or outbound and retains disposition variants', () => {
+  const f = nativeReadFixture();
+  for (const mutation of [{ effects: { status: 'known', refs: ['effect'] } },
+    { effects: { status: 'possible', refs: ['effect'] }, reconciliation: { required: true, reason: 'unknown' } },
+    { reconciliation: { required: true, reason: 'unknown' } },
+    { notification: { ...notification(), evidenceRef: f.admission.callId } }]) {
+    assert.throws(() => f.controller.validateOutcome(f.admission, { ...f.value, ...mutation }));
+  }
+  for (const disposition of NO_RUN_DISPOSITIONS) {
+    const error = ['failed', 'unresolved', 'rejected'].includes(disposition)
+      ? { code: 'fixture_failure', message: 'Fixture only', retryable: false } : null;
+    assert.equal(f.controller.validateOutcome(f.admission,
+      { ...f.value, disposition, error }).disposition, disposition);
+  }
+});
+
+test('native read cannot revive lost handles or disclose after cancellation/domain-validation races', () => {
+  const f = nativeReadFixture();
+  assert.throws(() => f.controller.validateOutcome(clone(f.admission), f.value), /unowned/);
+  assert.throws(() => nativeReadFixture().controller.validateOutcome(f.admission, f.value), /unowned/);
+  f.state.live = false;
+  assert.throws(() => f.controller.validateOutcome(f.admission, f.value), /invocation closed/);
+  let live = true;
+  const racing = nativeReadFixture({ assertCurrent: () => assert.ok(live),
+    assertDomainOutcome: () => { live = false; } });
+  assert.throws(() => racing.controller.validateOutcome(racing.admission, racing.value));
+  assert.throws(() => nativeReadFixture({ assertCurrent: () => false }), /source_authority/);
+  assert.throws(() => nativeReadFixture({ assertCurrent: async () => {} }), /synchronous/);
+});
+
 test("source contract supports each source class without granting native authority", () => {
   for (const type of ["user", "ha", "automation"]) {
     const f = fixture(input(type));

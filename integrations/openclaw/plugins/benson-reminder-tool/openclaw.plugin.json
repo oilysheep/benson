@@ -8,6 +8,7 @@
   },
   "contracts": {
     "tools": [
+      "reminder_task",
       "benson_reminder_create",
       "benson_reminder_create_plan",
       "benson_reminder_list",
@@ -18,6 +19,7 @@
       "benson_reminder_delete"
     ]
   },
+  "toolMetadata": { "reminder_task": { "optional": true } },
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
