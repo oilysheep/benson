@@ -7,12 +7,82 @@ import {
   normalizeLegacyTaskResult,
 } from '../envelope.mjs';
 import { controlResponse } from '../response-control.mjs';
+import { createSourceAdmissionController } from '../request-control.mjs';
 
 const corpus = JSON.parse(readFileSync(new URL('./fixtures/presentation-cases.json', import.meta.url)));
 const fixture = (id) => structuredClone(corpus.cases.find((item) => item.id === id));
 
 const control = (raw, options = {}) => controlResponse(raw, {
   language: 'en', timezone: corpus.fixedClock.timezone, now: corpus.fixedClock.now, ...options,
+});
+
+// An unrelated future domain proves that no controller switch/registry edit is
+// needed. Authority is a host-context fixture, not native security evidence.
+function readFixture(disposition = 'handled') {
+  let live = true;
+  const controller = createSourceAdmissionController({
+    invocation: { callId: 'read-call', domain: 'future-domain', subject: 'reader' },
+    now: () => Date.parse('2026-10-10T10:00:00Z'),
+    assertCurrent() { assert.equal(live, true, 'invocation closed'); },
+    assertDomainOutcome(outcome) { assert.deepEqual(JSON.parse(JSON.stringify(outcome.evidence.facts)), { value: 7 }); },
+  });
+  const admission = controller.admit({ schemaVersion: 2, kind: 'benson.source-input',
+    domain: 'future-domain', scope: 'read', request: '{"operation":"read"}' });
+  const outcome = { schemaVersion: 2, kind: 'benson.no-run',
+    admission: { authorityKind: 'native-invocation', callId: 'read-call', domain: 'future-domain', subject: 'reader' },
+    disposition, evidence: { ref: 'read-call', observedAt: '2026-10-10T10:00:00Z', freshness: 'fresh', facts: { value: 7 } },
+    effects: { status: 'none', refs: [] }, reconciliation: { required: false, reason: null }, notification: null,
+    error: ['failed', 'unresolved', 'rejected'].includes(disposition)
+      ? { code: 'READ_DENIED', message: 'read unavailable', retryable: false } : null };
+  return { controller, admission, outcome, close() { live = false; },
+    renderOutcome: value => ({ schemaVersion: 2, message: `Verified: ${value.evidence.facts.value}` }) };
+}
+
+test('generic read response preserves no-Run identity without a fake task or Run', () => {
+  const f = readFixture();
+  const result = controlResponse(f.outcome, f);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.outcome)), f.outcome);
+  assert.equal(result.rendered.message, 'Verified: 7');
+  assert.equal(result.mode, 'deterministic');
+  assert.equal(result.outcome.runId, undefined);
+  assert.equal(result.outcome.taskId, undefined);
+  assert.throws(() => f.controller.admit({ schemaVersion: 2, kind: 'benson.source-input',
+    domain: 'foreign-domain', scope: 'read', request: 'read' }), /input_invalid/);
+});
+
+test('no-Run dispositions retain their semantics and never launch a Run or model', () => {
+  for (const disposition of ['handled', 'no-change', 'failed', 'rejected', 'unresolved', 'suppressed', 'reasoning-required']) {
+    const f = readFixture(disposition);
+    let renders = 0;
+    const result = controlResponse(f.outcome, { ...f, renderOutcome(value) { renders++; return f.renderOutcome(value); } });
+    assert.equal(result.outcome.disposition, disposition);
+    assert.equal(renders, ['suppressed', 'reasoning-required'].includes(disposition) ? 0 : 1);
+    assert.equal(result.rendered === null, renders === 0);
+  }
+});
+
+test('read response rejects missing authority, foreign correlation, malformed facts and effects', () => {
+  const f = readFixture();
+  assert.throws(() => controlResponse(f.outcome), /dependencies_unavailable/);
+  for (const change of [value => value.schemaVersion = 99,
+    value => value.admission.callId = 'other-call', value => value.evidence.facts.value = 8,
+    value => value.effects = { status: 'known', refs: ['effect'] },
+    value => value.notification = { unexpected: true }]) {
+    const raw = structuredClone(f.outcome); change(raw);
+    assert.throws(() => controlResponse(raw, f));
+  }
+});
+
+test('rendering remains bounded, synchronous and fenced before disclosure', () => {
+  const f = readFixture();
+  for (const renderOutcome of [() => ({ schemaVersion: 2, message: '' }),
+    () => ({ schemaVersion: 2, message: 'x'.repeat(100000) }),
+    async () => ({ schemaVersion: 2, message: 'unexpected async renderer' })]) {
+    assert.throws(() => controlResponse(f.outcome, { ...f, renderOutcome }));
+  }
+  assert.throws(() => controlResponse(f.outcome, { ...f, renderOutcome() {
+    f.close(); return { schemaVersion: 2, message: 'late disclosure' };
+  } }), /invocation closed/);
 });
 
 function direct(item, { candidate = null, modes = ['deterministic', 'safe_failure'],

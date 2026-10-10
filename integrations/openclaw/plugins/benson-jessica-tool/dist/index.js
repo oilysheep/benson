@@ -3,7 +3,7 @@ import { jsonResult } from 'openclaw/plugin-sdk/tool-results';
 import { getSessionEntry } from 'openclaw/plugin-sdk/session-store-runtime';
 import { readVisibleSessionTranscriptMessageEntries } from 'openclaw/plugin-sdk/session-transcript-runtime';
 import { createPluginStateSyncKeyedStore } from 'openclaw/plugin-sdk/plugin-state-store-runtime';
-import { createJessicaReadToolFactory } from './tool.js';
+import { createJessicaReadToolFactory, createJessicaTaskToolFactory } from './tool.js';
 import { createJessicaExecuteToolFactory } from './execute-tool.js';
 import { createJessicaCompletionToolFactory, createNativeTranscriptReader } from './completion.js';
 import { JESSICA_STATE_OPTIONS } from './operation-state.js';
@@ -11,8 +11,10 @@ import { JESSICA_STATE_OPTIONS } from './operation-state.js';
 export default definePluginEntry({
   id: 'benson-jessica-tool',
   name: 'Benson Jessica Tool',
-  description: 'Jessica read tool, scoped room execution, and native-completion integrity validator.',
+  description: 'Jessica deterministic task entry, read tool, scoped room execution, and native-completion integrity validator.',
   register(api) {
+    api.registerTool({ contextVersion: 2, create: createJessicaTaskToolFactory({ jsonResult }) },
+      { name: 'jessica_task', optional: true });
     api.registerTool(createJessicaReadToolFactory({ jsonResult,
       createStore: () => createPluginStateSyncKeyedStore('benson-jessica-tool', JESSICA_STATE_OPTIONS) }),
       { name: 'jessica_read', optional: true });

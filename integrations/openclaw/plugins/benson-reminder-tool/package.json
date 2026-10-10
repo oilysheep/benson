@@ -5,10 +5,9 @@
   "type": "module",
   "files": ["dist", "openclaw.plugin.json"],
   "peerDependencies": {
-    "openclaw": ">=2026.5.17"
+    "openclaw": ">=2026.9.6"
   },
   "openclaw": {
     "extensions": ["./dist/index.js"]
   }
 }
-

@@ -6,6 +6,7 @@ import { getConversationSession } from "openclaw/plugin-sdk/session-store-runtim
 import {
   REMINDER_TOOL_DEFINITIONS, executeReminderTool,
   resolveReminderRuntimeRoute, reminderSchemaForRuntimeRoute,
+  createReminderTaskToolFactory,
 } from "./contracts.js";
 import { runReminderService } from "./runner.js";
 
@@ -25,6 +26,10 @@ export default definePluginEntry({
     "Operation-specific OpenClaw tool contracts over the deterministic Benson Reminder Service.",
   register(api) {
     const reminderServicePath = api.resolvePath("../../../../agents/reminder-service/tools/reminder-service");
+    api.registerTool({ contextVersion: 2, create: createReminderTaskToolFactory({
+      jsonResult, validateJsonSchemaValue,
+      runReminderService: (params, signal) => runReminderService(params, signal, reminderServicePath),
+    }) }, { name: 'reminder_task', optional: true });
     for (const definition of REMINDER_TOOL_DEFINITIONS) {
       api.registerTool(
         (toolContext) => {
