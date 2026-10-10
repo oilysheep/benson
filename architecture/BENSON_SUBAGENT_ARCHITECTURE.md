@@ -295,7 +295,11 @@ Jessica uses approved public HA services through deterministic domain owners; no
 
 Use concise, natural Hebrew for family communication, with honest partial/unknown outcomes and no internal architecture jargon. Say “started,” “registered,” “not verified” or “delivered to provider” only when that claim is supported. Keep domain details sufficient for the user to act.
 
-Sub-agents return structured results; they do not acquire independent channel authority. Native outbound delivers approved responses and notifications. Proactive Jessica alerts default to Oren through an explicitly approved canonical route, not a fabricated requester. Domain policy defines actionable conditions, severity, stable episode identity, suppression, verified clear/re-arm and any bounded re-alert. No event means neither “all clear” nor “success.”
+Sub-agents return structured results; they do not acquire independent channel authority. Native outbound delivers approved responses and notifications. Proactive Jessica device alerts without a correlated Benson operation default to Oren through an explicitly approved canonical route, subject to notification preferences and explicit subscriptions. Domain policy defines actionable conditions, severity, stable episode identity, suppression, verified clear/re-arm and any bounded re-alert. No event means neither “all clear” nor “success.”
+
+Across all Benson domains, eligible operation-specific notifications default to the original requester, subject to stored notification preferences and explicit subscriptions. Matching subscriptions may add authorized recipients; overlapping eligibility uses the same per-recipient notification identity under §6.5.
+
+Users can define, update, disable and delete persistent event notification subscriptions through natural language. The owning domain retains structured subscription definitions in its existing state. Known events are evaluated deterministically using verified event identity, domain state and stored notification rules; eligible notifications use the existing Response Controller under §§4.5/6.5. No new framework, store or generic rules engine is introduced.
 
 Native route resolution, identity mapping and each production notification class require proof before enablement. Ordinary alerts need no model if domain templates suffice. A delivery failure must not change the physical operation result.
 
