@@ -1,6 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
 import canonicalRecipients from "../../../../../agents/reminder-service/config/recipients.json" with { type: "json" };
-import { normalizeLegacyTaskResult, NATIVE_READ_OUTCOME_VERSION, RESPONSE_CONTRACT_VERSION } from "../../../benson-routing/envelope.mjs";
+import { normalizeLegacyTaskResult, NATIVE_READ_OUTCOME_VERSION, RESPONSE_CONTRACT_VERSION,
+  DOMAIN_RESULT_OUTPUT_SCHEMA, createNoRunDomainResult,
+  createCompletionDomainResult } from "../../../benson-routing/envelope.mjs";
 import { createSourceAdmissionController, NATIVE_READ_ADMISSION_VERSION } from "../../../benson-routing/request-control.mjs";
 import { controlResponse } from "../../../benson-routing/response-control.mjs";
 import { formatUserDatetime } from "../../../../../shared/benson-datetime.mjs";
@@ -129,6 +131,7 @@ export function createReminderTaskToolFactory({ jsonResult, validateJsonSchemaVa
       description: 'Delegate a full Reminder list to its deterministic domain entry. No mutation or child Run.',
       parameters: { type: 'object', properties: { operation: { const: 'list' } },
         required: ['operation'], additionalProperties: false },
+      outputSchema: DOMAIN_RESULT_OUTPUT_SCHEMA,
       executionMode: 'sequential',
       async execute(callId, request, signal) {
         if (!request || Object.getPrototypeOf(request) !== Object.prototype ||
@@ -187,8 +190,15 @@ export function createReminderTaskToolFactory({ jsonResult, validateJsonSchemaVa
             code: facts.error.code, message: 'Reminder list could not be verified', retryable: facts.error.retryable === true,
           } : null,
         }, { controller, admission, renderOutcome: outcome => renderReminderListOutcome(outcome, clock()) });
-        const result = jsonResult(response.outcome);
-        result.content.push({ type: 'text', text: response.rendered.message });
+        const result = jsonResult(createNoRunDomainResult(response, { controller, admission, language: 'he',
+          normalizeFacts(value) {
+            assertReminderListResult(value);
+            return { status: value.status, domain: 'reminder', domainSchemaVersion: 'legacy-unversioned',
+              operation: value.operation, verified: value.verified,
+              verificationScope: value.verified ? ['full_list_read'] : [],
+              data: value.status === 'success' ? reminderDiscoveryData(value) : null,
+              warnings: value.warnings, error: value.error ?? null, effects: [], uncertainty: [], pendingContext: null };
+          } }));
         controller.assertCurrent(admission);
         return result;
       },
@@ -218,6 +228,11 @@ function assertReminderListResult(result) {
       new Set(result.matches.map(item => item.reminderId)).size !== result.matches.length) {
     throw new TypeError('reminder_list_incomplete');
   }
+}
+
+function reminderDiscoveryData(result) {
+  return Object.fromEntries(Object.entries(result).filter(([key]) =>
+    !['status', 'operation', 'verified', 'warnings'].includes(key)));
 }
 
 function renderReminderListOutcome(outcome, now) {
@@ -908,8 +923,7 @@ export function normalizeReminderServiceResult(definition, result, trusted, mess
           result.matchCount !== result.matches.length) {
         throw new Error("Reminder discovery is incomplete");
       }
-      data = Object.fromEntries(Object.entries(result).filter(([key]) =>
-        !["status", "operation", "verified", "warnings"].includes(key)));
+      data = reminderDiscoveryData(result);
     } else {
       if (result.transaction?.status !== "success" || result.transaction?.verified !== true ||
           !result.data || typeof result.data !== "object" || Array.isArray(result.data) ||
@@ -956,7 +970,7 @@ function completionJson(message, allowThinking = false) {
 // The active service tool remains the only operation owner. This validator
 // reads native transcript facts; it never re-executes the Reminder mutation.
 export async function normalizeReminderCompletion({ runId, parentSessionKey, runs, readMessages,
-  completedRun = null, now = new Date() }, trusted, messageCandidate = null) {
+  completedRun = null, now = new Date() }, trusted, messageCandidate = null, nativeCompletion = null) {
   if (typeof runId !== "string" || !runId ||
       typeof parentSessionKey !== "string" || !parentSessionKey.startsWith("agent:main:")) {
     throw new Error("Native Reminder correlation is unavailable");
@@ -1015,5 +1029,9 @@ export async function normalizeReminderCompletion({ runId, parentSessionKey, run
   if (!isDeepStrictEqual(claimed, authoritative)) {
     throw new Error("Reminder child completion differs from service truth");
   }
-  return authoritative;
+  // The host must supply independently validated native v5 authority. The
+  // current transcript-only runtime path remains its strict legacy consumer.
+  return nativeCompletion === null ? authoritative : createCompletionDomainResult(
+    nativeCompletion.record, nativeCompletion.authority, { expectedTaskResult: authoritative,
+      expectedRunId: runId, projectEffects: nativeCompletion.projectEffects });
 }

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { bindNativeCompletion, validateNativeCompletion } from '../completion-control.mjs';
+import { createCompletionAuthority, acceptAgentCompletion } from '../envelope.mjs';
 
 const parentSessionKey = 'agent:main:whatsapp:direct:oren';
 const parentSessionId = 'native-parent-session';
@@ -104,6 +105,33 @@ test('Reminder completion derives full-list truth from one native service call',
   const normalized = await normalizeReminderCompletion(reminderArgs(), reminderTrusted);
   assert.equal(normalized.status, 'success');
   assert.deepEqual(JSON.parse(JSON.stringify(normalized.data.matches)), reminderService.matches);
+});
+
+test('explicit v5 Reminder adapter retains every match and rejects mismatched domain evidence', async () => {
+  // Host/transcript/authority fixtures prove source compatibility, not custody.
+  const legacy = await normalizeReminderCompletion(reminderArgs(), reminderTrusted);
+  const facts = { domain: legacy.domain, domainSchemaVersion: legacy.domainSchemaVersion,
+    operation: legacy.operation, status: legacy.status, verified: legacy.verified,
+    verificationScope: ['full_list_read'], data: legacy.data, warnings: legacy.warnings,
+    error: legacy.error, pendingContext: legacy.pendingContext, effects: [], uncertainty: [] };
+  const authority = createCompletionAuthority({ schemaVersion: 5, kind: 'domain-task',
+    binding: { inputId: 'input', admissionId: 'admission', conversationId: 'conversation', conversationGeneration: 1,
+      runId: reminderTask.runId, runGeneration: 1, agentId: 'reminder-service', sessionKey: reminderTask.childSessionKey,
+      sessionId: 'child-session', sessionGeneration: 1, domain: 'reminder', taskId: reminderTrusted.taskId,
+      caller: { runId: parentRunId, runGeneration: 1, agentId: 'main', sessionKey: parentSessionKey,
+        sessionId: parentSessionId, sessionGeneration: 1 }, completionTarget: 'CALLER', authorizationId: 'grant',
+      parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } },
+    knownFacts: facts, results: [], coverage: 'complete', gaps: [], origin: 'agent' });
+  const record = acceptAgentCompletion({ schemaVersion: 5, kind: 'domain-task', facts,
+    userResponse: { state: 'usable', text: 'All reminders: one and two.', language: 'en' } }, authority);
+  const result = await normalizeReminderCompletion(reminderArgs(), reminderTrusted, null, { record, authority });
+  assert.equal(legacy.schemaVersion, 1);
+  assert.equal(result.executionMode, 'agentic');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.facts.data.matches)), reminderService.matches);
+  await assert.rejects(normalizeReminderCompletion(reminderArgs(),
+    { ...reminderTrusted, taskId: 'foreign-task' }, null, { record, authority }), /domain_evidence_mismatch/);
+  await assert.rejects(normalizeReminderCompletion(reminderArgs(), reminderTrusted, null,
+    { record, authority: {} }), /authority_required/);
 });
 
 test('Reminder running task needs its exact completed native run and one service call', async () => {

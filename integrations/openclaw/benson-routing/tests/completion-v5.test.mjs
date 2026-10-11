@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { COMPLETION_SCHEMA_VERSION, CURRENT_COMPLETION_SCHEMA_VERSION,
   SUCCESSOR_COMPLETION_SCHEMA_VERSION, createCompletionAuthority, acceptAgentCompletion,
-  reconstructCompletion, validateCompletion, completionProposalSchema } from '../envelope.mjs';
+  reconstructCompletion, validateCompletion, completionProposalSchema,
+  createCompletionDomainResult, validateDomainResult, DOMAIN_RESULT_OUTPUT_SCHEMA } from '../envelope.mjs';
 
 // Synthetic trusted-owner inputs exercise the inactive contract, not host custody.
 const copy = value => JSON.parse(JSON.stringify(value));
@@ -51,6 +52,107 @@ function roundTrip({ record, authority }) {
   assert.deepEqual(copy(validateCompletion(copy(record), authority)), copy(record));
   assert.ok(Object.isFrozen(record));
 }
+
+test('validated domain Run projects the same Domain Result structure without lifecycle fields', () => {
+  const value = accepted(evidence({ knownFacts: facts({ effects: [] }) }));
+  const result = createCompletionDomainResult(value.record, value.authority);
+  assert.deepEqual(Object.keys(result).sort(), Object.keys(DOMAIN_RESULT_OUTPUT_SCHEMA.properties).sort());
+  assert.equal(result.executionMode, 'agentic');
+  assert.equal(result.kind, 'benson.domain-result');
+  assert.equal(result.outcome.status, 'success');
+  assert.deepEqual(copy(result.content), response);
+  assert.deepEqual(copy(result.facts.data), copy(value.record.facts.data));
+  for (const key of ['binding', 'completion', 'runId', 'authorizationId']) assert.equal(result[key], undefined);
+  assert.ok(Object.isFrozen(result.facts.data));
+  assert.throws(() => createCompletionDomainResult({ ...value.record, executionMode: 'deterministic' },
+    value.authority), /completion_shape/);
+  const different = accepted(evidence({ binding: binding({ runId: 'different-run' }) }));
+  assert.throws(() => createCompletionDomainResult(value.record, different.authority), /binding_mismatch/);
+  assert.throws(() => createCompletionDomainResult(value.record, {}), /authority_required/);
+  const workflow = main();
+  assert.throws(() => createCompletionDomainResult(workflow.record, workflow.authority), /version_or_kind/);
+});
+
+test('Domain Result retains business outcome when reporting fails and never invents a version', () => {
+  const knownFacts = facts({ effects: [], verified: 'unknown', verificationScope: [] });
+  delete knownFacts.verified;
+  delete knownFacts.domainSchemaVersion;
+  const value = accepted(evidence({ knownFacts, origin: 'runtime' }));
+  const result = createCompletionDomainResult(value.record, value.authority);
+  assert.equal(value.record.completion.outcome, 'FAILED');
+  assert.equal(result.outcome.status, 'success');
+  assert.equal(result.facts.verified, 'unknown');
+  assert.equal(result.domain, 'jessica-vacuum');
+  assert.equal(result.domainSchemaVersion, null);
+  assert.deepEqual(copy(result.evidence.gaps), copy(value.record.completion.gaps));
+  assert.equal(result.content.state, 'unavailable');
+  assert.throws(() => validateDomainResult({ ...copy(result), evidence: { observations: [], gaps: [] } }),
+    /version_missing|semantics/);
+  const unrelated = copy(result);
+  unrelated.evidence.gaps = [{ code: 'UNRELATED', path: 'other', detail: 'Other problem' }];
+  assert.throws(() => validateDomainResult(unrelated), /version_missing|semantics/);
+});
+
+test('known and possible effects retain domain-owned details; missing effects require reconciliation', () => {
+  const value = accepted();
+  assert.throws(() => createCompletionDomainResult(value.record, value.authority), /projection_required/);
+  for (const status of ['known', 'possible']) {
+    const result = createCompletionDomainResult(value.record, value.authority, {
+      projectEffects: details => ({ status, refs: ['original-operation'], details,
+        reconciliation: { required: status === 'possible', reason: status === 'possible' ? 'DOMAIN_RECONCILIATION' : null } }),
+    });
+    assert.deepEqual(copy(result.effects.details), copy(value.record.facts.effects));
+    assert.deepEqual(copy(result.uncertainty), copy(value.record.facts.uncertainty));
+  }
+  assert.throws(() => createCompletionDomainResult(value.record, value.authority, {
+    projectEffects: () => ({ status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } }),
+  }), /details_mismatch/);
+  assert.throws(() => createCompletionDomainResult(value.record, value.authority, {
+    projectEffects: async details => ({ details }),
+  }), /synchronous/);
+  const knownFacts = facts(); delete knownFacts.effects;
+  const incomplete = accepted(evidence({ knownFacts, origin: 'runtime' }));
+  const result = createCompletionDomainResult(incomplete.record, incomplete.authority);
+  assert.equal(result.effects.status, 'possible');
+  assert.equal(result.effects.reconciliation.required, true);
+  assert.deepEqual(copy(result.effects.refs), []);
+  assert.throws(() => validateDomainResult({ ...copy(result), effects: {
+    status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } } }), /effects_evidence/);
+});
+
+test('not_applicable recovery preserves missing effects without claiming no effects', () => {
+  const knownFacts = facts({ status: 'not_applicable', verified: 'not_applicable', verificationScope: [] });
+  delete knownFacts.effects;
+  const value = accepted(evidence({ knownFacts, origin: 'runtime' }));
+  const result = createCompletionDomainResult(value.record, value.authority);
+  assert.equal(result.outcome.status, 'not_applicable');
+  assert.equal(result.facts.verified, 'not_applicable');
+  assert.equal(result.effects.status, 'possible');
+  assert.equal(result.effects.reconciliation.required, true);
+  assert.deepEqual(copy(result.evidence.gaps), copy(value.record.completion.gaps));
+  const unrelated = copy(result);
+  unrelated.evidence.gaps = [{ code: 'FACT_NOT_ESTABLISHED', path: 'facts.error', detail: 'Error missing' }];
+  assert.throws(() => validateDomainResult(unrelated), /domain_result_semantics/);
+  const known = copy(unrelated);
+  known.effects = { status: 'known', refs: ['original-operation'], details: [{ kind: 'command_started' }],
+    reconciliation: { required: false, reason: null } };
+  assert.throws(() => validateDomainResult(known), /domain_result_semantics/);
+});
+
+test('Domain Result preserves partial, unknown, clarification and failure without claiming success', () => {
+  const pendingContext = { schemaVersion: 1, value: { question: 'Which room?' },
+    binding: { requesterId: 'owner', conversationId: 'conversation-1' }, expiresAt: '2026-10-12T00:00:00Z' };
+  for (const status of ['partial', 'unknown', 'clarification_required', 'failure', 'not_applicable']) {
+    const value = accepted(evidence({ knownFacts: facts({ status, effects: [],
+      verified: status === 'not_applicable' ? 'not_applicable' : false,
+      verificationScope: [], error: status === 'failure' ? { code: 'DOMAIN_FAILURE' } : null,
+      pendingContext: status === 'clarification_required' ? pendingContext : null }) }));
+    const result = createCompletionDomainResult(value.record, value.authority);
+    assert.equal(result.outcome.status, status);
+    assert.deepEqual(copy(result.pendingContext), copy(value.record.facts.pendingContext));
+    assert.deepEqual(copy(result.failures.domain), copy(value.record.facts.error));
+  }
+});
 
 test('v5 is explicit; legacy versions/defaults and no-Run contracts are separate', () => {
   assert.equal(COMPLETION_SCHEMA_VERSION, 3);
@@ -321,6 +423,11 @@ test('v5 preserves 256 KiB/depth-16 components and lossless 16-result aggregate 
     }
     const boundary = childAt(low);
     assert.equal(Buffer.byteLength(JSON.stringify(boundary.record)), limit);
+    const projected = createCompletionDomainResult(boundary.record, boundary.authority, {
+      projectEffects: details => ({ status: 'known', refs: [], details,
+        reconciliation: { required: false, reason: null } }),
+    });
+    assert.deepEqual(copy(projected.facts.data), copy(boundary.record.facts.data));
     assert.throws(() => childAt(low + 1), /json_bytes_exceeded/);
     roundTrip(boundary);
     const results = Array.from({ length: 16 }, (_, i) => child(i, { origin,

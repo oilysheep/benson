@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import { syncBuiltinESMExports } from 'node:module';
 import { readVacuumState, readJessicaSensors } from '../../../../../agents/jessica-vacuum/lib/ha-read.mjs';
 import { createJessicaReadToolFactory, createJessicaTaskToolFactory } from '../dist/tool.js';
+import { DOMAIN_RESULT_OUTPUT_SCHEMA } from '../../../benson-routing/envelope.mjs';
 
 // Supplied host-context fixtures establish source behavior only, never native
 // requester custody, loaded isolation, runtime acceptance or zero model usage.
@@ -30,25 +31,48 @@ function fixture(overrides = {}) {
   return { state, context, options, factory, tool: factory(context) };
 }
 
-test('Main status task reuses the validated domain read and returns a same-call no-Run result', async () => {
+test('observed Code Mode status call receives the validated outcome and prepared source/time wording', async () => {
+  const f = fixture();
+  const catalog = { async search() { return [async function jessica_task(request) {
+    return (await f.tool.execute('native-catalog-call', request)).details;
+  }]; } };
+  // Exact production guest-code shape. Native catalog handles return details,
+  // not the separate content blocks; this fixture does not prove live custody.
+  const run = new (Object.getPrototypeOf(async function () {}).constructor)('catalog',
+    'const hits = await catalog.search("jessica_task operation status"); const tool = hits.find(x => x.name === "jessica_task"); if (!tool) return {available:false, error:"JESSICA_TASK_UNAVAILABLE"}; return {available:true, result: await tool({operation:"status"})};');
+  const value = await run(catalog);
+  assert.equal(f.tool.outputSchema, DOMAIN_RESULT_OUTPUT_SCHEMA);
+  assert.equal(value.available, true);
+  assert.equal(value.result.kind, 'benson.domain-result');
+  assert.equal(value.result.executionMode, 'deterministic');
+  assert.equal(value.result.facts.verified, true);
+  assert.match(value.result.content.text, /Home Assistant/);
+  assert.match(value.result.content.text, /13:00/);
+  assert.equal(f.state.stateReads, 1);
+  assert.equal(f.state.sensorReads, 1);
+});
+
+test('Main status task reuses the validated domain read and returns one complete Domain Result', async () => {
   const f = fixture();
   const native = await f.tool.execute('native-call-1', { operation: 'status' });
   const result = native.details;
+  assert.equal(native.details.executionMode, 'deterministic');
+  assert.equal(JSON.parse(native.content[0].text).content.text, native.details.content.text);
+  assert.deepEqual(JSON.parse(native.content[0].text), JSON.parse(JSON.stringify(native.details)));
   const read = createJessicaReadToolFactory(f.options)({ ...f.context, agentId: 'jessica-vacuum' });
   const legacy = (await read.execute('legacy-call', { operation: 'status' })).details;
-  assert.match(native.content[1].text, /91%/);
-  assert.match(native.content[1].text, /Home Assistant/);
-  assert.equal(native.content[1].text.includes(observedAt), false);
-  assert.equal(result.evidence.observedAt, observedAt);
-  assert.deepEqual(JSON.parse(JSON.stringify(result.evidence.facts)), legacy);
+  assert.match(native.details.content.text, /91%/);
+  assert.match(native.details.content.text, /Home Assistant/);
+  assert.equal(native.details.content.text.includes(observedAt), false);
+  assert.equal(result.evidence.observations[0].observedAt, observedAt);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.facts.data)), legacy.data);
   assert.equal(result.schemaVersion, 2);
-  assert.equal(result.disposition, 'handled');
-  assert.equal(result.admission.callId, 'native-call-1');
-  assert.equal(result.admission.subject, 'reader');
-  assert.deepEqual(JSON.parse(JSON.stringify(result.effects)), { status: 'none', refs: [] });
-  assert.equal(result.notification, null);
+  assert.equal(result.outcome.disposition, 'handled');
+  assert.equal(result.admission, undefined);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.effects)), { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } });
+  assert.equal(result.notification, undefined);
   assert.equal(result.runId, undefined);
-  assert.equal(result.evidence.facts.data.sourceKind, 'ha_cached_entity');
+  assert.equal(result.facts.data.sourceKind, 'ha_cached_entity');
   assert.equal(f.state.stateReads, 2);
   assert.equal(f.state.sensorReads, 2);
 });
@@ -81,14 +105,16 @@ test('trusted group sender succeeds without turning Main intent into authority',
   const f = fixture();
   const result = (await f.factory({ ...f.context,
     deliveryContext: { ...f.context.deliveryContext, to: 'group@g.us' } }).execute('group-call', { operation: 'status' })).details;
-  assert.equal(result.admission.subject, 'reader');
+  assert.equal(result.executionMode, 'deterministic');
+  assert.equal(f.state.stateReads, 1);
 });
 
 test('closed task intent rejects mutations, unsupported reads and forged authority', async () => {
   for (const request of [{ operation: 'clean', target: { kind: 'home' } }, { operation: 'pause' },
     { operation: 'rooms' }, { operation: 'capabilities' }, { operation: 'unknown' },
     { operation: 'status', agentId: 'jessica-vacuum' }, { operation: 'status', requesterSenderId: 'reader' },
-    { operation: 'status', grant: 'owner' }, { operation: 'status', readOnly: true }]) {
+    { operation: 'status', grant: 'owner' }, { operation: 'status', readOnly: true },
+    { operation: 'status', executionMode: 'agentic' }]) {
     const f = fixture();
     await assert.rejects(f.tool.execute('native-call', request));
     assert.equal(f.state.stateReads, 0);
@@ -169,12 +195,12 @@ test('backend unavailable or malformed evidence returns a validated failure, nev
     const f = fixture({ readState });
     const native = await f.tool.execute('call', { operation: 'status' });
     const result = native.details;
-    assert.match(native.content[1].text, /לא ניתן לאמת/);
-    assert.equal(result.disposition, 'failed');
-    assert.equal(result.evidence.facts.verified, false);
-    assert.equal(result.evidence.facts.error.sideEffects, 'none');
-    assert.equal(result.error.code, result.evidence.facts.error.code);
-    assert.equal(result.notification, null);
+    assert.match(native.details.content.text, /לא ניתן לאמת/);
+    assert.equal(result.outcome.disposition, 'failed');
+    assert.equal(result.facts.verified, false);
+    assert.equal(result.failures.domain.sideEffects, 'none');
+    assert.equal(result.failures.handling.code, result.failures.domain.code);
+    assert.equal(result.notification, undefined);
   }
 });
 

@@ -9,7 +9,8 @@ import { parseReadRequest, READ_OPERATIONS } from '../../../../../agents/jessica
 import { assertRosterPolicyAgreement, loadTrustedRoutes, resolveTrustedIdentity } from './identity.js';
 import { createOperationState } from './operation-state.js';
 import { createSourceAdmissionController, NATIVE_READ_ADMISSION_VERSION } from '../../../benson-routing/request-control.mjs';
-import { NATIVE_READ_OUTCOME_VERSION, RESPONSE_CONTRACT_VERSION } from '../../../benson-routing/envelope.mjs';
+import { NATIVE_READ_OUTCOME_VERSION, RESPONSE_CONTRACT_VERSION,
+  DOMAIN_RESULT_OUTPUT_SCHEMA, createNoRunDomainResult } from '../../../benson-routing/envelope.mjs';
 import { controlResponse } from '../../../benson-routing/response-control.mjs';
 import { formatUserDatetime } from '../../../../../shared/benson-datetime.mjs';
 
@@ -148,6 +149,7 @@ export function createJessicaTaskToolFactory(options = {}) {
       description: 'Delegate a Jessica status task to its deterministic domain entry. No device action or child Run.',
       parameters: { type: 'object', properties: { operation: { const: 'status' } },
         required: ['operation'], additionalProperties: false },
+      outputSchema: DOMAIN_RESULT_OUTPUT_SCHEMA,
       executionMode: 'sequential',
       async execute(toolCallId, rawRequest, signal) {
         const assertCurrent = () => {
@@ -187,8 +189,14 @@ export function createJessicaTaskToolFactory(options = {}) {
           notification: null, error: facts.error === null ? null : {
             code: facts.error.code, message: facts.error.message, retryable: facts.error.retryable },
         }, { controller, admission, renderOutcome: outcome => renderStatusOutcome(outcome, clock()) });
-        const result = jsonResult(response.outcome);
-        result.content.push({ type: 'text', text: response.rendered.message });
+        const result = jsonResult(createNoRunDomainResult(response, { controller, admission, language: 'he',
+          normalizeFacts(value) {
+            const facts = validateResult(value, null, clock());
+            return { status: facts.status, domain: facts.domain, domainSchemaVersion: facts.schemaVersion,
+              operation: facts.operation, verified: facts.verified,
+              verificationScope: facts.verified ? ['status_read'] : [], data: facts.data,
+              warnings: facts.warnings, error: facts.error, effects: [], uncertainty: [], pendingContext: null };
+          } }));
         controller.assertCurrent(admission);
         return result;
       },

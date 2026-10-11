@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.mjs';
 import { EXECUTE_OPERATIONS } from '../../../../../agents/jessica-vacuum/lib/schemas.mjs';
-import { normalizeLegacyTaskResult } from '../../../benson-routing/envelope.mjs';
+import { normalizeLegacyTaskResult, createCompletionDomainResult } from '../../../benson-routing/envelope.mjs';
 
 const CHILD = 'jessica-vacuum';
 const DOMAIN_TOOLS = new Set(['jessica_read', 'jessica_execute']);
@@ -166,9 +166,14 @@ export async function validateJessicaCompletion({ runId, parentSessionKey, runs,
 
 // Staged S06 adapter: native run and transcript correlation supplies the result.
 // Task identity, pending binding and candidate text arrive separately.
-export async function normalizeJessicaCompletion(args, trusted, messageCandidate = null) {
+export async function normalizeJessicaCompletion(args, trusted, messageCandidate = null, nativeCompletion = null) {
   const result = await validateJessicaCompletion(args);
-  return normalizeLegacyTaskResult(result, trusted, messageCandidate);
+  const normalized = normalizeLegacyTaskResult(result, trusted, messageCandidate);
+  // Explicit source-only successor; legacy callers retain their strict v1.
+  // No native v5 authority is synthesized from the transcript or model JSON.
+  return nativeCompletion === null ? normalized : createCompletionDomainResult(
+    nativeCompletion.record, nativeCompletion.authority, { expectedTaskResult: normalized,
+      expectedRunId: args.runId, projectEffects: nativeCompletion.projectEffects });
 }
 
 export function createNativeTranscriptReader({ getSessionEntry, readVisibleMessages }) {

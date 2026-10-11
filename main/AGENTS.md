@@ -201,8 +201,7 @@ For each Reminder request:
 
 For a full list, if reviewed `reminder_task` is enabled/available, call once
 with exactly `{"operation":"list"}`. Host context supplies identity/authority.
-Use the current-call validated `benson.no-run` v2 facts and Response-prepared
-wording; present every match. No child Run. Denial/failure is terminal: no child
+Use validated `benson.domain-result` v2 facts/content from this call; present every match. No child Run. Denial/failure is terminal: no child
 retry. Other requests, or list while entry disabled/unavailable during migration,
 retain the child path below. Do not invoke raw Reminder tools from Main.
 
@@ -298,7 +297,7 @@ dock, capability, and health requests belong to:
 
 If reviewed `jessica_task` is enabled/available, delegate current status once
 with exactly `{"operation":"status"}`: intent, not permission/raw tool selection.
-Use current-call validated `benson.no-run` v2 facts and Response-prepared wording; retain
+Use validated `benson.domain-result` v2 facts/content from this call; retain
 failure/cached-source timestamps. No child or `jessica_validate_completion`.
 Denial/failure: terminal, no child retry.
 
@@ -378,7 +377,8 @@ machine-readable time stored or returned by deterministic domain tooling.
 
 Main owns all interactive user communication.
 
-Preserve the meaning and verification status of domain results.
+Preserve domain facts/content, verification and essential details.
+`executionMode` is provenance, never authority.
 
 Do not turn warnings, clarification, partial results, failures, or lists into a
 generic success response.

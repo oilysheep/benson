@@ -1051,3 +1051,198 @@ export function completionProposalSchema(nativeAuthority) {
       ] } }),
   });
 }
+
+// Successor of TaskResultEnvelope for Main. Run/no-Run authority and lifecycle
+// remain in their strict internal contracts; this value grants no authority.
+export const DOMAIN_RESULT_SCHEMA_VERSION = 2;
+export const DOMAIN_RESULT_OUTPUT_SCHEMA = (() => {
+  const object = properties => ({ type: 'object', additionalProperties: false,
+    required: Object.keys(properties), properties });
+  const id = { type: 'string', minLength: 1, maxLength: 512,
+    pattern: '^[^\\u0000-\\u001f\\u007f]+$' };
+  const nullable = schema => ({ anyOf: [schema, { type: 'null' }] });
+  const objects = { type: 'array', maxItems: MAX_WARNINGS, items: { type: 'object' } };
+  const ids = { type: 'array', maxItems: MAX_WARNINGS, uniqueItems: true, items: id };
+  const text = { type: 'string', minLength: 1, maxLength: MAX_RENDERED_TEXT, pattern: '\\S' };
+  return freeze(object({ schemaVersion: { const: DOMAIN_RESULT_SCHEMA_VERSION },
+    kind: { const: 'benson.domain-result' }, executionMode: { enum: ['deterministic', 'agentic'] },
+    domain: id, domainSchemaVersion: nullable(id), operation: nullable(id),
+    outcome: object({ disposition: { enum: NO_RUN_DISPOSITIONS }, status: { enum: COMPLETION_STATUSES } }),
+    facts: object({ verified: { enum: [true, false, 'unknown', 'not_applicable'] },
+      verificationScope: ids, data: {} }),
+    evidence: object({ observations: { type: 'array', maxItems: MAX_WARNINGS,
+      items: object({ ref: nullable(id), observedAt: nullable({ type: 'string',
+        pattern: '^\\d{4}-\\d\\d-\\d\\dT\\d\\d:\\d\\d:\\d\\d(?:\\.\\d+)?(?:Z|[+-]\\d\\d:\\d\\d)$' }),
+        freshness: { enum: ['fresh', 'stale', 'unknown'] } }) },
+      gaps: { type: 'array', maxItems: MAX_WARNINGS, items: object({
+        code: { type: 'string', pattern: '^[A-Z][A-Z0-9_]{0,63}$' }, path: id, detail: id }) } }),
+    warnings: objects,
+    failures: object({ domain: nullable({ type: 'object' }), handling: nullable(object({
+      code: id, message: text, retryable: { type: 'boolean' } })) }),
+    effects: object({ status: { enum: ['none', 'known', 'possible'] }, refs: ids, details: objects,
+      reconciliation: object({ required: { type: 'boolean' }, reason: nullable(id) }) }),
+    uncertainty: objects, pendingContext: nullable(object({ schemaVersion: { const: CONTROL_CONTRACT_VERSION },
+      value: { type: 'object' }, binding: object({ requesterId: id, conversationId: id }),
+      expiresAt: { type: 'string' } })),
+    content: { anyOf: [{ type: 'null' }, object({ state: { const: 'usable' }, text,
+      language: { enum: ['en', 'he'] } }), object({ state: { const: 'unavailable' },
+      reason: object({ code: { type: 'string', pattern: '^[A-Z][A-Z0-9_]{0,63}$' }, detail: id }) })] },
+  }));
+})();
+
+// Shape validation is never authentication. Domain facts originate in the
+// existing domain validator; constructors below additionally prove provenance.
+export function validateDomainResult(raw) {
+  const value = boundedCopy(raw);
+  exact(value, Object.keys(DOMAIN_RESULT_OUTPUT_SCHEMA.properties), 'domain_result_shape');
+  if (value.schemaVersion !== DOMAIN_RESULT_SCHEMA_VERSION || value.kind !== 'benson.domain-result' ||
+      !['deterministic', 'agentic'].includes(value.executionMode) || !identifier(value.domain) ||
+      (value.domainSchemaVersion !== null && !identifier(value.domainSchemaVersion)) ||
+      (value.operation !== null && !identifier(value.operation))) fail('domain_result_identity');
+  exact(value.outcome, ['disposition', 'status'], 'domain_result_outcome_shape');
+  if (!NO_RUN_DISPOSITIONS.includes(value.outcome.disposition) ||
+      !COMPLETION_STATUSES.includes(value.outcome.status)) fail('domain_result_outcome');
+  exact(value.facts, ['verified', 'verificationScope', 'data'], 'domain_result_facts_shape');
+  const { verified, verificationScope } = value.facts;
+  if (![true, false, 'unknown', 'not_applicable'].includes(verified) ||
+      !Array.isArray(verificationScope) || verificationScope.length > MAX_WARNINGS ||
+      !verificationScope.every(identifier) || new Set(verificationScope).size !== verificationScope.length) {
+    fail('domain_result_verification');
+  }
+  exact(value.evidence, ['observations', 'gaps'], 'domain_result_evidence_shape');
+  gaps(value.evidence.gaps);
+  const missing = field => value.evidence.gaps.some(gap =>
+    gap.code === 'FACT_NOT_ESTABLISHED' && gap.path === `facts.${field}`);
+  if (!Array.isArray(value.evidence.observations) || value.evidence.observations.length > MAX_WARNINGS) {
+    fail('domain_result_observations');
+  }
+  for (const observation of value.evidence.observations) {
+    exact(observation, ['ref', 'observedAt', 'freshness'], 'domain_result_observation_shape');
+    if ((observation.ref !== null && !identifier(observation.ref)) ||
+        (observation.observedAt !== null && !timestamp(observation.observedAt)) ||
+        !['fresh', 'stale', 'unknown'].includes(observation.freshness) ||
+        (observation.freshness === 'fresh' && (observation.ref === null || observation.observedAt === null))) {
+      fail('domain_result_observation');
+    }
+  }
+  if (value.domainSchemaVersion === null && !missing('domainSchemaVersion')) fail('domain_result_version_missing');
+  list(value.warnings, 'domain_result_warnings');
+  list(value.uncertainty, 'domain_result_uncertainty');
+  pending(value.pendingContext);
+  exact(value.failures, ['domain', 'handling'], 'domain_result_failures_shape');
+  if (value.failures.domain !== null && !isPlainObject(value.failures.domain)) fail('domain_result_domain_error');
+  if (value.failures.handling !== null) {
+    exact(value.failures.handling, ['code', 'message', 'retryable'], 'domain_result_handling_shape');
+    const error = value.failures.handling;
+    if (!identifier(error.code) || typeof error.message !== 'string' || !error.message.trim() ||
+        error.message.length > MAX_RENDERED_TEXT || typeof error.retryable !== 'boolean') fail('domain_result_handling');
+  }
+  exact(value.effects, ['status', 'refs', 'details', 'reconciliation'], 'domain_result_effects_shape');
+  const effects = value.effects;
+  list(effects.details, 'domain_result_effect_details');
+  if (!['none', 'known', 'possible'].includes(effects.status) || !Array.isArray(effects.refs) ||
+      effects.refs.length > MAX_WARNINGS || !effects.refs.every(identifier) ||
+      new Set(effects.refs).size !== effects.refs.length) fail('domain_result_effects');
+  exact(effects.reconciliation, ['required', 'reason'], 'domain_result_reconciliation_shape');
+  if (typeof effects.reconciliation.required !== 'boolean' ||
+      (effects.reconciliation.required ? !identifier(effects.reconciliation.reason) : effects.reconciliation.reason !== null) ||
+      (effects.status === 'possible' && !effects.reconciliation.required) ||
+      (effects.status === 'none' && (effects.refs.length || effects.details.length || effects.reconciliation.required)) ||
+      (effects.status === 'known' && !effects.refs.length && !effects.details.length) ||
+      (missing('effects') && effects.status !== 'possible')) fail('domain_result_effects_evidence');
+  if (verified === true && !verificationScope.length && !missing('verificationScope')) fail('domain_result_verification_scope');
+  const status = value.outcome.status;
+  if ((status === 'success' && (value.failures.domain !== null || value.pendingContext !== null ||
+      (verified !== true && !missing('verified')))) ||
+      (status === 'failure' && value.failures.domain === null && value.failures.handling === null && !missing('error')) ||
+      (status === 'clarification_required' && (value.failures.domain !== null ||
+        (value.pendingContext === null && !missing('pendingContext')) || (verified !== false && !missing('verified')))) ||
+      (status === 'unknown' && !value.uncertainty.length && !value.evidence.gaps.length) ||
+      (status === 'not_applicable' && verified !== 'not_applicable' && !missing('verified')) ||
+      (verified === 'not_applicable' && (verificationScope.length ||
+        (effects.status !== 'none' && !missing('effects'))))) {
+    fail('domain_result_semantics');
+  }
+  const suppressed = ['suppressed', 'reasoning-required'].includes(value.outcome.disposition);
+  if ((value.content === null) !== suppressed) fail('domain_result_content_suppression');
+  if (value.content !== null) userResponse(value.content);
+  return freeze(value);
+}
+
+function domainResultFromFacts(facts, executionMode, disposition, evidence, handling, effects, content) {
+  exact(facts, FACT_KEYS, 'domain_result_normalized_facts_shape');
+  return validateDomainResult({ schemaVersion: DOMAIN_RESULT_SCHEMA_VERSION, kind: 'benson.domain-result',
+    executionMode, domain: facts.domain, domainSchemaVersion: facts.domainSchemaVersion, operation: facts.operation,
+    outcome: { disposition, status: facts.status },
+    facts: { verified: facts.verified, verificationScope: facts.verificationScope, data: facts.data },
+    evidence, warnings: facts.warnings, failures: { domain: facts.error, handling }, effects,
+    uncertainty: facts.uncertainty, pendingContext: facts.pendingContext, content });
+}
+
+// Domain normalization is synchronous and domain-owned, like the renderer.
+// No caller/model field may select executionMode. The live admission revalidates
+// the original no-Run facts; v2 read restrictions still apply in full.
+export function createNoRunDomainResult(response, { controller, admission, normalizeFacts, language } = {}) {
+  if (typeof controller?.validateOutcome !== 'function' || typeof controller?.assertCurrent !== 'function' ||
+      typeof normalizeFacts !== 'function' || !['en', 'he'].includes(language)) fail('domain_result_read_dependencies');
+  exact(response, ['mode', 'outcome', 'rendered'], 'domain_result_response_shape');
+  const outcome = controller.validateOutcome(admission, response.outcome);
+  if (outcome.schemaVersion !== NATIVE_READ_OUTCOME_VERSION) fail('domain_result_read_version');
+  const suppressed = ['suppressed', 'reasoning-required'].includes(outcome.disposition);
+  if (response.mode !== (suppressed ? 'suppressed' : 'deterministic') ||
+      (response.rendered === null) !== suppressed) fail('domain_result_response_mode');
+  const facts = normalizeFacts(outcome.evidence.facts);
+  if (facts && typeof facts.then === 'function') {
+    Promise.resolve(facts).catch(() => {}); fail('domain_result_normalizer_must_be_synchronous');
+  }
+  if (facts?.domain !== admission.domain || !Array.isArray(facts?.effects) || facts.effects.length) {
+    fail('domain_result_read_facts_mismatch');
+  }
+  const rendered = suppressed ? null : validateRenderedOutput(response.rendered);
+  const result = domainResultFromFacts(facts, 'deterministic', outcome.disposition,
+    { observations: [{ ref: outcome.evidence.ref, observedAt: outcome.evidence.observedAt,
+      freshness: outcome.evidence.freshness }], gaps: [] }, outcome.error,
+    { ...outcome.effects, details: [], reconciliation: outcome.reconciliation },
+    rendered === null ? null : { state: 'usable', text: rendered.message, language });
+  controller.assertCurrent(admission);
+  return result;
+}
+
+// Pure source-level projection, not a runtime binding, admission or delivery
+// permission. The native owner retains caller/currentness and handoff checks.
+export function createCompletionDomainResult(raw, nativeAuthority,
+  { projectEffects, expectedTaskResult, expectedRunId } = {}) {
+  const record = validateCompletion(raw, nativeAuthority);
+  if (record.schemaVersion !== SUCCESSOR_COMPLETION_SCHEMA_VERSION || record.kind !== 'domain-task') {
+    fail('domain_result_completion_version_or_kind');
+  }
+  if (expectedRunId !== undefined && record.binding.runId !== expectedRunId) fail('domain_result_run_mismatch');
+  if (expectedTaskResult !== undefined) {
+    const expected = validateTaskResultEnvelope(expectedTaskResult);
+    if (record.binding.taskId !== expected.taskId || !['domain', 'domainSchemaVersion', 'operation',
+      'status', 'verified', 'data', 'warnings', 'error', 'pendingContext'].every(field =>
+      isDeepStrictEqual(boundedCopy(record.facts[field]), boundedCopy(expected[field])))) {
+      fail('domain_result_domain_evidence_mismatch');
+    }
+  }
+  const missingEffects = record.completion.gaps.some(gap =>
+    gap.code === 'FACT_NOT_ESTABLISHED' && gap.path === 'facts.effects');
+  let effects;
+  if (record.facts.effects.length) {
+    if (typeof projectEffects !== 'function') fail('domain_result_effect_projection_required');
+    effects = projectEffects(record.facts.effects);
+    if (effects && typeof effects.then === 'function') {
+      Promise.resolve(effects).catch(() => {}); fail('domain_result_effect_projection_must_be_synchronous');
+    }
+    if (!isDeepStrictEqual(boundedCopy(effects?.details), boundedCopy(record.facts.effects))) {
+      fail('domain_result_effect_details_mismatch');
+    }
+  } else {
+    effects = { status: missingEffects ? 'possible' : 'none', refs: [], details: [],
+      reconciliation: { required: missingEffects, reason: missingEffects ? 'COMPLETION_EFFECTS_NOT_ESTABLISHED' : null } };
+  }
+  const disposition = record.facts.status === 'failure' ? 'failed' :
+    record.facts.status === 'unknown' ? 'unresolved' : 'handled';
+  return domainResultFromFacts({ ...record.facts, domain: record.binding.domain }, 'agentic', disposition,
+    { observations: [], gaps: record.completion.gaps }, null, effects, record.userResponse);
+}
