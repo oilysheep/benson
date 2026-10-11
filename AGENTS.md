@@ -5,14 +5,15 @@ precedence, required rules or canonical owners are missing, ambiguous or contrad
 
 ## HARD STOPS
 
-Oren's explicit approval is required before:
+Oren's explicit approval is required for unapproved scope below;
+canaries need action-time approval:
 
 1. Mutations in a new SIGNIFICANT stage.
 2. Architecture/ownership/public-surface/persistence/lifecycle/security or workflow/
    completion changes; Plan stage/dependency/acceptance-strategy changes.
 3. New service/store/queue/scheduler/transport/framework/plugin registration or state,
    MCP/A2A layer, or OpenClaw core modification.
-4. Runtime config/publication/reload/restart outside exact approved exposure.
+4. Authentication actions; runtime config/publication/reload/restart outside exact approved exposure.
    Every production/user-channel/physical canary still needs action-time approval.
 5. Continuation after reviewer escalation.
 6. Every push: acceptance and final PASS required, except explicitly waived purely
@@ -63,44 +64,40 @@ change is material and requires fresh review.
 
 Inspect → Decide → Backup → Change → Validate → Acceptance → Review → Push → PR → Merge → Snapshot
 
-One objective/stage; use PLANS.md inventory before future capabilities/stages. Implement
-approved design; local race/regression/validation repairs within approved ownership are not redesign.
-Backup: verify pre-change Git commit/branch; preserve affected uncommitted content separately.
-Non-Git-restorable changes need one verified restorable checkpoint outside active directories.
-File copies: exact targets, hashes/modes, comparison, restore instructions/validation,
-effects rollback cannot undo.
-Acceptance levels: source/unit/fixture; isolated native; runtime integration;
-production/user-channel; physical. Never promote levels. SIGNIFICANT architecture/
-runtime/user-facing changes need representative E2E at highest applicable approved
-level. For inapplicable/deferred production/channel/physical E2E, canonical Plan records
-accepted lower level/reason/limitation. Prefer Oren's exact interaction and deterministic
-verification; global equivalence-class/identity-proof rules apply.
+Continue exact approved scope through validation, acceptance and automatic review until
+a HARD STOP, operator action or blocker; ask only for unapproved deltas. Batch related
+inspection/checkpoints/edits/validation/reporting. Approved local repairs are not
+redesign. Use PLANS.md inventory before future stages.
+Approval never waives security, fail-closed, verification, rollback or acceptance.
+Backup: verify Git commit/branch; preserve affected uncommitted content. Non-Git state:
+one verified restorable checkpoint outside active directories. Copies: exact targets,
+hashes/modes, comparison, restore/validation and irreversible effects.
+Reuse checkpoints only while recovery coverage remains valid; cover new affected state
+before mutation. Reuse valid unchanged evidence; rerun for relevant changes, failures,
+freshness or unresolved concerns. Batch Plan updates at acceptance/material scope/evidence
+changes; retain required closure and dated evidence.
+Evidence levels: source/unit/fixture → isolated native → runtime integration →
+production/channel → physical; never promote. SIGNIFICANT architecture/runtime/user-facing
+changes need representative E2E at highest applicable approved level. Plan records lower
+acceptance/reason/limits when production/channel/physical E2E is inapplicable/deferred.
+Prefer Oren's interaction and deterministic verification; global identity/equivalence rules apply.
 
 ## Gate briefings and learning
 
-Primary goals: production quality and Oren's Agentic Systems / Harness Architecture
-learning. Hebrew briefings include:
+Goals: production quality and Oren's Agentic Systems / Harness Architecture learning.
+One concise Hebrew briefing per genuine gate covers applicable fields:
 
-1. Flow position/objective.
-2. Invariant/owner/failure class.
-3. Evidence: proven/partial/UNKNOWN/drift.
-4. Files/components: planned/actual.
-5. KEEP/REPAIR/EXTEND/REPLACE/REMOVE delta.
-6. Component type; OpenClaw vs Benson.
-7. Best-practice/native evidence when external/runtime behavior matters.
-8. Validation/acceptance/evidence level.
-9. Exact config/registration/publication/reload/restart/canary exposure; only listed
-   actions covered, with action-time canary approval.
-10. Rollback/external effects.
-11. Decisions/approvals/blockers/deferrals/UNKNOWNs.
-12. Learning point; Benson example/flow or distributed-systems analogy when useful.
+1. Objective/flow; invariant, owner and failure class.
+2. Proven/partial/UNKNOWN/drift; validation, acceptance and evidence level.
+3. Planned/actual files, KEEP/REPAIR/EXTEND/REPLACE/REMOVE; Benson vs OpenClaw/type.
+4. Best-practice/native evidence; exact approved runtime/canary actions, rollback/effects.
+5. Findings/dispositions, limitations, decisions, approvals, blockers and deferrals.
+6. Learning point/example when useful.
 
-Start: minimal inspection, planned fields, STOP for SIGNIFICANT approval; no repeat
-approval for ROUTINE work within scope. Mid-stage: explain genuine blocker or changed
-design/ownership/acceptance/exposure/security before asking. Close/pre-push: after
-implementation, validation, acceptance, applicable Plan closure and final PASS/EDITORIAL
-waiver, factual fields plus findings/responses/dispositions/status/limitations; STOP
-for push approval. Teach in briefings/rationale, not routine updates/production comments.
+Start: STOP for unapproved SIGNIFICANT scope. Mid-stage: explain the blocker/unapproved
+delta before asking. Close/pre-push: validation, acceptance, Plan closure and final
+PASS/EDITORIAL waiver precede one briefing; STOP unless push already approved for this
+final scope. Avoid redundant reports; teach here, not production comments.
 
 ## Git / PR workflow
 
@@ -118,9 +115,10 @@ acceptance or snapshot requirement.
 
 ## Independent review
 
-Mandatory for non-EDITORIAL PRs; purely EDITORIAL waiver requires Oren. Automatically
-launch the configured fresh, isolated, read-only reviewer without operator approval,
-including same-scope reruns until escalation: no inherited/forked/resumed Builder conversation,
+Non-EDITORIAL PRs require review; EDITORIAL waiver requires Oren. Automatically launch
+the configured fresh isolated read-only reviewer once on the stable final diff.
+Rerun for material changes, finding repairs or invalidated evidence; escalation below
+still applies. No inherited/forked/resumed Builder conversation,
 reasoning, session state, summaries/conclusions or prior reviewer context. Pass only
 target label, diff range/PR reference, reviewer profile instructions. Reviewer builds
 context independently: diff first, minimum authoritative context.
@@ -177,20 +175,17 @@ physical/external effects/messages via canonical owners; files cannot undo them.
 
 ## Snapshots and instruction loading
 
-Verify fresh bensonsnap after validated OpenClaw config/integration, agents/workspaces,
+Verify bensonsnap for accepted OpenClaw config/integration, agents/workspaces,
 AGENTS.md, deterministic tools/scripts, models/delegation/permissions, scheduling/
-Automations, persistent domain state/schema or architecture changes. Capture accepted/
-intentionally preserved state, not progress. Source/docs: prefer after accepted merge/
-main sync. Runtime/config/domain state: snapshot validated intentionally preserved
-state; when source also changes, final snapshot after merge/sync unless Plan needs
-earlier evidence. No snapshots/reloads/full suites for preparation alone.
+Automations, domain state/schema or architecture changes. Source/docs: after accepted
+merge/main sync. Runtime/state: capture validated preserved state; with source changes,
+final capture after merge/sync unless Plan needs earlier evidence. Reuse only a verified
+fresh snapshot of that state; no progress/preparation snapshots, reloads or full suites.
 
-After any AGENTS.md change, use supported prompt inspection (CLI: codex debug prompt-input) at changed/affected descendant scopes. Verify every expected instruction
-file's full text loads, including root's final BENSON_AGENTS_EOF_V1 sentinel.
-Root sentinel, file presence, byte counts or startup alone cannot prove nested loading.
-Keep root-to-scope chains within installed native budget; prefer concise owners over
-config increases/parallel policy. Inspect prompts in memory; emit scoped checks, never
-raw prompts/secrets.
+After AGENTS.md changes, inspect prompts (`codex debug prompt-input`) at affected scopes.
+Verify each expected file's full text and BENSON_AGENTS_EOF_V1; sentinel/counts/presence/
+startup cannot prove nested loading. Keep chains within native budget; prefer concise
+owners over config increases/parallel policy. Inspect in memory; emit checks, never prompts/secrets.
 Unknown/truncated loading blocks acceptance.
 
 ## Operator work and language
