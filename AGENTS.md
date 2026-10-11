@@ -14,7 +14,7 @@ Oren's explicit approval is required before:
    MCP/A2A layer, or OpenClaw core modification.
 4. Runtime config/publication/reload/restart outside exact approved exposure.
    Every production/user-channel/physical canary still needs action-time approval.
-5. First mandatory reviewer or continuation after reviewer escalation.
+5. Continuation after reviewer escalation.
 6. Every push: acceptance and final PASS required, except explicitly waived purely
    EDITORIAL review.
 7. Continuing with unresolved security, unverified effects, uncertain execution/
@@ -33,13 +33,16 @@ Architecture: architecture/BENSON_SUBAGENT_ARCHITECTURE.md owns responsibilities
 OpenClaw ownership, lifecycle, reliability, security, observability. Root AGENTS.md:
 engineering workflow; nested AGENTS.md: scoped runtime. PLANS.md: planning procedure;
 canonical Plan: stages/dependencies/migration/acceptance/closure; domain plans/contracts:
-capabilities/predicates/physical evidence. Do not duplicate owners. Before adding a
-script/tool/skill/policy/workflow/config/document owner/abstraction/persistence, locate
-existing owner and classify KEEP/REPAIR/EXTEND/REPLACE/REMOVE.
-Current state: focused current read-only output → latest valid benson-context-*.md
-→ canonical implementation/config → older evidence. Apply snapshot-time/freshness/
-UNKNOWN rules from architecture; history is not runtime proof. Verified divergence
-from approved architecture is IMPLEMENTATION DRIFT.
+capabilities/predicates/physical evidence. Before adding any persistent surface, locate
+its existing owner; classify KEEP/REPAIR/EXTEND/REPLACE/REMOVE. Do not duplicate owners.
+Current-state precedence: focused current read-only output → latest valid benson-context-*.md
+→ canonical implementation/config → older evidence. Apply architecture snapshot/freshness/
+UNKNOWN rules; history is not runtime proof. Verified architectural divergence is IMPLEMENTATION DRIFT.
+
+Oren-approved Phase 2 task/decision deferrals MUST update PHASE2_BACKLOG.md, the sole
+index, with rationale, current limitation, revisit criteria and canonical references;
+deduplicate. Unapproved ideas are not decisions. Never silently alter current-phase
+acceptance, security invariants or architecture.
 
 ## Change classes
 
@@ -60,14 +63,12 @@ change is material and requires fresh review.
 
 Inspect → Decide → Backup → Change → Validate → Acceptance → Review → Push → PR → Merge → Snapshot
 
-Apply global inspection/research/repair/hygiene/validation/retention rules; one objective/
-stage. Before future capabilities/stages use PLANS.md inventory. Implement approved
-design; local race/regression/validation repairs within approved ownership are not redesign.
-Backup: verified pre-change commit/branch for Git files; preserve affected uncommitted
-content separately. Before non-Git-restorable changes create one verified restorable
-checkpoint outside active directories. File copies: exact targets, hashes, modes,
-comparison, restore instructions/validation, effects rollback cannot undo. Proceed
-within approval until gate/blocker.
+One objective/stage; use PLANS.md inventory before future capabilities/stages. Implement
+approved design; local race/regression/validation repairs within approved ownership are not redesign.
+Backup: verify pre-change Git commit/branch; preserve affected uncommitted content separately.
+Non-Git-restorable changes need one verified restorable checkpoint outside active directories.
+File copies: exact targets, hashes/modes, comparison, restore instructions/validation,
+effects rollback cannot undo.
 Acceptance levels: source/unit/fixture; isolated native; runtime integration;
 production/user-channel; physical. Never promote levels. SIGNIFICANT architecture/
 runtime/user-facing changes need representative E2E at highest applicable approved
@@ -117,9 +118,9 @@ acceptance or snapshot requirement.
 
 ## Independent review
 
-Mandatory for non-EDITORIAL PRs; purely EDITORIAL waiver requires Oren. STOP for first
-reviewer approval; it covers same-scope reruns until escalation. Launch configured
-reviewer fresh, isolated, read-only: no inherited/forked/resumed Builder conversation,
+Mandatory for non-EDITORIAL PRs; purely EDITORIAL waiver requires Oren. Automatically
+launch the configured fresh, isolated, read-only reviewer without operator approval,
+including same-scope reruns until escalation: no inherited/forked/resumed Builder conversation,
 reasoning, session state, summaries/conclusions or prior reviewer context. Pass only
 target label, diff range/PR reference, reviewer profile instructions. Reviewer builds
 context independently: diff first, minimum authoritative context.
