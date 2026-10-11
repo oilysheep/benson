@@ -233,11 +233,11 @@ A Run cancellation settles that Run. It does not imply a device stopped, a Remin
 
 Use native yield/wait for bounded native child coordination where supported. Do not poll with an LLM, keep a Run alive through a cleaning cycle, or infer cancellation from `waitForRun` timeout. Durable physical waiting belongs to the domain operation plus native event/schedule mechanisms.
 
-### 7.6 Native OpenClaw first
+### 7.6 Native-First, Contract-First
 
-Prefer supported native lifecycle, transcript, scheduling, persistence and outbound primitives. Inspect installed source/SDK and current upstream before selecting a significant binding. An internal API, copied runtime module or patched fixture is not an unmodified public SDK proof. Trusted-official-only interfaces are not available merely because Benson can import them.
+Across component boundaries, prefer supported OpenClaw native capabilities, plugins, hooks and SDK interfaces for their intended purpose, including lifecycle, transcripts, scheduling, persistence and outbound. For predefined operations, prefer direct schema-defined tool/API calls using canonical contracts and existing owners over LLM-generated runtime code. Native Code Mode is appropriate only when genuinely dynamic composition provides a justified benefit; it is not a mandatory delegation carrier. Reuse these boundaries without duplicate interfaces or infrastructure. Inspect installed source/SDK and current upstream before selecting a significant binding. An internal API, copied runtime module or patched fixture is not an unmodified public SDK proof. Trusted-official-only interfaces are not available merely because Benson can import them.
 
-If no supported primitive meets a required guarantee, document the missing guarantee and compare alternatives. Keep the dependent feature disabled pending a separate architectural decision. Do not automatically add a service, database, scheduler, framework, MCP/A2A layer or core modification. Existing core changes are individually inventoried implementation drift; preserve effective safeguards until replacement and rollback are proven.
+If no supported primitive meets a required guarantee, document the missing guarantee and compare alternatives. Keep the dependent feature disabled pending a separate architectural decision. Do not automatically add a service, database, scheduler, framework or MCP/A2A layer. Never patch, fork or modify installed OpenClaw core/internals. Existing core changes are individually inventoried implementation drift; preserve effective safeguards until replacement and rollback are proven.
 
 ### 7.7 Capacity and resource safety
 
@@ -427,7 +427,7 @@ Keep this architecture, active implementation/domain plans and the latest valid 
 
 ## 23. Prohibited substitutions
 
-No General Workflow Engine, JOIN/CLOSE membership, shared-final aggregation, central dependency graph or terminal-Run resurrection. No callback that assumes every native continuation preserves `runId`. No custom scheduler/outbox, model-owned resource release, event-as-success predicate, fabricated sender, private official-only API workaround or unreviewed core modification.
+No General Workflow Engine, JOIN/CLOSE membership, shared-final aggregation, central dependency graph or terminal-Run resurrection. No callback that assumes every native continuation preserves `runId`. No custom scheduler/outbox, model-owned resource release, event-as-success predicate, fabricated sender or private official-only API workaround.
 
 Do not remove legitimate Dreame saved-program `workflowId` fields merely because their vendor name contains “workflow.” They identify device programs, not the removed Benson engine. Ordinary engineering procedures and atomic Reminder transactions also remain valid.
 

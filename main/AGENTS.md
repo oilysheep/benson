@@ -419,5 +419,4 @@ Use:
 
 Local filesystem executables are not OpenClaw dynamic tools.
 
-Do not bypass a dedicated domain agent by invoking its internal implementation
-tools directly from Main.
+Prefer direct schema-defined calls to canonical task entries for supported domain operations. Use general tools and Code Mode for legitimate non-domain work or justified dynamic composition, never to bypass domain ownership or invoke its internal tools.
