@@ -17,8 +17,7 @@ Oren's explicit approval is required before:
 5. First mandatory reviewer or continuation after reviewer escalation.
 6. Every push: acceptance and final PASS required, except explicitly waived purely
    EDITORIAL review.
-7. PR creation, separately from push.
-8. Continuing with unresolved security, unverified effects, uncertain execution/
+7. Continuing with unresolved security, unverified effects, uncertain execution/
    ownership or inability to fail closed.
 
 Codex MUST NOT merge; Oren merges. Primary checkout only; worktrees, temporary
@@ -107,9 +106,14 @@ for push approval. Teach in briefings/rationale, not routine updates/production 
 One SIGNIFICANT stage/branch/PR unless approved otherwise. Branch from latest accepted synced
 main; commit stage files only.
 Complete acceptance, applicable Plan closure, review, pre-push briefing; approval,
-then push. English PR: purpose, architecture impact, invariants, evidence, rollback. Separate creation approval; PR against main; report. Oren merges. Sync main,
-verify required accepted-state snapshot, then next stage. PRs replace no checkpoint,
-migration, recovery, acceptance or snapshot requirement.
+then push. After a successful approved push, reuse the open PR for that branch
+against main; otherwise create it automatically without separate approval. Verify
+the PR head/base and report its URL. Never enable auto-merge; Oren merges.
+English PR descriptions use concise, accessible bullets covering What, Why, How,
+Validation and material Risks; include relevant architecture impact, invariants,
+evidence, limitations and rollback. Sync main, verify the required accepted-state
+snapshot, then next stage. PRs replace no checkpoint, migration, recovery,
+acceptance or snapshot requirement.
 
 ## Independent review
 
