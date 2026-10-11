@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { createJessicaCompletionToolFactory, createNativeTranscriptReader,
   validateJessicaCompletion, normalizeJessicaCompletion } from '../dist/completion.js';
+import { createCompletionAuthority, acceptAgentCompletion } from '../../../benson-routing/envelope.mjs';
 
 const now = new Date('2026-09-20T00:00:00.000Z');
 const parentSessionKey = 'agent:main:whatsapp:direct:reviewer';
@@ -30,6 +31,32 @@ function fixture({ tasks = [task], parentMessages = parent, childMessages = chil
   return { runId, parentSessionKey, runs: tasks, now,
     readMessages: async ({ agentId }) => agentId === 'main' ? parentMessages : childMessages };
 }
+
+test('explicit v5 Jessica adapter returns Domain Result only with matching native and domain evidence', async () => {
+  const trusted = { taskId: 'fixture-task', pendingBinding: null, pendingExpiresAt: null };
+  const legacy = await normalizeJessicaCompletion(fixture(), trusted);
+  // Synthetic native-owner evidence; this does not enable the gated v5 host.
+  const facts = { ...status, domainSchemaVersion: '1', verificationScope: ['status_read'], effects: [], uncertainty: [] };
+  delete facts.schemaVersion;
+  const authority = createCompletionAuthority({ schemaVersion: 5, kind: 'domain-task',
+    binding: { inputId: 'input', admissionId: 'admission', conversationId: 'conversation', conversationGeneration: 1,
+      runId, runGeneration: 1, agentId: 'jessica-vacuum', sessionKey: childSessionKey, sessionId: 'child-session',
+      sessionGeneration: 1, domain: 'jessica-vacuum', taskId: trusted.taskId,
+      caller: { runId: 'parent-run', runGeneration: 1, agentId: 'main', sessionKey: parentSessionKey,
+        sessionId: 'parent-session', sessionGeneration: 1 }, completionTarget: 'CALLER', authorizationId: 'grant',
+      parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } },
+    knownFacts: facts, results: [], coverage: 'complete', gaps: [], origin: 'agent' });
+  const record = acceptAgentCompletion({ schemaVersion: 5, kind: 'domain-task', facts,
+    userResponse: { state: 'usable', text: 'Docked; battery 100%; cached source and observation retained.', language: 'en' } }, authority);
+  const result = await normalizeJessicaCompletion(fixture(), trusted, null, { record, authority });
+  assert.equal(legacy.schemaVersion, 1);
+  assert.equal(result.kind, 'benson.domain-result');
+  assert.equal(result.executionMode, 'agentic');
+  assert.deepEqual(JSON.parse(JSON.stringify(result.facts.data)), status.data);
+  await assert.rejects(normalizeJessicaCompletion(fixture(), { ...trusted, taskId: 'foreign-task' }, null,
+    { record, authority }), /domain_evidence_mismatch/);
+  await assert.rejects(normalizeJessicaCompletion(fixture(), trusted, null, { record, authority: {} }), /authority_required/);
+});
 
 test('native task and transcript validate exact deterministic status truth', async () => {
   assert.deepEqual(await validateJessicaCompletion(fixture()), status);

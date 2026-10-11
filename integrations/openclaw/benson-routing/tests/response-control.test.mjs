@@ -1,13 +1,19 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
+import { homedir } from 'node:os';
 import test from 'node:test';
 import {
   createResponseEnvelope,
   normalizeLegacyTaskResult,
+  DOMAIN_RESULT_OUTPUT_SCHEMA, createNoRunDomainResult, validateDomainResult,
 } from '../envelope.mjs';
 import { controlResponse } from '../response-control.mjs';
 import { createSourceAdmissionController } from '../request-control.mjs';
+
+const sdkRoot = `${homedir()}/.npm-global/lib/node_modules/openclaw/dist/plugin-sdk/`;
+const { jsonResult } = await import(pathToFileURL(`${sdkRoot}tool-results.js`));
+const { validateJsonSchemaValue } = await import(pathToFileURL(`${sdkRoot}json-schema-runtime.js`));
 
 const corpus = JSON.parse(readFileSync(new URL('./fixtures/presentation-cases.json', import.meta.url)));
 const fixture = (id) => structuredClone(corpus.cases.find((item) => item.id === id));
@@ -48,6 +54,90 @@ test('generic read response preserves no-Run identity without a fake task or Run
   assert.equal(result.outcome.taskId, undefined);
   assert.throws(() => f.controller.admit({ schemaVersion: 2, kind: 'benson.source-input',
     domain: 'foreign-domain', scope: 'read', request: 'read' }), /input_invalid/);
+});
+
+function readDomainResult(f) {
+  return createNoRunDomainResult(controlResponse(f.outcome, f), { ...f, language: 'en',
+    normalizeFacts(data) {
+      const disposition = f.outcome.disposition;
+      const failed = ['failed', 'rejected'].includes(disposition);
+      const unknown = disposition === 'unresolved';
+      const notApplicable = disposition === 'reasoning-required';
+      return { domain: 'future-domain', domainSchemaVersion: '1', operation: 'read',
+        status: failed ? 'failure' : unknown ? 'unknown' : notApplicable ? 'not_applicable' : 'success',
+        verified: notApplicable ? 'not_applicable' : !failed && !unknown,
+        verificationScope: failed || unknown || notApplicable ? [] : ['read'], data,
+        warnings: [], error: failed ? { code: 'READ_DENIED' } : null, effects: [],
+        uncertainty: unknown ? [{ reason: 'read unavailable' }] : [], pendingContext: null };
+    } });
+}
+
+test('one Domain Result preserves native JSON and catalog parity for a future domain', () => {
+  for (const disposition of ['handled', 'no-change', 'failed', 'rejected', 'unresolved', 'suppressed', 'reasoning-required']) {
+    const result = readDomainResult(readFixture(disposition));
+    const native = jsonResult(result);
+    const catalogValue = native.details;
+    assert.deepEqual(JSON.parse(native.content[0].text), JSON.parse(JSON.stringify(result)));
+    assert.deepEqual(catalogValue, result);
+    assert.equal(result.executionMode, 'deterministic');
+    assert.equal(result.outcome.disposition, disposition);
+    assert.deepEqual(JSON.parse(JSON.stringify(result.facts.data)), { value: 7 });
+    assert.equal(result.content === null, ['suppressed', 'reasoning-required'].includes(disposition));
+    assert.equal(validateJsonSchemaValue({ schema: DOMAIN_RESULT_OUTPUT_SCHEMA,
+      value: catalogValue, applyDefaults: false }).ok, true);
+    for (const key of ['admission', 'binding', 'runId', 'mode', 'rendered']) assert.equal(result[key], undefined);
+  }
+});
+
+test('Domain Result validator and output schema reject incomplete and mixed-version values', () => {
+  const valid = readDomainResult(readFixture());
+  const invalid = [controlResponse(readFixture().outcome, readFixture()), ...[
+    value => delete value.content,
+    value => value.content.text = '',
+    value => value.content.text = ' '.repeat(3),
+    value => value.content.text = 'x'.repeat(4097),
+    value => value.schemaVersion = 1,
+    value => value.schemaVersion = 99,
+    value => value.rendered = value.content,
+    value => value.outcome.disposition = 'reasoning-required',
+    value => value.executionMode = 'sequential',
+  ].map(change => { const value = structuredClone(valid); change(value); return value; })];
+  for (const value of invalid) {
+    assert.throws(() => validateDomainResult(value));
+    // Cross-field invariants live in code, not output metadata.
+    if (value.outcome?.disposition !== 'reasoning-required') assert.equal(validateJsonSchemaValue({
+      schema: DOMAIN_RESULT_OUTPUT_SCHEMA, value, applyDefaults: false }).ok, false);
+  }
+});
+
+test('Domain Result normalization is synchronous, rechecks currentness and cannot select a mode', () => {
+  const f = readFixture(); const response = controlResponse(f.outcome, f);
+  assert.throws(() => createNoRunDomainResult(response), /dependencies/);
+  assert.throws(() => createNoRunDomainResult(response, { ...f, language: 'en',
+    normalizeFacts: async () => ({}) }), /synchronous/);
+  assert.throws(() => createNoRunDomainResult({ ...response, executionMode: 'agentic' },
+    { ...f, language: 'en', normalizeFacts: () => ({}) }), /response_shape/);
+  f.close(); assert.throws(() => readDomainResult(f), /invocation closed/);
+});
+
+test('Domain Result rejects contradictory facts, unbounded JSON and unexplained effects', () => {
+  const valid = readDomainResult(readFixture());
+  for (const change of [
+    value => value.facts.verified = false,
+    value => value.facts.verificationScope = [],
+    value => value.facts.data = { value: Infinity },
+    value => value.facts.data = { text: 'x'.repeat(262144) },
+    value => value.domainSchemaVersion = null,
+    value => value.failures.domain = { code: 'CONTRADICTION' },
+    value => value.evidence.observations[0].observedAt = 'not-a-time',
+    value => value.effects.status = 'possible',
+    value => value.evidence.gaps = [{ code: 'FACT_NOT_ESTABLISHED', path: 'facts.effects', detail: 'Missing effects' }],
+  ]) {
+    const raw = structuredClone(valid); change(raw);
+    assert.throws(() => validateDomainResult(raw));
+  }
+  assert.ok(Object.isFrozen(valid.facts.data));
+  assert.throws(() => { valid.facts.data.value = 99; }, TypeError);
 });
 
 test('no-Run dispositions retain their semantics and never launch a Run or model', () => {
