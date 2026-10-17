@@ -2,8 +2,8 @@
 
 Deferred evaluation index, recorded 2026-10-11. The canonical Architecture and
 Implementation Plan remain authoritative; this file owns no policy, proof gate,
-execution sequence or acceptance contract. All items below are DEFERRED under
-[Plan §1.5.1][phase1], not approved implementations. G11 remains OPEN.
+execution sequence or acceptance contract. All items below are DEFERRED, not
+approved implementations. Phase 1 deferrals follow [Plan §1.5.1][phase1]. G11 remains OPEN.
 Phase 1 scope, essential security controls and runtime are unchanged. A concrete
 unsafe exposure still blocks its affected capability; it is not postponed here.
 
@@ -13,6 +13,7 @@ unsafe exposure still blocks its affected capability; it is not postponed here.
 | Advanced agent guardrails | Reduce instruction-injection and privilege-confusion risks without redundant orchestration. | Existing authorization, currentness and validators are mandatory; advanced adversarial coverage is incomplete and no additional guardrails mechanism is selected. | Evaluate realistic untrusted-content cases at existing admission/tool boundaries, false rejections, recovery and latency/token cost. Prefer enforceable native controls; prompt compliance alone is insufficient. | [Architecture §§8.1/13][ownership], [source authority][authority]; [Plan §1.5.1][phase1]. |
 | Indirect bypass prevention | Prevent general tools from circumventing domain authorization and verification. | Comprehensive denial through `exec`, Code Mode, raw HA and native job management remains unproven. | Use bounded, separately approved native proofs for relevant read/mutation paths and delegated contexts. Demonstrate denial without unauthorized effects; preserve Main's legitimate tools and domain safety guarantees. | [Architecture §8.1][ownership]; [Plan G11][gates] and [ED06][migration]. |
 | Industry best-practice research | Inform the above decisions with current evidence rather than speculative hardening. | Existing research is dated and boundary-specific; it does not select or prove an advanced isolation/guardrails solution. | Compare current upstream/installed OpenClaw, official provider documentation, authoritative security standards and credible production evidence. Assess security benefit, compatibility, reliability, latency, tokens and maintenance; record any decision in its canonical owner. | [Architecture §27.2][research]; [AGENTS.md][workflow]. |
+| Reminder Python-to-TypeScript migration (deferral approved 2026-10-17) | Complete language consolidation after the current one-shot migration without expanding its scope. | The existing Python transaction and discovery engines remain authoritative and preserved throughout TS01–TS05; this entry authorizes no implementation. | Revisit only after TS05 acceptance, with a separately approved plan to migrate the existing owners to strict TypeScript. Preserve all existing functionality, atomicity, idempotency, Calendar/Automation integration, authorization, recovery and tests; prove behavior/effect-trace compatibility and pass the retained tests before replacement. | [Plan §11.1][ts-scope], [TS01–TS05 gates][ts-stages]; [Reminder contract][reminder-contract] and [existing owners][reminder-owners]. |
 
 [phase1]: BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md#151-limited-phase-1-runtime-acceptance--operator-decision-2026-10-11
 [gates]: BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md#5-explicit-implementation-proof-gates
@@ -22,3 +23,7 @@ unsafe exposure still blocks its affected capability; it is not postponed here.
 [authority]: architecture/BENSON_SUBAGENT_ARCHITECTURE.md#13-least-privilege-and-source-authority
 [research]: architecture/BENSON_SUBAGENT_ARCHITECTURE.md#272-native-decision-evidence
 [workflow]: AGENTS.md
+[ts-scope]: BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md#111-objective-scope-and-evidence-baseline
+[ts-stages]: BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md#116-ordered-execution-slices-and-gates
+[reminder-contract]: agents/reminder-service/AGENTS.md
+[reminder-owners]: agents/reminder-service/README.md
