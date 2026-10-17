@@ -1,0 +1,28 @@
+{
+  "compilerOptions": {
+    "target": "ES2024",
+    "module": "NodeNext",
+    "moduleResolution": "NodeNext",
+    "types": ["node"],
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "useUnknownInCatchVariables": true,
+    "verbatimModuleSyntax": true,
+    "noEmitOnError": true,
+    "rootDir": ".",
+    "outDir": "output/typescript",
+    "forceConsistentCasingInFileNames": true
+  },
+  "include": [
+    "shared/**/*.ts",
+    "integrations/openclaw/benson-routing/**/*.ts",
+    "integrations/openclaw/plugins/*/src/**/*.ts",
+    "integrations/openclaw/plugins/*/tests/**/*.ts",
+    "agents/jessica-vacuum/lib/**/*.ts",
+    "agents/reminder-service/lib/**/*.ts"
+  ],
+  "exclude": ["node_modules", "output"]
+}

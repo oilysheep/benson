@@ -1,0 +1,18 @@
+{
+  "name": "@benson/workspace",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": { "node": ">=24.16.0 <25 || >=26.1.0" },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc",
+    "test:ts01": "node output/typescript/integrations/openclaw/benson-routing/tests/typescript-contracts.test.js && node integrations/openclaw/plugins/benson-jessica-tool/tests/native-state-compatibility.test.mjs"
+  },
+  "dependencies": { "typebox": "1.3.34" },
+  "devDependencies": {
+    "@types/node": "24.19.2",
+    "openclaw": "2026.10.4",
+    "typescript": "7.0.2"
+  }
+}
