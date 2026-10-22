@@ -5,8 +5,9 @@
   "type": "module",
   "engines": { "node": ">=24.16.0 <25 || >=26.1.0" },
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc",
+    "typecheck": "node build/typescript.mjs --noEmit",
+    "build": "node build/typescript.mjs",
+    "test:ts03:native": "node integrations/openclaw/plugins/benson-jessica-tool/tests/native-state-compatibility.test.mjs",
     "test:ts02": "node --import ./output/typescript/integrations/openclaw/benson-routing/tests/fixtures/core-portability-hooks.js output/typescript/integrations/openclaw/benson-routing/tests/source-contracts.test.js && node --import ./output/typescript/integrations/openclaw/benson-routing/tests/fixtures/core-portability-hooks.js output/typescript/integrations/openclaw/benson-routing/tests/conversation-context.test.js && node output/typescript/integrations/openclaw/benson-routing/tests/compatibility.test.js",
     "test:ts01": "node output/typescript/integrations/openclaw/benson-routing/tests/typescript-contracts.test.js && node integrations/openclaw/plugins/benson-jessica-tool/tests/native-state-compatibility.test.mjs",
     "test:ts03": "for ts03_suite in benson-jessica-tool/tests/domain-compatibility benson-jessica-tool/tests/state benson-jessica-tool/tests/executor benson-jessica-tool/tests/verification benson-jessica-tool/tests/ha-adapters benson-jessica-tool/tests/read-presentation benson-reminder-tool/tests/contracts benson-reminder-tool/tests/service benson-reminder-tool/tests/runner; do node output/typescript/integrations/openclaw/plugins/$ts03_suite.test.js || exit; done && node --import ./output/typescript/integrations/openclaw/plugins/benson-jessica-tool/tests/fixtures/domain-portability-hooks.js output/typescript/integrations/openclaw/plugins/benson-jessica-tool/tests/portability.test.js"
@@ -14,6 +15,7 @@
   "dependencies": { "typebox": "1.3.34" },
   "devDependencies": {
     "@types/node": "24.19.2",
+    "@types/ws": "8.18.1",
     "openclaw": "2026.10.4",
     "typescript": "7.0.2"
   }

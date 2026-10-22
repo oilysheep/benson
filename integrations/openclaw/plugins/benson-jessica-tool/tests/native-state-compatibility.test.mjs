@@ -163,3 +163,82 @@ for (const writes of [1, 2, 3, 4]) {
     assert.deepEqual(recovered.snapshot.history.result, recovered.final);
   });
 }
+
+test('TS03 adapter preserves the legacy native namespace and all four key families', async t => {
+  const f = fixture(t), a = await f.open();
+  const seeded = await a.call({ action: 'seed' });
+  for (const { key, value } of seeded.sync) assert.deepEqual(await a.call({ action: 'adapterLookup', key }), value);
+  await a.stop();
+  const b = await f.open();
+  for (const { key, value } of seeded.sync) assert.deepEqual(await b.call({ action: 'adapterLookup', key }), value);
+});
+
+test('TS03 actual adapter CAS and atomic claims admit one of two processes', async t => {
+  const f = fixture(t), a = await f.open(), b = await f.open();
+  // Native bootstrap remains host-owned; this races records, not cold migrations.
+  await a.call({ action: 'observe', key: DEVICE });
+  await Promise.all([a, b].map(worker => worker.call({ action: 'adapterObserve', id: 'race', key: DEVICE })));
+  const writes = await Promise.all([a, b].map((worker, winner) => worker.call({ action: 'adapterCas', id: 'race', key: DEVICE, value: { winner } })));
+  assert.deepEqual(writes.sort(), ['applied', 'conflict']);
+  const claims = await Promise.all([a, b].map((worker, winner) => worker.call({ action: 'adapterClaim', key: 'under-test:race', value: { winner } })));
+  assert.deepEqual(claims.sort(), [false, true]);
+  assert.deepEqual(await a.call({ action: 'adapterLookup', key: DEVICE }), await b.call({ action: 'adapterLookup', key: DEVICE }));
+});
+
+test('TS03 observations reject foreign keys, stores, forged tokens and stale native revisions', async t => {
+  const f = fixture(t), a = await f.open();
+  assert.deepEqual(await a.call({ action: 'adapterTokenIsolation' }), { isolated: true });
+  await a.call({ action: 'adapterObserve', id: 'stale', key: DEVICE });
+  const current = await a.call({ action: 'observe', key: DEVICE });
+  await a.call({ action: 'cas', key: DEVICE, comparison: current.comparison,
+    intent: { operation: 'update', action: 'set', value: { revision: 2 } } });
+  assert.equal(await a.call({ action: 'adapterCas', id: 'stale', key: DEVICE, value: { revision: 1 } }), 'conflict');
+  assert.deepEqual(await a.call({ action: 'adapterLookup', key: DEVICE }), { revision: 2 });
+  await a.stop();
+  const restarted = await f.open();
+  await assert.rejects(restarted.call({ action: 'adapterCas', id: 'stale', key: DEVICE, value: {} }), /observation-unavailable/);
+  assert.deepEqual(await restarted.call({ action: 'adapterLookup', key: DEVICE }), { revision: 2 });
+});
+
+test('TS03 native action view fences revoked invocations, cancellation and plugin lifetime', async t => {
+  const f = fixture(t), worker = await f.open();
+  assert.deepEqual(await worker.call({ action: 'adapterRevocation' }), { rejected: true });
+});
+
+test('TS03 ambiguous commit is retained and propagated without automatic retry', async t => {
+  const f = fixture(t), worker = await f.open();
+  assert.deepEqual(await worker.call({ action: 'adapterAmbiguousCommit' }), { attempts: 1, retained: { committed: true } });
+});
+
+test('TS03 missing native capabilities fail closed; post-commit revocation does not erase a committed write', async t => {
+  const f = fixture(t), worker = await f.open();
+  assert.deepEqual(await worker.call({ action: 'adapterBoundaryNegatives' }), { attempts: 1, retained: { committedBeforeRevocation: true } });
+});
+
+test('TS03 migrated operation owner retains the physical/uncertain dispatch barrier across process loss', async t => {
+  const f = fixture(t), a = await f.open();
+  assert.equal((await a.call({ action: 'candidateReserve' })).kind, 'reserved');
+  assert.equal((await a.call({ action: 'candidateClaim' })).changed, true);
+  await a.stop(true);
+  const b = await f.open(), snapshot = await b.call({ action: 'candidateSnapshot' });
+  assert.equal(snapshot.active.phase, 'dispatching');
+  assert.ok(snapshot.resource.owner);
+  assert.ok(snapshot.resource.inFlight);
+  assert.equal(snapshot.duplicate.kind, 'duplicate');
+  assert.equal((await b.call({ action: 'candidateClaim' })).changed, false);
+});
+
+for (const writes of [1, 2, 3, 4]) {
+  test(`TS03 migrated finalization recovers after native write ${writes} and preserves retained owner`, async t => {
+    const f = fixture(t), a = await f.open();
+    assert.deepEqual(await a.call({ action: 'candidateFinishUntil', writes }), { writes });
+    await a.stop(true);
+    const b = await f.open(), recovered = await b.call({ action: 'candidateRecover' });
+    assert.equal(recovered.final.data.outcome, 'not_sent');
+    assert.equal(recovered.active, null);
+    assert.ok(recovered.resource.owner);
+    assert.equal(recovered.duplicate.kind, 'completed');
+    assert.deepEqual(recovered.history.result, recovered.final);
+    assert.deepEqual(recovered.sync, recovered.async);
+  });
+}
