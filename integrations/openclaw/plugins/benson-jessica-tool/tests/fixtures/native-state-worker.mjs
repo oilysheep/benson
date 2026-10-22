@@ -2,12 +2,32 @@
 import assert from 'node:assert/strict';
 import { createPluginStateKeyedStore, createPluginStateSyncKeyedStore } from 'openclaw/plugin-sdk/plugin-state-store-runtime';
 import { createOperationState, JESSICA_STATE_OPTIONS } from '../../dist/operation-state.js';
+import { createNativeJessicaState } from '../../../../../../output/typescript/integrations/openclaw/plugins/benson-jessica-tool/src/state.js';
+import { createOperationState as createCandidateOperationState } from '../../../../../../output/typescript/agents/jessica-vacuum/lib/operation-state.js';
+import { validateResult } from '../../../../../../output/typescript/agents/jessica-vacuum/lib/results.js';
+import { fixture as domainFixture } from '../../../../../../output/typescript/integrations/openclaw/plugins/benson-jessica-tool/tests/fixtures/domain-state.js';
 
 assert.ok(process.env.OPENCLAW_STATE_DIR?.startsWith('/tmp/benson-ts01-state-'));
 const plugin = 'benson-jessica-tool';
 const options = { ...JESSICA_STATE_OPTIONS, env: process.env };
 const sync = createPluginStateSyncKeyedStore(plugin, options);
 const store = createPluginStateKeyedStore(plugin, options);
+let invocationActive = true, pluginActive = true;
+const abort = new AbortController();
+const authority = { signal: abort.signal, assertCurrent() {
+  if (!invocationActive) throw new Error('fixture-invocation-revoked');
+} };
+const nativeState = { openKeyedStore: opts => createPluginStateKeyedStore(plugin,
+  { ...opts, env: process.env }, () => { if (!pluginActive) throw new Error('fixture-plugin-stopped'); }) };
+const adapter = createNativeJessicaState(nativeState, authority);
+const observations = new Map();
+const candidate = () => createCandidateOperationState(adapter);
+const candidateIntent = domainFixture().intent;
+const candidateResult = validateResult({ schemaVersion: '1', domain: 'jessica-vacuum', operation: 'clean', status: 'failure', verified: false,
+  data: { operationId: candidateIntent.operationId, rooms: candidateIntent.plan.rooms.map(room => room.slug), outcome: 'not_sent',
+    dispatch: 'not_attempted', observation: null, appliedSettings: {} }, warnings: [], pendingContext: null,
+  error: { code: 'FIXTURE_NOT_SENT', stage: 'precondition', retryable: false, retryMode: 'none', sideEffects: 'none', message: 'Fixture not sent' } },
+null, new Date('2026-10-17T12:00:00Z'));
 for (const method of ['observe', 'compareAndApply', 'registerIfAbsent', 'withCurrent']) {
   assert.equal(typeof store[method], 'function', `missing public state primitive ${method}`);
 }
@@ -23,6 +43,126 @@ const state = () => createOperationState(sync, { verifyRelease: (owner, evidence
 
 async function execute(command) {
   switch (command.action) {
+    case 'adapterLookup': return adapter.lookup(command.key);
+    case 'adapterObserve': {
+      const observed = await adapter.observe(command.key);
+      observations.set(command.id, observed);
+      return observed.value;
+    }
+    case 'adapterCas': {
+      const observed = observations.get(command.id);
+      if (!observed) throw new Error('fixture-observation-unavailable');
+      return adapter.compareAndSet(command.key, observed, command.value);
+    }
+    case 'adapterClaim': return adapter.registerIfAbsent(command.key, command.value);
+    case 'adapterTokenIsolation': {
+      const observed = await adapter.observe(DEVICE);
+      await assert.rejects(adapter.compareAndSet('request:foreign', observed, {}), /Foreign native state observation/);
+      await assert.rejects(adapter.compareAndSet(DEVICE, { ...observed, token: {} }, {}), /Foreign native state observation/);
+      const other = createNativeJessicaState(nativeState, authority);
+      await assert.rejects(other.compareAndSet(DEVICE, observed, {}), /Foreign native state observation/);
+      return { isolated: true };
+    }
+    case 'adapterRevocation': {
+      const observed = await adapter.observe(DEVICE);
+      for (const operation of [() => adapter.lookup(DEVICE), () => adapter.observe(DEVICE),
+        () => adapter.compareAndSet(DEVICE, observed, { prohibited: true }),
+        () => adapter.registerIfAbsent('under-test:revoked', { prohibited: true })]) {
+        invocationActive = true;
+        const pending = operation();
+        invocationActive = false;
+        await assert.rejects(pending);
+      }
+      invocationActive = true;
+      assert.equal(await store.lookup(DEVICE), undefined);
+      assert.equal(await store.lookup('under-test:revoked'), undefined);
+      pluginActive = false;
+      await assert.rejects(adapter.lookup(DEVICE));
+      await assert.rejects(adapter.registerIfAbsent('under-test:stopped', {}));
+      pluginActive = true;
+      abort.abort();
+      await assert.rejects(adapter.lookup(DEVICE));
+      await assert.rejects(adapter.compareAndSet(DEVICE, observed, {}));
+      assert.equal(await store.lookup('under-test:stopped'), undefined);
+      return { rejected: true };
+    }
+    case 'adapterAmbiguousCommit': {
+      let attempts = 0;
+      const ambiguous = createNativeJessicaState({ openKeyedStore(opts) {
+        const native = nativeState.openKeyedStore(opts);
+        return { ...native, withCurrent(auth) {
+          const action = native.withCurrent(auth);
+          return { ...action, async compareAndApply(...args) {
+            attempts++;
+            await action.compareAndApply(...args);
+            throw new Error('fixture-response-lost-after-commit');
+          } };
+        } };
+      } }, authority);
+      const before = await ambiguous.observe(DEVICE);
+      await assert.rejects(ambiguous.compareAndSet(DEVICE, before, { committed: true }), /response-lost-after-commit/);
+      assert.equal(attempts, 1);
+      return { attempts, retained: await store.lookup(DEVICE) };
+    }
+    case 'adapterBoundaryNegatives': {
+      assert.throws(() => createNativeJessicaState({ openKeyedStore: () => ({ ...store, withCurrent: undefined }) }, authority), /unavailable/);
+      assert.throws(() => createNativeJessicaState({ openKeyedStore: () => ({ ...store,
+        withCurrent: auth => ({ ...store.withCurrent(auth), compareAndApply: undefined }) }) }, authority), /unavailable/);
+      invocationActive = false;
+      assert.throws(() => createNativeJessicaState(nativeState, authority), /revoked/);
+      invocationActive = true;
+      let attempts = 0;
+      const revokeAfter = createNativeJessicaState({ openKeyedStore(opts) {
+        const native = nativeState.openKeyedStore(opts);
+        return { ...native, withCurrent(auth) {
+          const action = native.withCurrent(auth);
+          return { ...action, async compareAndApply(...args) {
+            attempts++;
+            const value = await action.compareAndApply(...args);
+            invocationActive = false;
+            return value;
+          } };
+        } };
+      } }, authority);
+      const observed = await revokeAfter.observe(DEVICE);
+      await assert.rejects(revokeAfter.compareAndSet(DEVICE, observed, { committedBeforeRevocation: true }), /revoked/);
+      invocationActive = true;
+      assert.equal(attempts, 1);
+      return { attempts, retained: await store.lookup(DEVICE) };
+    }
+    case 'candidateReserve': return candidate().reserve(candidateIntent);
+    case 'candidateClaim': {
+      const owner = candidate();
+      return owner.claimMutation(await owner.active(), new Date(0));
+    }
+    case 'candidateSnapshot': {
+      const owner = candidate();
+      return { active: await owner.active(), resource: await owner.resource(), history: await owner.history(candidateIntent.requestKey),
+        duplicate: await owner.reserve(candidateIntent), operation: await owner.operation(candidateIntent.operationId) };
+    }
+    case 'candidateFinishUntil': {
+      const owner = candidate();
+      const reservation = await owner.reserve(candidateIntent);
+      assert.ok(reservation.active);
+      let writes = 0;
+      const committed = value => { if (++writes === command.writes) throw new Error('fixture-candidate-crash-boundary'); return value; };
+      const interrupted = createCandidateOperationState({ ...adapter,
+        async compareAndSet(...args) { return committed(await adapter.compareAndSet(...args)); },
+        async registerIfAbsent(...args) { return committed(await adapter.registerIfAbsent(...args)); },
+      });
+      await assert.rejects(interrupted.finish(reservation.active, candidateResult), /fixture-candidate-crash-boundary/);
+      return { writes };
+    }
+    case 'candidateRecover': {
+      const owner = candidate();
+      const current = await owner.active();
+      const final = (await owner.history(candidateIntent.requestKey))?.result ?? current?.result;
+      assert.deepEqual(final, candidateResult);
+      if (current) await owner.finish(current, final);
+      return { final, active: await owner.active(), resource: await owner.resource(),
+        history: await owner.history(candidateIntent.requestKey), duplicate: await owner.reserve(candidateIntent),
+        sync: sync.entries(), async: await store.entries() };
+    }
     case 'exitUnexpectedly': process.exit(23);
     case 'lookup': return store.lookup(command.key);
     case 'observe': return store.observe(command.key);
