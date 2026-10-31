@@ -21,6 +21,9 @@ assert.equal(pkg.type, 'module');
 assert.deepEqual(pkg.exports['./plugin-sdk/plugin-entry'], {
   types: './dist/plugin-sdk/plugin-entry.d.ts', default: './dist/plugin-sdk/plugin-entry.js',
 });
+assert.deepEqual(pkg.exports['./plugin-sdk/reply-runtime'], {
+  types: './dist/plugin-sdk/reply-runtime.d.ts', default: './dist/plugin-sdk/reply-runtime.js',
+});
 assert.equal(json(join(root, 'package.json')).type, 'module');
 assert.equal(json(join(root, 'node_modules/typescript/package.json')).version, '7.0.2');
 assert.equal(json(join(root, 'node_modules/@types/ws/package.json')).version, '8.18.1');
@@ -35,6 +38,7 @@ const sources = [
   ['agent-harness-runtime-DZjstJNb.d.ts', '579e0bb10c356e3cad710411b0f36b37fe70348dc7e15448361202f3b9e991a7'],
   ['plugin-sdk/plugin-entry.d.ts', '0a4c99523de9000d90e4be08227261b3e5958f1ead5372364942909e78dc96d7'],
   ['plugin-entry-D4JWmN6h.d.ts', '48119827bb1152bbde76722ce8d6b72362e34de469b753e31a883108270f22f9'],
+  ['plugin-sdk/reply-runtime.d.ts', '6eec7f3c85d878afed72e900033c37ff435059cda688e98512a347b739f1b008'],
 ];
 const declarations = sources.map(([path, expected]) => {
   const text = read(join(sdk, 'dist', path));
@@ -57,7 +61,10 @@ for (const { path, text } of declarations) generate(join(overlay, 'dist', path),
 generate(join(overlay, 'tsconfig.json'), JSON.stringify({
   extends: '../../tsconfig.json',
   compilerOptions: {
-    paths: { 'openclaw/plugin-sdk/plugin-entry': ['./dist/plugin-sdk/plugin-entry.d.ts'] },
+    paths: {
+      'openclaw/plugin-sdk/plugin-entry': ['./dist/plugin-sdk/plugin-entry.d.ts'],
+      'openclaw/plugin-sdk/reply-runtime': ['./dist/plugin-sdk/reply-runtime.d.ts'],
+    },
     rootDirs: ['./dist', '../../node_modules/openclaw/dist'],
   },
 }, null, 2) + '\n');

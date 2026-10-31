@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createRoutingContextController, type ConversationEvidence, type ConversationTurn } from '../core/conversation-context.js';
+import { createCurrentRequestContext, createRoutingContextController, type ConversationEvidence, type ConversationTurn } from '../core/conversation-context.js';
 import { ROUTING_TRANSCRIPT_TIERS, MAX_ROUTING_CONTEXT_BYTES } from '../core/request-control.js';
 const binding = { conversationRef: 'conversation', channel: 'fixture-channel', accountId: 'account', kind: 'group' as const,
   peerId: 'group', threadId: null, requesterId: 'reader' };
@@ -31,6 +31,59 @@ function workflowReferences(ids: string[]) {
   return { workflowId: 'legacy-workflow', metadata: { marker: 'retained compatibility' }, turnReferences: ids.map(entryId => ({
     entryId, conversationRef: binding.conversationRef, sessionId: cutoff.sessionId, generation: cutoff.generation })) };
 }
+
+test('current-request-only preserves exact input without acquiring or inventing history', () => {
+  const f = fixture(), controller = createCurrentRequestContext(f.evidence);
+  const projection = controller.projectCurrentRequest(); assert(projection.status === 'available');
+  assert.equal(projection.scope, 'current-request-only');
+  assert.deepEqual(JSON.parse(projection.serialized), { current: f.state.current, conversation: binding, history: { status: 'not_acquired' } });
+  assert.equal(projection.serialized, JSON.stringify(projection.context));
+  assert.equal(projection.byteLength, Buffer.byteLength(projection.serialized));
+  assert(Object.isFrozen(projection.context.current.sender)); assert(Object.isFrozen(projection.context.history));
+  assert.equal(f.state.reads, 0); assert.equal(f.state.workflows, 0);
+  assert.equal(controller.revalidateProjection(projection), projection);
+  assert.equal(controller.revalidateProjection(structuredClone(projection)).status, 'unavailable');
+  assert.equal(createCurrentRequestContext(f.evidence).revalidateProjection(projection).status, 'unavailable');
+});
+
+test('current-request-only rechecks authority, identity and unchanged input across an await', async () => {
+  for (const invalidate of [
+    (f: ReturnType<typeof fixture>) => { f.state.live = false; },
+    (f: ReturnType<typeof fixture>) => { f.state.denied.add('current'); },
+    (f: ReturnType<typeof fixture>) => { f.state.current = message('replacement', f.evidence.request); },
+    (f: ReturnType<typeof fixture>) => { f.state.current.text = 'changed'; },
+    (f: ReturnType<typeof fixture>) => { f.state.current.sender = null; },
+    (f: ReturnType<typeof fixture>) => { f.state.current.inputProvenance = null; },
+  ]) {
+    const f = fixture(), controller = createCurrentRequestContext(f.evidence);
+    const projection = controller.projectCurrentRequest(); assert(projection.status === 'available');
+    await Promise.resolve(); invalidate(f);
+    const result = controller.revalidateProjection(projection);
+    assert.equal(result.status, 'unavailable'); assert(!JSON.stringify(result).includes(f.evidence.request));
+  }
+  const f = fixture(), controller = createCurrentRequestContext(f.evidence);
+  const projection = controller.projectCurrentRequest(); assert(projection.status === 'available');
+  assert.equal(controller.revalidateProjection(projection, { signal: AbortSignal.abort() }).status, 'unavailable');
+});
+
+test('current-request-only rejects foreign provenance, async guards and out-of-bound exact text', async () => {
+  for (const field of ['pluginId', 'accountId', 'id']) {
+    const f = fixture(); assert(f.state.current.sender?.source === 'native_metadata');
+    f.state.current.sender.identity[field] = 'foreign';
+    assert.equal(createCurrentRequestContext(f.evidence).projectCurrentRequest().status, 'unavailable');
+  }
+  for (const key of ['assertCurrent', 'assertAuthorized'] as const) {
+    const f = fixture(); f.evidence[key] = async () => { throw new Error('authority unavailable'); };
+    assert.equal(createCurrentRequestContext(f.evidence).projectCurrentRequest().status, 'unavailable');
+  }
+  for (const text of ['א'.repeat(4096), 'א'.repeat(4097)]) {
+    const f = fixture(); f.state.current.text = text;
+    assert.equal(createCurrentRequestContext({ ...f.evidence, request: text }).projectCurrentRequest().status, text.length === 4096 ? 'available' : 'unavailable');
+  }
+  const f = fixture(); f.state.current.inputProvenance = { kind: 'external_user', excessive: 'x'.repeat(MAX_ROUTING_CONTEXT_BYTES) };
+  assert.equal(createCurrentRequestContext(f.evidence).projectCurrentRequest().status, 'unavailable');
+  await new Promise<void>(resolve => setImmediate(resolve));
+});
 
 test('normalized ConversationEvidence preserves five exact previous turns, referenced older turns and immutable cutoff', async () => {
   const f = fixture(); f.state.snapshots = [snapshot(Array.from({ length: 7 }, (_, i) => message(`previous-${i + 1}`)))];

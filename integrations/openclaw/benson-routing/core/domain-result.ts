@@ -66,7 +66,7 @@ export function createNoRunDomainResult<A extends Admission>(response: unknown, 
   exact(response, ['mode', 'outcome', 'rendered'], 'domain_result_response_shape');
   const { controller, admission, normalizeFacts, language } = options;
   const outcome = synchronous(controller.validateOutcome(admission, response.outcome), 'domain_result_validator_must_be_synchronous');
-  if (outcome.schemaVersion !== 2) fail('domain_result_read_version');
+  if (outcome.schemaVersion !== 2 && outcome.schemaVersion !== 3) fail('domain_result_read_version');
   const suppressed = outcome.disposition === 'suppressed' || outcome.disposition === 'reasoning-required';
   if (response.mode !== (suppressed ? 'suppressed' : 'deterministic') || (response.rendered === null) !== suppressed) fail('domain_result_response_mode');
   const normalized = synchronous(normalizeFacts(outcome.evidence.facts), 'domain_result_normalizer_must_be_synchronous');
@@ -87,7 +87,7 @@ export interface CompletionResultOptions {
 }
 export function createCompletionDomainResult(raw: unknown, authority: unknown, options: CompletionResultOptions = {}): DomainResult {
   const record = validateCompletion(raw, authority);
-  if (record.schemaVersion !== 5 || record.kind !== 'domain-task') fail('domain_result_completion_version_or_kind');
+  if ((record.schemaVersion !== 5 && record.schemaVersion !== 6) || record.kind !== 'domain-task') fail('domain_result_completion_version_or_kind');
   if (options.expectedRunId !== undefined && record.binding.runId !== options.expectedRunId) fail('domain_result_run_mismatch');
   if (options.expectedTaskResult !== undefined) {
     const expected = validateTaskResultEnvelope(options.expectedTaskResult);
@@ -107,5 +107,7 @@ export function createCompletionDomainResult(raw: unknown, authority: unknown, o
   }
   const disposition = record.facts.status === 'failure' ? 'failed' : record.facts.status === 'unknown' ? 'unresolved' : 'handled';
   const facts = read(NormalizedFactsSchema, { ...record.facts, domain: record.binding.domain }, 'domain_result_identity');
-  return fromFacts(facts, 'agentic', disposition, { observations: [], gaps: record.completion.gaps }, null, effects, record.userResponse);
+  const result = fromFacts(facts, 'agentic', disposition, { observations: [], gaps: record.completion.gaps }, null, effects, record.userResponse);
+  if (record.schemaVersion === 6) validateCompletion(record, authority);
+  return result;
 }

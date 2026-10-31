@@ -6,7 +6,12 @@ export function validateNoRunOutcome(raw: unknown, rawAdmission: unknown): NoRun
   const value = read(NoRunSchema, raw, 'no_run_version_or_disposition');
   const admission = decode(AdmissionSchema, rawAdmission, 'no_run_version_or_disposition');
   if (value.schemaVersion !== admission.schemaVersion) fail('no_run_version_or_disposition');
-  if (value.schemaVersion === 2 && admission.schemaVersion === 2) {
+  if (value.schemaVersion === 3 && admission.schemaVersion === 3) {
+    const expected = { authorityKind: admission.authority.kind, requestId: admission.requestId,
+      domain: admission.domain, subject: admission.authority.subject };
+    if (Object.entries(expected).some(([key, part]) => !identifier(part) ||
+      Reflect.get(value.admission, key) !== part)) fail('no_run_admission_mismatch');
+  } else if (value.schemaVersion === 2 && admission.schemaVersion === 2) {
     const expected = { authorityKind: admission.authority.kind, callId: admission.callId,
       domain: admission.domain, subject: admission.authority.subject };
     if (Object.entries(expected).some(([key, part]) => !identifier(part) ||
@@ -34,7 +39,7 @@ export function validateNoRunOutcome(raw: unknown, rawAdmission: unknown): NoRun
         notification.evidenceRef !== evidence.ref || !Object.values(notification.route).every(identifier) ||
         notification.content.length > MAX_RENDERED_TEXT) fail('no_run_notification_invalid');
   }
-  if (value.schemaVersion === 2 && (effects.status !== 'none' || reconciliation.required || notification !== null)) {
+  if (value.schemaVersion !== 1 && (effects.status !== 'none' || reconciliation.required || notification !== null)) {
     fail('native_read_effects_or_notification');
   }
   return freeze(value);

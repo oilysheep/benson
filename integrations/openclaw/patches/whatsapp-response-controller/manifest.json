@@ -1,0 +1,11 @@
+{
+  "package": "@openclaw/whatsapp",
+  "version": "2026.10.4",
+  "hostVersion": "2026.10.4",
+  "integrity": "sha512-1kF4se963qOcX8VkUc/n+SaE7jYBMkjP5zqIVNNgGPsuGqXvu7nMOiMAdz5wBLYIjzddN6TbG8UjT13CRlyVbA==",
+  "target": "dist/.setup/monitor-QPGSf7uJ.mjs",
+  "beforeSha256": "8b0de14c8398f91657dc1b2118671aaeab973a1ba0b62fea49938fe567cbf57a",
+  "afterSha256": "4a750951dd8fe711f9095bd5b3de2a58e5b0472592994e923d3b2f159554b5c9",
+  "capability": "benson.response-controller.v1",
+  "scope": "Isolated candidate only; no production installation. Reject every unknown version/hash. Never auto-reapply after upgrade."
+}

@@ -83,6 +83,72 @@ function turn(value: unknown): ConversationTurn {
   requireContext(identifier(decoded.entryId), 'conversation_message_unavailable');
   return freeze(decoded);
 }
+function conversationBinding(value: unknown): Readonly<ConversationBinding> {
+  const binding = freeze({ ...decode(ConversationBindingSchema, metadataCopy(value), 'conversation_identity_invalid') });
+  for (const part of Object.values(binding).filter(part => part !== null)) {
+    requireContext(identifier(part), 'conversation_identity_invalid');
+  }
+  return binding;
+}
+function authorizeTurn(binding: Readonly<ConversationBinding>, assertAuthorized: ConversationEvidence['assertAuthorized'], entry: ConversationTurn): void {
+  if (entry.role === 'assistant') requireContext(entry.sender === null, 'sender_provenance_unavailable');
+  else {
+    const sender = entry.sender; requireContext(sender && identifier(sender.id), 'sender_provenance_unavailable');
+    if (sender.source === 'native_metadata') {
+      requireContext(identifier(sender.identity.id) && sender.id === sender.identity.id, 'sender_provenance_unavailable');
+      if (sender.identity.type === 'observation') requireContext(sender.identity.pluginId === binding.channel &&
+        sender.identity.accountId === binding.accountId, 'sender_provenance_mismatch');
+    } else requireContext(binding.kind === 'direct' && sender.id === binding.peerId && sender.channel === binding.channel &&
+      sender.accountId === binding.accountId, 'sender_provenance_mismatch');
+  }
+  assertSync(assertAuthorized(entry));
+}
+function unavailable(error: unknown): UnavailableContext {
+  return freeze({ status: 'unavailable', route: 'main', reason: error instanceof ContextUnavailable ? error.message : 'native_context_unavailable' });
+}
+/** Adapter-private current-input evidence; this Port grants no effect or reply authority. */
+export type CurrentRequestEvidence = Pick<ConversationEvidence, 'request' | 'binding' | 'currentTurn' | 'assertCurrent' | 'assertAuthorized'>;
+export interface CurrentRequestProjection {
+  readonly status: 'available';
+  readonly scope: 'current-request-only';
+  readonly context: Readonly<{ current: ConversationTurn; conversation: ConversationBinding; history: { status: 'not_acquired' } }>;
+  readonly serialized: string;
+  readonly byteLength: number;
+}
+/** Use only when the domain can resolve intent from the current request itself.
+ * No cutoff, empty-history claim or workflow revision is synthesized.
+ */
+export function createCurrentRequestContext(evidence: CurrentRequestEvidence) {
+  const binding = conversationBinding(evidence.binding);
+  const issued = new WeakSet<CurrentRequestProjection>();
+  function project(signal?: AbortSignal): CurrentRequestProjection {
+    signal?.throwIfAborted(); assertSync(evidence.assertCurrent());
+    requireContext(typeof evidence.request === 'string' && evidence.request.trim() && Buffer.byteLength(evidence.request, 'utf8') <= 8192, 'current_text_mismatch');
+    const current = turn(synchronous(evidence.currentTurn(), 'synchronous_authority_unavailable'));
+    requireContext(current.text === evidence.request, 'current_text_mismatch');
+    requireContext(current.role === 'user' && current.inputProvenance?.kind === 'external_user' &&
+      current.sender !== null && current.sender.id === binding.requesterId,
+      'requester_provenance_mismatch');
+    authorizeTurn(binding, entry => evidence.assertAuthorized(entry), current);
+    const context = freeze({ current, conversation: binding, history: { status: 'not_acquired' as const } });
+    const serialized = JSON.stringify(context), byteLength = Buffer.byteLength(serialized, 'utf8');
+    requireContext(byteLength <= MAX_ROUTING_CONTEXT_BYTES, 'routing_context_bounds');
+    signal?.throwIfAborted(); assertSync(evidence.assertCurrent());
+    return freeze({ status: 'available', scope: 'current-request-only', context, serialized, byteLength });
+  }
+  return freeze({
+    projectCurrentRequest({ signal }: { signal?: AbortSignal } = {}): CurrentRequestProjection | UnavailableContext {
+      try { const result = project(signal); issued.add(result); return result; } catch (error) { return unavailable(error); }
+    },
+    revalidateProjection(projection: CurrentRequestProjection, { signal }: { signal?: AbortSignal } = {}): CurrentRequestProjection | UnavailableContext {
+      try {
+        requireContext(issued.has(projection), 'current_projection_foreign');
+        requireContext(isDeepStrictEqual(project(signal), projection), 'current_projection_changed');
+        return projection;
+      } catch (error) { return unavailable(error); }
+    },
+  });
+}
 export interface ContextProjection {
   readonly status: 'available';
   readonly context: Readonly<{ current: ConversationTurn; previous: ConversationTurn[]; older: ConversationTurn[];
@@ -93,25 +159,15 @@ export interface ContextProjection {
 }
 export interface UnavailableContext { readonly status: 'unavailable'; readonly route: 'main'; readonly reason: string }
 export function createRoutingContextController(evidence: ConversationEvidence) {
-  const binding = freeze({ ...decode(ConversationBindingSchema, metadataCopy(evidence.binding), 'conversation_identity_invalid') });
+  const binding = conversationBinding(evidence.binding);
   const cutoff = freeze({ ...decode(ConversationCutoffSchema, metadataCopy(evidence.cutoff), 'native_receipt_invalid') });
-  for (const value of [...Object.values(binding).filter(part => part !== null), ...Object.values(cutoff).filter(part => part !== null)]) {
+  for (const value of Object.values(cutoff).filter(part => part !== null)) {
     requireContext(identifier(value), 'conversation_identity_invalid');
   }
   const issued = new WeakMap<ContextProjection, { workflow: string; included: ConversationTurn[] }>();
   function current(): void { assertSync(evidence.assertCurrent()); }
   function authorized(entry: ConversationTurn): void {
-    if (entry.role === 'assistant') requireContext(entry.sender === null, 'sender_provenance_unavailable');
-    else {
-      const sender = entry.sender; requireContext(sender && identifier(sender.id), 'sender_provenance_unavailable');
-      if (sender.source === 'native_metadata') {
-        requireContext(identifier(sender.identity.id) && sender.id === sender.identity.id, 'sender_provenance_unavailable');
-        if (sender.identity.type === 'observation') requireContext(sender.identity.pluginId === binding.channel &&
-          sender.identity.accountId === binding.accountId, 'sender_provenance_mismatch');
-      } else requireContext(binding.kind === 'direct' && sender.id === binding.peerId && sender.channel === binding.channel &&
-        sender.accountId === binding.accountId, 'sender_provenance_mismatch');
-    }
-    assertSync(evidence.assertAuthorized(entry));
+    authorizeTurn(binding, entry => evidence.assertAuthorized(entry), entry);
   }
   async function workflow(): Promise<Workflow> {
     current(); const raw = await evidence.readWorkflow(); current();
@@ -132,9 +188,7 @@ export function createRoutingContextController(evidence: ConversationEvidence) {
     return freeze(w);
   }
   async function guarded<T>(run: () => Promise<T>): Promise<T | UnavailableContext> {
-    try { return await run(); } catch (error) {
-      return freeze({ status: 'unavailable', route: 'main', reason: error instanceof ContextUnavailable ? error.message : 'native_context_unavailable' } satisfies UnavailableContext);
-    }
+    try { return await run(); } catch (error) { return unavailable(error); }
   }
   return freeze({
     projectRoutingContext({ signal }: { signal?: AbortSignal } = {}): Promise<ContextProjection | UnavailableContext> {

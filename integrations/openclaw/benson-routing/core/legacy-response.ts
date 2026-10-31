@@ -1,4 +1,6 @@
 import Type, { type Static } from 'typebox';
+import { ResponseV3Schema, type ResponseV3 } from './contracts.js';
+import { validateDomainResult } from './domain-result.js';
 import { ExecutionRouteSchema, TaskResultSchema, ResponseSchema, RenderedOutputSchema,
   ResponsePolicySchema, ResponseLifecycleSchema, NativeCompletionSchema, ParentSessionSchema,
   ResponseSourceSchema, LegacyResultSchema, LegacyJessicaSchema, LegacyTrustedSchema, DOMAIN_VERSIONS,
@@ -89,6 +91,25 @@ export function validateRenderedOutput(raw: unknown): RenderedOutput {
   exact(raw, ['schemaVersion', 'message'], 'rendered_shape');
   const value = read(RenderedOutputSchema, raw, 'rendered_invalid');
   if (value.message.length > MAX_RENDERED_TEXT) fail('rendered_invalid'); return freeze({ ...value });
+}
+/** Shape/semantics only; live source and complete result custody belong to the host. */
+export function validateResponseV3Envelope(raw: unknown): ResponseV3 {
+  const value = read(ResponseV3Schema, raw, 'response_v3_invalid');
+  const results = value.results.map(validateDomainResult);
+  if (value.source.type === 'direct') {
+    const result = results[0];
+    if (results.length !== 1 || !result || result.executionMode !== value.source.executionMode ||
+      (value.source.executionMode === 'deterministic' && value.source.admission.domain !== result.domain)) fail('response_v3_direct_binding');
+  } else if (!results.length && value.lifecycle.failure === null && value.lifecycle.domainExecution !== 'none') {
+    fail('response_v3_missing_outcome');
+  }
+  return freeze({ ...value, results, responsePolicy: policy(value.responsePolicy), lifecycle: lifecycle(value.lifecycle),
+    messageCandidate: candidate(value.messageCandidate) });
+}
+export function createResponseV3Envelope(candidateInput: unknown, trusted: unknown): ResponseV3 {
+  exact(candidateInput, ['messageCandidate'], 'response_v3_candidate_shape');
+  exact(trusted, Object.keys(ResponseV3Schema.properties).filter(key => !['schemaVersion', 'messageCandidate'].includes(key)), 'response_v3_trusted_shape');
+  return validateResponseV3Envelope({ schemaVersion: 3, ...trusted, messageCandidate: candidateInput.messageCandidate });
 }
 export function createResponseEnvelope(candidateInput: unknown, trusted: unknown): Response {
   exact(candidateInput, ['messageCandidate'], 'response_candidate_shape');

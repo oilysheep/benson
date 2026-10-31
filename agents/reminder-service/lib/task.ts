@@ -7,10 +7,10 @@ import { controlReadResponse } from '../../../integrations/openclaw/benson-routi
 import { executeReminderTool, type Dependencies } from './service.js';
 import { verifiedList, safeListResult, discoveryData } from './results.js';
 import { renderReminderList } from './presentation.js';
-const IntentSchema = object({ operation: Type.Literal('list') });
+export const REMINDER_TASK_SCHEMA = object({ operation: Type.Literal('list') });
 /** Deterministic domain entry. The native adapter must supply live host custody. */
 export async function executeReminderListTask(callId: string, raw: unknown, deps: Dependencies) {
-  decode(IntentSchema, raw, 'reminder_task_intent_invalid');
+  decode(REMINDER_TASK_SCHEMA, raw, 'reminder_task_intent_invalid');
   const clock = deps.clock ?? (() => new Date());
   const controller = createSourceAdmissionController({ invocation: { callId, domain: 'reminder', subject: deps.route.requesterId }, now: () => clock().getTime(),
     assertCurrent() { deps.authority.signal.throwIfAborted(); assertInvocationCurrent(deps.authority); },

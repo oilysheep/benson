@@ -1,5 +1,34 @@
 import { freeze, plain, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Presentation } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
+import type { DomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { validateDomainResult } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
+import { validateResult } from './results.js';
+import { formatUserDatetime } from '../../../shared/benson-datetime.js';
+/** Shared status wording derives only from validated domain facts, never model prose. */
+export function renderJessicaStatusText(raw: unknown, now: Date): string {
+  const facts = validateResult(raw, null, now);
+  if (facts.operation !== 'status') throw new Error('jessica_status_presentation_operation');
+  const data = facts.data && 'kind' in facts.data && facts.data.kind === 'status' ? facts.data : null;
+  return data && facts.status === 'success' ?
+    `מצב Jessica: ${data.state}; סוללה: ${data.batteryLevel === null ? 'לא ידוע' : `${data.batteryLevel}%`}. לפי נתוני Home Assistant שנקראו ${formatUserDatetime(data.observedAt, 'Asia/Jerusalem', { now })}.` :
+    'לא ניתן לאמת כעת את מצב Jessica. לא בוצעה פעולה במכשיר.';
+}
+/** Live custody establishes provenance; domain facts establish response claims. */
+export function renderJessicaDomainResult(raw: DomainResult, options: { language: 'en' | 'he'; now?: string }): Presentation {
+  const value = validateDomainResult(raw);
+  if (value.domain !== 'jessica-vacuum' || value.operation !== 'status' ||
+    value.effects.status !== 'none' || value.warnings.length || value.uncertainty.length || value.evidence.gaps.length ||
+    value.pendingContext !== null || value.content?.state !== 'usable' || value.content.language !== options.language ||
+    !['success', 'failure'].includes(value.outcome.status)) return unsupported('unsupported_domain_presentation');
+  try {
+    if (!options.now || !Number.isFinite(Date.parse(options.now))) return unsupported('status_presentation_clock_required');
+    const facts = validateResult({ schemaVersion: value.domainSchemaVersion, domain: value.domain, operation: value.operation,
+      status: value.outcome.status, verified: value.facts.verified, data: value.facts.data, warnings: value.warnings,
+      error: value.failures.domain, pendingContext: value.pendingContext }, null, new Date(options.now));
+    if (options.language === 'en') return renderJessicaPresentation(facts, 'en');
+    return rendered(renderJessicaStatusText(facts, new Date(options.now)));
+  } catch { return unsupported('unsupported_status_facts'); }
+}
 const unsupported = (reason = 'semantic_rendering_required'): Presentation => freeze({ kind: 'unsupported', reason });
 const rendered = (text: string, pending: unknown = null): Presentation => freeze({ kind: 'rendered', text, pendingContext: structuredClone(boundedCopy(pending)) });
 const text = (value: unknown): value is string => typeof value === 'string' && !!value.trim();
