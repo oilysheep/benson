@@ -1,33 +1,46 @@
 import Type from 'typebox';
 import { isDeepStrictEqual as same } from 'node:util';
 import { FactsSchema, FACT_KEYS, DOMAIN_VERSIONS, DOMAIN_AGENTS, type Facts } from './contracts.js';
-import { Binding3Schema, Binding4Schema, Binding5Schema, CompletionSchema, WorkflowSchema, SemanticsSchema,
-  COMPLETION_SCHEMA_VERSION, type Binding, type Binding4, type Completion,
+import { Binding3Schema, Binding4Schema, Binding5Schema, Binding6Schema, CompletionSchema, WorkflowSchema, SemanticsSchema,
+  COMPLETION_SCHEMA_VERSION, type Binding, type Binding4, type Binding6, type Completion,
   type CompletionKind, type CompletionVersion, type CompletionOutcome } from './completion-contracts.js';
 import { assertArrayData, assertIds, boundedCopy, decode, exact, fail, freeze, gaps, identifier, object, plain,
-  pending, read, userResponse, UserResponseSchema, MAX_BYTES, MAX_RESPONSE_RESULTS, type Gap, type UserResponse } from './value.js';
+  pending, read, userResponse, assertion, UserResponseSchema, MAX_BYTES, MAX_RESPONSE_RESULTS, type Gap, type UserResponse } from './value.js';
 export { COMPLETION_SCHEMA_VERSION, CURRENT_COMPLETION_SCHEMA_VERSION, SUCCESSOR_COMPLETION_SCHEMA_VERSION,
-  COMPLETION_KINDS } from './completion-contracts.js';
+  BOUNDED_COMPLETION_SCHEMA_VERSION, COMPLETION_KINDS } from './completion-contracts.js';
 export { COMPLETION_STATUSES } from './contracts.js';
 export { MAX_WORKFLOW_ADMISSIONS } from './value.js';
-export type { Completion, Completion3, Completion4, Completion5 } from './completion-contracts.js';
+export type { Completion, Completion3, Completion4, Completion5, Completion6 } from './completion-contracts.js';
 
 const AUTHORITY = Symbol('CompletionAuthority');
 export interface CompletionAuthority { readonly [AUTHORITY]: true }
+/** Adapter-private live source/domain/terminal custody; serialized identities never supply authority. */
+export interface CompletionCustody { assertCurrent(binding: Readonly<Binding6>): unknown }
 interface Snapshot { schemaVersion: CompletionVersion; kind: CompletionKind; binding: Binding; facts: Facts;
-  results: Completion[]; gaps: Gap[]; outcome: CompletionOutcome }
+  results: Completion[]; gaps: Gap[]; outcome: CompletionOutcome; custody?: CompletionCustody['assertCurrent'] }
 const authorities = new WeakMap<object, Readonly<Snapshot>>();
 const recordKeys = ['schemaVersion', 'kind', 'facts', 'results', 'userResponse', 'binding', 'completion'];
 const callerKeys = ['runId', 'runGeneration', 'agentId', 'sessionKey', 'sessionId', 'sessionGeneration'] as const;
-function component(version: number): boolean { return version === 4 || version === 5; }
+function component(version: number): boolean { return version === 4 || version === 5 || version === 6; }
 function field(value: object, key: string): unknown { return Object.getOwnPropertyDescriptor(value, key)?.value; }
 function generation(value: unknown): boolean { return identifier(value) || (typeof value === 'number' && Number.isSafeInteger(value) && value > 0); }
 function domainVersion(domain: unknown): string | undefined {
   return domain === 'jessica-vacuum' || domain === 'reminder' ? DOMAIN_VERSIONS[domain] : undefined;
 }
 function binding(value: unknown, kind: CompletionKind, version: CompletionVersion): Binding {
-  const schema = version === 5 ? Binding5Schema : version === 4 ? Binding4Schema : Binding3Schema;
+  const schema = version === 6 ? Binding6Schema : version === 5 ? Binding5Schema : version === 4 ? Binding4Schema : Binding3Schema;
   exact(value, Object.keys(schema.properties), 'completion_binding_shape');
+  if (version === 6) {
+    const b = read(Binding6Schema, value, 'completion_binding_invalid');
+    assertIds(b, ['inputId', 'admissionId', 'runId', 'agentId', 'sessionKey', 'sessionId', 'taskId', 'authorizationId'], 'completion_binding_identity');
+    if (kind !== 'domain-task' || b.agentId !== DOMAIN_AGENTS[b.domain]) fail('completion_domain_binding');
+    if (b.conversationId !== null && !identifier(b.conversationId)) fail('completion_conversation_binding');
+    if (b.caller !== null && (!Object.values(b.caller).every(identifier) || b.caller.runId === b.runId)) fail('completion_caller_binding');
+    if ((b.completionTarget === 'CALLER' && b.caller === null) ||
+      (b.parentContinuation.eligible && (b.caller === null || b.completionTarget !== 'CALLER')) ||
+      (b.deliveryPolicy.eligible && b.completionTarget !== 'RESPONSE_CONTROLLER')) fail('completion_eligibility_binding');
+    return freeze(b);
+  }
   if (version === 5) {
     assertIds(value, ['inputId', 'admissionId', 'runId', 'agentId', 'sessionKey', 'sessionId', 'authorizationId'], 'completion_binding_identity');
     if (![value.runGeneration, value.sessionGeneration].every(generation)) fail('completion_binding_generation');
@@ -110,16 +123,19 @@ function bounds(record: Completion): void {
   if (Buffer.byteLength(JSON.stringify(record), 'utf8') > MAX_BYTES * (count + 1) + Math.max(0, count - 1)) fail('json_bytes_exceeded');
 }
 function correlate(record: Completion): void {
-  if (record.schemaVersion === 5) {
+  if (record.schemaVersion === 5 || record.schemaVersion === 6) {
     const b = record.binding;
     if (record.facts.domain !== b.domain && !(record.completion.outcome === 'FAILED' && record.facts.domain === null &&
       missingFields(record.completion.gaps).includes('domain'))) fail('completion_domain_binding');
     if (b.domain !== null && record.facts.domainSchemaVersion !== null &&
       record.facts.domainSchemaVersion !== DOMAIN_VERSIONS[b.domain]) fail('completion_domain_version');
-    if (new Set(record.results.map(child => child.binding.runId)).size !== record.results.length) fail('completion_duplicate_run');
-    for (const child of record.results) {
-      if (child.binding.conversationId !== b.conversationId || child.binding.conversationGeneration !== b.conversationGeneration ||
-        child.binding.caller === null || callerKeys.some(key => child.binding.caller?.[key] !== b[key])) fail('completion_result_correlation');
+    if (record.schemaVersion === 5) {
+      const b = record.binding;
+      if (new Set(record.results.map(child => child.binding.runId)).size !== record.results.length) fail('completion_duplicate_run');
+      for (const child of record.results) {
+        if (child.binding.conversationId !== b.conversationId || child.binding.conversationGeneration !== b.conversationGeneration ||
+          child.binding.caller === null || callerKeys.some(key => child.binding.caller?.[key] !== b[key])) fail('completion_result_correlation');
+      }
     }
   } else if (record.schemaVersion === 4) {
     const b = record.binding;
@@ -158,7 +174,7 @@ function correlate(record: Completion): void {
 /** Validate components before traversing an aggregate; children cannot contain children. */
 function shape(raw: unknown): Completion {
   exact(raw, recordKeys, 'completion_shape');
-  if (![3, 4, 5].includes(typeof raw.schemaVersion === 'number' ? raw.schemaVersion : 0)) fail('completion_version_or_kind');
+  if (![3, 4, 5, 6].includes(typeof raw.schemaVersion === 'number' ? raw.schemaVersion : 0)) fail('completion_version_or_kind');
   if (!Array.isArray(raw.results) || raw.results.length > MAX_RESPONSE_RESULTS || (raw.kind === 'domain-task' && raw.results.length)) fail('completion_results_count');
   assertArrayData(raw.results);
   boundedCopy({ ...raw, results: [] });
@@ -185,7 +201,13 @@ function shape(raw: unknown): Completion {
 }
 function snapshot(authority: unknown): Readonly<Snapshot> {
   const value = authority !== null && typeof authority === 'object' ? authorities.get(authority) : undefined;
-  return value ?? fail('native_completion_authority_required');
+  if (!value) fail('native_completion_authority_required');
+  assertCustody(value); return value;
+}
+function assertCustody(value: Readonly<Snapshot>): void {
+  if (value.schemaVersion !== 6) return;
+  if (!value.custody) fail('completion_live_custody_required');
+  assertion(value.custody(decode(Binding6Schema, value.binding, 'completion_binding_invalid')), 'completion_live_custody_must_be_synchronous');
 }
 function unknownFacts(): Facts {
   return { status: 'unknown', domain: null, domainSchemaVersion: null, operation: null, verified: 'unknown',
@@ -221,21 +243,28 @@ function workflowSemantics(raw: unknown, b: Binding4, known: Record<string, unkn
       detail: 'Child facts alone do not establish the final owner semantics for the accepted intent.' });
   }
 }
-export function createCompletionAuthority(native: unknown): CompletionAuthority {
+export function createCompletionAuthority(native: unknown, liveCustody?: CompletionCustody): CompletionAuthority {
   if (!plain(native)) fail('native_evidence_shape');
   const version = Object.hasOwn(native, 'schemaVersion') ? field(native, 'schemaVersion') : COMPLETION_SCHEMA_VERSION;
-  if (version !== 3 && version !== 4 && version !== 5) fail('completion_version_or_kind');
+  if (version !== 3 && version !== 4 && version !== 5 && version !== 6) fail('completion_version_or_kind');
+  let custody: CompletionCustody['assertCurrent'] | undefined;
+  if (version === 6) {
+    exact(liveCustody, ['assertCurrent'], 'completion_live_custody_required');
+    if (typeof liveCustody.assertCurrent !== 'function') fail('completion_live_custody_required');
+    custody = liveCustody.assertCurrent.bind(liveCustody);
+  } else if (liveCustody !== undefined) fail('completion_live_custody_version_mismatch');
   const base = ['kind', 'binding', 'knownFacts', 'results', 'coverage', 'gaps', 'origin'];
-  exact(native, version === 4 ? ['schemaVersion', ...base, 'workflow', 'semantics'] : version === 5 ? ['schemaVersion', ...base] : base, 'native_evidence_shape');
+  exact(native, version === 4 ? ['schemaVersion', ...base, 'workflow', 'semantics'] : version === 5 || version === 6 ? ['schemaVersion', ...base] : base, 'native_evidence_shape');
   const kind = native.kind;
   if ((kind !== 'domain-task' && kind !== 'agent-run' && kind !== 'final-workflow') ||
-      (version === 5 ? kind === 'final-workflow' : kind === 'agent-run') ||
+      (version === 6 ? kind !== 'domain-task' : version === 5 ? kind === 'final-workflow' : kind === 'agent-run') ||
       !['agent', 'runtime'].includes(typeof native.origin === 'string' ? native.origin : '') ||
       !['complete', 'incomplete'].includes(typeof native.coverage === 'string' ? native.coverage : '') ||
       !plain(native.knownFacts) || Object.keys(native.knownFacts).some(key => !FACT_KEYS.includes(key)) ||
       !Array.isArray(native.results) || native.results.length > MAX_RESPONSE_RESULTS || (kind === 'domain-task' && native.results.length)) fail('native_evidence_invalid');
   assertArrayData(native.results);
   const b = binding(native.binding, kind, version);
+  if (custody) assertion(custody(decode(Binding6Schema, b, 'completion_binding_invalid')), 'completion_live_custody_must_be_synchronous');
   const known = boundedCopy(native.knownFacts);
   if (!plain(known)) fail('native_evidence_invalid');
   const missing = gaps(native.gaps);
@@ -260,8 +289,9 @@ export function createCompletionAuthority(native: unknown): CompletionAuthority 
   gaps(missing);
   if (native.origin === 'agent' && missing.length) fail('completion_evidence_insufficient');
   const s: Snapshot = freeze({ schemaVersion: version, kind, binding: b, facts: f, results, gaps: missing,
-    outcome: native.origin === 'agent' ? 'NORMAL' : missing.length ? 'FAILED' : 'RECOVERED' });
+    outcome: native.origin === 'agent' ? 'NORMAL' : missing.length ? 'FAILED' : 'RECOVERED', ...(custody ? { custody } : {}) });
   shape(fromSnapshot(s, 'unavailable'));
+  assertCustody(s);
   const authority: CompletionAuthority = freeze({ [AUTHORITY]: true }); authorities.set(authority, s); return authority;
 }
 function fromSnapshot(s: Readonly<Snapshot>, response: UserResponse | 'unavailable'): unknown {
@@ -281,7 +311,7 @@ export function validateCompletion(raw: unknown, authority: unknown): Completion
     const expected = decode(CompletionSchema, fromSnapshot(s, 'unavailable'), 'completion_shape');
     if (!same(boundedCopy(record.userResponse), boundedCopy(expected.userResponse))) fail('completion_runtime_response_mismatch');
   }
-  return record;
+  assertCustody(s); return record;
 }
 export function acceptAgentCompletion(proposal: unknown, authority: unknown): Completion {
   const s = snapshot(authority);
@@ -299,6 +329,7 @@ export function completionProposalSchema(authority: unknown) {
   const s = snapshot(authority); if (s.outcome !== 'NORMAL') fail('completion_origin_mismatch');
   const schema = object({ schemaVersion: Type.Literal(s.schemaVersion), kind: Type.Literal(s.kind),
     facts: { ...FactsSchema, const: boundedCopy(s.facts) }, userResponse: UserResponseSchema });
-  return freeze({ $schema: 'https://json-schema.org/draft/2020-12/schema', ...schema,
+  const result = freeze({ $schema: 'https://json-schema.org/draft/2020-12/schema', ...schema,
     properties: { ...schema.properties, userResponse: { oneOf: UserResponseSchema.anyOf } } });
+  assertCustody(s); return result;
 }

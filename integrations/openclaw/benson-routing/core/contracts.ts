@@ -5,10 +5,13 @@ import { object, nullable, IdentifierSchema as Id, JsonSchema, JsonObjectSchema,
 
 export const CONTROL_CONTRACT_VERSION = 1;
 export const RESPONSE_CONTRACT_VERSION = 2;
+export const RESPONSE_V3_CONTRACT_VERSION = 3;
 export const SOURCE_ADMISSION_VERSION = 1;
 export const NATIVE_READ_ADMISSION_VERSION = 2;
+export const NATIVE_DISPATCH_READ_ADMISSION_VERSION = 3;
 export const NO_RUN_OUTCOME_VERSION = 1;
 export const NATIVE_READ_OUTCOME_VERSION = 2;
+export const NATIVE_DISPATCH_READ_OUTCOME_VERSION = 3;
 export const DOMAIN_RESULT_SCHEMA_VERSION = 2;
 export const TASK_ENVELOPE_KIND = 'benson.self-contained-request';
 export const TASK_ENVELOPE_VERSION = 1;
@@ -35,6 +38,7 @@ export const SourceInputSchema = object({ schemaVersion: Type.Literal(1), kind: 
   source: SourceSchema, domain: DomainSchema, scope: ScopeSchema, request: Type.String() });
 export const NativeReadInputSchema = object({ schemaVersion: Type.Literal(2), kind: Type.Literal('benson.source-input'),
   domain: Id, scope: Type.Literal('read'), request: Type.String() });
+export const NativeDispatchReadInputSchema = object({ ...NativeReadInputSchema.properties, schemaVersion: Type.Literal(3) });
 const AuthorityBindingSchema = object({ ref: Id, revision: Id, subject: Id });
 export const SourceAdmissionSchema = object({ ...SourceInputSchema.properties,
   kind: Type.Literal('benson.source-admission'), authority: AuthorityBindingSchema, admittedAt: Type.Number() });
@@ -42,11 +46,16 @@ export const InvocationSchema = object({ callId: Id, domain: Id, subject: Id });
 export const NativeReadAdmissionSchema = object({ ...NativeReadInputSchema.properties,
   kind: Type.Literal('benson.source-admission'), callId: Id,
   authority: object({ kind: Type.Literal('native-invocation'), subject: Id }), admittedAt: Type.Number() });
+export const NativeDispatchSchema = object({ requestId: Id, domain: Id, subject: Id });
+export const NativeDispatchReadAdmissionSchema = object({ ...NativeDispatchReadInputSchema.properties,
+  kind: Type.Literal('benson.source-admission'), requestId: Id,
+  authority: object({ kind: Type.Literal('native-dispatch'), subject: Id }), admittedAt: Type.Number() });
 export type SourceInput = Static<typeof SourceInputSchema>;
 export type SourceAdmission = Static<typeof SourceAdmissionSchema>;
 export type NativeReadAdmission = Static<typeof NativeReadAdmissionSchema>;
-export type Admission = SourceAdmission | NativeReadAdmission;
-export const AdmissionSchema = Type.Union([SourceAdmissionSchema, NativeReadAdmissionSchema]);
+export type NativeDispatchReadAdmission = Static<typeof NativeDispatchReadAdmissionSchema>;
+export type Admission = SourceAdmission | NativeReadAdmission | NativeDispatchReadAdmission;
+export const AdmissionSchema = Type.Union([SourceAdmissionSchema, NativeReadAdmissionSchema, NativeDispatchReadAdmissionSchema]);
 export const GrantSchema = object({ inputId: Id, sourceType: SourceSchema.properties.type,
   sourceRef: Id, domain: DomainSchema, subject: Id, authorityRef: Id, authorityRevision: Id,
   scopes: Type.Array(ScopeSchema, { minItems: 1, maxItems: 4, uniqueItems: true }),
@@ -74,9 +83,12 @@ export const NoRunV1Schema = object({ schemaVersion: Type.Literal(1), ...NoRunCo
     authorityRevision: Id, domain: Id, subject: Id }) });
 export const NoRunV2Schema = object({ schemaVersion: Type.Literal(2), ...NoRunCommon,
   admission: object({ authorityKind: Type.Literal('native-invocation'), callId: Id, domain: Id, subject: Id }) });
-export const NoRunSchema = Type.Union([NoRunV1Schema, NoRunV2Schema]);
+export const NoRunV3Schema = object({ schemaVersion: Type.Literal(3), ...NoRunCommon,
+  admission: object({ authorityKind: Type.Literal('native-dispatch'), requestId: Id, domain: Id, subject: Id }) });
+export const NoRunSchema = Type.Union([NoRunV1Schema, NoRunV2Schema, NoRunV3Schema]);
 export type NoRunOutcome = Static<typeof NoRunSchema>;
 export type NativeReadOutcome = Static<typeof NoRunV2Schema>;
+export type NativeDispatchReadOutcome = Static<typeof NoRunV3Schema>;
 export const ResponseModeSchema = Type.Enum(['pass_through', 'deterministic', 'response_model', 'main_continuation', 'safe_failure']);
 export const ResponsePolicySchema = object({ allowedModes: Type.Array(ResponseModeSchema, { minItems: 1,
   maxItems: 5, uniqueItems: true }), preferredMode: ResponseModeSchema });
@@ -137,3 +149,14 @@ export const DomainResultSchema = object({ schemaVersion: Type.Literal(2), kind:
   effects: EffectsSchema, uncertainty: ObjectListSchema, pendingContext: nullable(PendingSchema),
   content: nullable(UserResponseSchema) });
 export type DomainResult = Static<typeof DomainResultSchema>;
+export const ResponseV3SourceSchema = Type.Union([
+  object({ type: Type.Literal('main'), agentId: Type.Literal('main'), runId: Id }),
+  object({ type: Type.Literal('direct'), executionMode: Type.Literal('agentic'), agentId: Id, runId: Id }),
+  object({ type: Type.Literal('direct'), executionMode: Type.Literal('deterministic'), agentId: Id,
+    admission: Type.Union([NoRunV1Schema.properties.admission, NoRunV2Schema.properties.admission, NoRunV3Schema.properties.admission]) }),
+]);
+export type ResponseV3Source = Static<typeof ResponseV3SourceSchema>;
+export const ResponseV3Schema = object({ schemaVersion: Type.Literal(3), requestId: Id, source: ResponseV3SourceSchema,
+  results: Type.Array(DomainResultSchema, { maxItems: MAX_RESPONSE_RESULTS }),
+  messageCandidate: nullable(CandidateSchema), responsePolicy: ResponsePolicySchema, lifecycle: ResponseLifecycleSchema });
+export type ResponseV3 = Static<typeof ResponseV3Schema>;

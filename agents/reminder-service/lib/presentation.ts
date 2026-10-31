@@ -2,6 +2,17 @@ import { formatUserDatetime } from '../../../shared/benson-datetime.js';
 import type { ListResult } from './results.js';
 import { plain, freeze } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Presentation } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
+import type { DomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { validateDomainResult } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
+/** Full-list prepared content stays domain-owned; unsupported qualifications block. */
+export function renderReminderDomainResult(raw: DomainResult, options: { language: 'en' | 'he' }): Presentation {
+  const value = validateDomainResult(raw);
+  if (value.domain !== 'reminder' || value.executionMode !== 'deterministic' || value.operation !== 'list' ||
+    value.effects.status !== 'none' || value.warnings.length || value.uncertainty.length || value.evidence.gaps.length ||
+    value.pendingContext !== null || value.content?.state !== 'usable' || value.content.language !== options.language ||
+    !['success', 'failure'].includes(value.outcome.status)) return unsupported('unsupported_domain_presentation');
+  return rendered(value.content.text);
+}
 export function renderReminderList(result: ListResult, now: Date): string {
   if (result.status === 'failure') return 'לא ניתן לאמת כעת את רשימת התזכורות. לא בוצע שינוי.';
   return result.matchCount === 0 ? 'לא נמצאו תזכורות הנגישות לך.' : result.matches.map((item, i) =>

@@ -9,11 +9,57 @@ import { controlReadResponse, controlResponse } from '../core/response-control.j
 import { createNoRunDomainResult, createCompletionDomainResult } from '../core/domain-result.js';
 import { createTaskEnvelope, parseTaskEnvelope } from '../core/task-envelope.js';
 import { validateRenderedOutput, validateTaskResultEnvelope, createResponseEnvelope } from '../core/legacy-response.js';
-import { type Facts, type NativeReadOutcome, TaskEnvelopeSchema } from '../core/contracts.js';
+import { type Facts, type NativeReadOutcome, type NativeDispatchReadOutcome, TaskEnvelopeSchema } from '../core/contracts.js';
 import { boundedCopy, decode, JsonSchema, jsonCopy, type JsonValue } from '../core/value.js';
 import { formatUserDatetime, UserDatetimeError } from '../../../../shared/benson-datetime.js';
 
 const currentTime = Date.parse('2026-10-17T10:00:00Z');
+function dispatchReadFixture() {
+  const state = { live: true, authorized: true };
+  const controller = createSourceAdmissionController({ nativeDispatch: { requestId: 'native-message', domain: 'future-domain', subject: 'reader' },
+    now: () => currentTime, assertCurrent() { assert(state.live && state.authorized, 'dispatch_closed_or_denied'); },
+    assertDomainOutcome(outcome) { assert.deepEqual(outcome.evidence.facts, boundedCopy({ complete: [1, 2, 3] })); } });
+  const input = { schemaVersion: 3, kind: 'benson.source-input', domain: 'future-domain', scope: 'read', request: 'status' };
+  const admission = controller.admit(input);
+  const outcome: NativeDispatchReadOutcome = { schemaVersion: 3, kind: 'benson.no-run',
+    admission: { authorityKind: 'native-dispatch', requestId: admission.requestId, domain: admission.domain, subject: admission.authority.subject },
+    disposition: 'handled', evidence: { ref: 'observation', observedAt: new Date(currentTime).toISOString(), freshness: 'fresh', facts: { complete: [1, 2, 3] } },
+    effects: { status: 'none', refs: [] }, reconciliation: { required: false, reason: null }, notification: null, error: null };
+  return { state, controller, input, admission, outcome };
+}
+test('native dispatch read v3 preserves complete facts and private admission ownership', () => {
+  const f = dispatchReadFixture(); assert(Object.isFrozen(f.admission));
+  assert.deepEqual(boundedCopy(f.controller.validateOutcome(f.admission, f.outcome)), boundedCopy(f.outcome));
+  assert.throws(() => f.controller.assertCurrent({ ...f.admission }), /unowned/);
+  assert.throws(() => dispatchReadFixture().controller.assertCurrent(f.admission), /unowned/);
+  f.state.live = false; assert.throws(() => f.controller.validateOutcome(f.admission, f.outcome), /dispatch_closed_or_denied/);
+});
+test('native dispatch read v3 refuses other versions, domains, effect scopes and invented Tool/grant fields', () => {
+  const f = dispatchReadFixture();
+  for (const delta of [{ schemaVersion: 1 }, { schemaVersion: 2 }, { schemaVersion: 4 }, { domain: 'foreign' },
+    { scope: 'action' }, { scope: 'notify' }, { scope: 'reconcile' }, { callId: 'invented' }, { source: { inputId: 'invented' } },
+    { request: '' }, { request: 'x'.repeat(8193) }]) assert.throws(() => f.controller.admit({ ...f.input, ...delta }));
+  f.state.authorized = false; assert.throws(() => f.controller.admit(f.input), /dispatch_closed_or_denied/);
+});
+test('native dispatch read v3 rejects forged correlation, effects, notification and incomplete business evidence', () => {
+  const f = dispatchReadFixture();
+  for (const delta of [{ requestId: 'foreign' }, { authorityKind: 'native-invocation' }, { callId: 'invented' }, { subject: 'foreign' }, { domain: 'foreign' }]) {
+    assert.throws(() => f.controller.validateOutcome(f.admission, { ...f.outcome, admission: { ...f.outcome.admission, ...delta } }));
+  }
+  for (const delta of [{ schemaVersion: 2 }, { schemaVersion: 4 }, { effects: { status: 'known', refs: ['effect'] } },
+    { reconciliation: { required: true, reason: 'effect' } },
+    { notification: { identity: 'intent', policyRevision: 'policy', evidenceRef: 'observation', route: { recipient: 'reader', channel: 'whatsapp', accountId: 'account', target: 'reader' }, content: 'notify' } },
+    { evidence: { ...f.outcome.evidence, facts: { complete: [1] } } }]) assert.throws(() => f.controller.validateOutcome(f.admission, { ...f.outcome, ...delta }));
+});
+test('native dispatch read v3 reuses read Response and unchanged DomainResultV2 consumers', () => {
+  const f = dispatchReadFixture();
+  const response = controlReadResponse(f.outcome, { controller: f.controller, admission: f.admission,
+    renderOutcome: () => ({ schemaVersion: 2, message: 'Complete read result.' }) });
+  const result = createNoRunDomainResult(response, { controller: f.controller, admission: f.admission, language: 'en',
+    normalizeFacts: () => ({ ...facts, domain: 'future-domain', data: { complete: [1, 2, 3] } }) });
+  assert.equal(result.schemaVersion, 2); assert.equal(result.executionMode, 'deterministic'); assert.equal(result.effects.status, 'none');
+  assert.deepEqual(result.facts.data, boundedCopy({ complete: [1, 2, 3] })); assert.equal(result.content?.state, 'usable');
+});
 function readFixture() {
   let live = true; const trace: string[] = [];
   const controller = createSourceAdmissionController({ invocation: { callId: 'call-1', domain: 'future-domain', subject: 'subject-1' },

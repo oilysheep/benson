@@ -158,7 +158,7 @@ test('v5 is explicit; legacy versions/defaults and no-Run contracts are separate
   assert.equal(COMPLETION_SCHEMA_VERSION, 3);
   assert.equal(CURRENT_COMPLETION_SCHEMA_VERSION, 4);
   assert.equal(SUCCESSOR_COMPLETION_SCHEMA_VERSION, 5);
-  for (const schemaVersion of [1, 2, 6, '5', null, undefined]) {
+  for (const schemaVersion of [1, 2, 7, '5', null, undefined]) {
     assert.throws(() => createCompletionAuthority(evidence({ schemaVersion })), /version_or_kind/);
   }
   const implicit = evidence(); delete implicit.schemaVersion;

@@ -1,0 +1,68 @@
+--- a/dist/.setup/monitor-QPGSf7uJ.mjs
++++ b/dist/.setup/monitor-QPGSf7uJ.mjs
+@@ -4072,6 +4072,56 @@
+ }
+ const DEFAULT_TRANSPORT_TIMEOUT_MS = 3e5;
+ const WHATSAPP_RECONNECT_CATCH_UP_MAX_MS = 12e5;
++// Benson Phase 1: required request-local Controller; native channel ownership stays here.
++function createBensonResponseDispatch(nativeDispatch, channelRuntime, accountId, signal) {
++ const synchronous = (value) => {
++  if (value && typeof value.then === "function") {
++   Promise.resolve(value).catch(() => {});
++   throw new Error("Benson synchronous Controller required");
++  }
++  return value;
++ };
++ return async (params) => {
++  let controller, binding, installed = false;
++  const current = () => {
++   signal?.throwIfAborted();
++   params.replyOptions?.abortSignal?.throwIfAborted();
++   if (!binding || channelRuntime?.runtimeContexts?.get({ channelId: "whatsapp", accountId, capability: "benson.response-controller.v1" }) !== binding) throw new Error("Benson Response Controller unavailable");
++  };
++  const gate = (payload, info) => {
++   try {
++    current();
++    if (!installed) return null;
++    const approved = synchronous(controller.beforeNativeDeliver(payload, info));
++    return approved === payload ? payload : null;
++   } catch { return null; }
++  };
++  if (typeof params.dispatcher?.appendBeforeDeliver !== "function") throw new Error("Benson original dispatcher required");
++  // Fence even native early replies/errors that never enter the resolver.
++  params.dispatcher.appendBeforeDeliver((payload) => {
++   try { current(); return installed ? payload : null; } catch { return null; }
++  });
++  binding = channelRuntime?.runtimeContexts?.get({ channelId: "whatsapp", accountId, capability: "benson.response-controller.v1" });
++  current();
++  if (typeof nativeDispatch !== "function" || typeof binding.createTurn !== "function" || typeof params.replyResolver !== "function") throw new Error("Benson Response Controller binding invalid");
++  controller = synchronous(binding.createTurn({ ctx: params.ctx, cfg: params.cfg, replyOptions: params.replyOptions }));
++  if (!controller || typeof controller.resolve !== "function" || typeof controller.beforeNativeDeliver !== "function") throw new Error("Benson synchronous Controller required");
++  return nativeDispatch({ ...params,
++   replyOptions: { ...params.replyOptions, disableBlockStreaming: true, suppressToolProgressMessages: true,
++    suppressDefaultToolProgressMessages: true, allowToolLifecycleWhenProgressHidden: false,
++    reasoningPayloadsEnabled: false, commentaryPayloadsEnabled: false, commentaryProgressEnabled: false, progressPreambleEnabled: false },
++   replyResolver: (...args) => {
++    current();
++    if (installed) throw new Error("Benson duplicate resolver refused");
++    // Native hooks are installed; the consuming gate must remain after them.
++    params.dispatcher.appendBeforeDeliver(gate);
++    installed = true;
++    return controller.resolve(() => params.replyResolver(...args), Object.freeze({ ctx: args[0], abortSignal: args[1]?.abortSignal }));
++   }
++  });
++ };
++}
++
+ async function monitorWebChannel(verbose, listenerFactory = attachWebInboxToSocket, keepAlive = true, replyResolver, runtime = defaultRuntime, abortSignal, tuning = {}) {
+ 	const activeReplyResolver = replyResolver ?? (await loadReplyResolverRuntime()).getReplyFromConfig;
+ 	const runId = newConnectionId();
+@@ -4169,7 +4219,7 @@
+ 							replyResolver: activeReplyResolver,
+ 							replyLogger,
+ 							buildContext: pluginChannelRuntime?.inbound.buildContext,
+-							dispatchReplyFromConfig: pluginChannelRuntime?.reply?.dispatchReplyFromConfig
++							dispatchReplyFromConfig: createBensonResponseDispatch(pluginChannelRuntime?.reply?.dispatchReplyFromConfig, pluginChannelRuntime, account.accountId, abortSignal)
+ 						});
+ 						return await (listenerFactory ?? attachWebInboxToSocket)({
+ 							cfg,
