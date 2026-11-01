@@ -5,21 +5,33 @@ import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, watch, writeFi
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
-import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry';
+import type { OpenClawPluginApi, OpenClawPluginToolFactory } from 'openclaw/plugin-sdk/plugin-entry';
 import { createReplyDispatcher, dispatchInboundMessage, settleReplyDispatcher } from 'openclaw/plugin-sdk/reply-runtime';
-import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.js';
-import { executeJessicaStatusTask } from '../../../../../agents/jessica-vacuum/lib/task.js';
+import { validateResult, ResultSchema } from '../../../../../agents/jessica-vacuum/lib/results.js';
+import { renderJessicaStatusText } from '../../../../../agents/jessica-vacuum/lib/presentation.js';
 import { loadPolicy, authorize } from '../../../../../agents/jessica-vacuum/lib/policy.js';
-import { createJessicaTaskToolFactory } from '../../../plugins/benson-jessica-tool/src/tool.js';
+import { createJessicaTaskToolFactory, createJessicaReadToolFactory } from '../../../plugins/benson-jessica-tool/src/tool.js';
+import { createJessicaExecuteToolFactory } from '../../../plugins/benson-jessica-tool/src/execute-tool.js';
+import { fixture as jessicaFixture } from '../../../plugins/benson-jessica-tool/tests/fixtures/domain-state.js';
+import type { CurrentRequestEvidence } from '../../core/conversation-context.js';
+import { normalizeJessicaCompletion } from '../../../plugins/benson-jessica-tool/src/completion.js';
+import { READ_REQUEST_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/schemas.js';
+import { plain, decode } from '../../core/value.js';
 import { createCompletionAuthority, acceptAgentCompletion, validateCompletion } from '../../core/completion.js';
 import type { Binding6, Completion6 } from '../../core/completion-contracts.js';
-import { validateDomainResult, createCompletionDomainResult } from '../../core/domain-result.js';
+import type { NativeDispatchRunAdmission } from '../../core/contracts.js';
+import { boundedCopy } from '../../core/value.js';
+import { validateDomainResultEnvelope, createCompletionDomainResult } from '../../core/domain-result.js';
 import { createResponseV3Envelope } from '../../core/legacy-response.js';
 import { createMainResponseDelivery } from '../../core/response-control.js';
 import { renderJessicaDomainResult } from '../../../../../agents/jessica-vacuum/lib/presentation.js';
+import { normalizeReminderServiceResult } from '../../../../../agents/reminder-service/lib/results.js';
 
 const report = '/tmp/correlation-result.json';
 const pluginId = 'benson-jessica-tool';
+export const REMINDER_CREATE_TEXT = 'G3_MAIN_REMINDER_CREATE: Remind me to drink water on November 2 at 10:00, without a calendar event.';
+export const REMINDER_DELETE_TEXT = 'G3_MAIN_REMINDER_DELETE: Delete the existing reminder.';
+export const JESSICA_MUTATION_TEXT = 'G3_MAIN_JESSICA_MUTATION: Clean the living room.';
 type Observation = { runId: string; callId: string; sessionId: string; sessionKey: string; requesterPresent: boolean };
 function record(value: unknown): value is Record<string, unknown> { return !!value && typeof value === 'object' && !Array.isArray(value); }
 export function writeReport(value: unknown) {
@@ -35,65 +47,109 @@ export function isolated() {
   assert.equal(readFileSync('/proc/net/route', 'utf8').trim().split('\n').length, 1);
 }
 
-function completionFacts(value: ReturnType<typeof validateDomainResult>): Completion6['facts'] {
-  assert(value.domain === 'jessica-vacuum' || value.domain === 'reminder');
-  return { domain: value.domain, domainSchemaVersion: value.domainSchemaVersion, operation: value.operation,
-    status: value.outcome.status, verified: value.facts.verified, verificationScope: value.facts.verificationScope,
-    data: value.facts.data, warnings: value.warnings, error: value.failures.domain, pendingContext: value.pendingContext,
-    effects: value.effects.details, uncertainty: value.uncertainty };
+function completionFacts(value: ReturnType<typeof validateResult>): Completion6['facts'] {
+  assert.equal(value.pendingContext, null);
+  const mutation = value.operation !== 'status';
+  if (mutation) { assert.equal(value.operation, 'clean'); assert(value.verified && value.status === 'success'); assert(plain(value.data) && 'operationId' in value.data && typeof value.data.operationId === 'string'); }
+  return { domain: value.domain, domainSchemaVersion: value.schemaVersion, operation: value.operation,
+    status: value.status, verified: value.verified, verificationScope: value.verified ? [mutation ? 'room_cleaning' : 'status_read'] : [],
+    data: value.data, warnings: value.warnings, error: value.error, pendingContext: null,
+    effects: mutation && plain(value.data) && 'operationId' in value.data && typeof value.data.operationId === 'string'
+      ? [{ kind: 'jessica-dispatch', operationId: value.data.operationId, verified: true }] : [], uncertainty: [] };
 }
 
 /** Adapter composition only. This disposable variant is never production registration. */
-function registerCompletionV6Proof(api: OpenClawPluginApi) {
+export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
+  active(): boolean; assertCurrent(): void; accountId: string; route: string; parentSessionKey: string; requestId: string;
+  mutation?: { source(): CurrentRequestEvidence }; resultVersion?: 2 | 3;
+  onCompletion(proof: { binding: Binding6; backendReads: number; negativeEvidenceCases: number; guard: () => void }): void;
+}) {
   const cancellation = process.env.BENSON_NATIVE_COMPLETION_V6_ONLY === 'cancel';
+  const mutation = host?.mutation ? jessicaFixture('/repo', () => new Date()) : undefined;
+  const toolName = mutation ? 'jessica_execute' : 'jessica_read';
   const parentAbort = new AbortController(), readSettled = Promise.withResolvers<void>();
   let cancellationRejected = false;
   const policy = loadPolicy({ version: '1', defaultDecision: 'deny', rules: ['read', 'control'].map(actionClass => ({ subject: 'reader', actionClass,
     deviceScope: 'jessica-vacuum', decision: 'allow' })) });
   type Source = Parameters<Parameters<typeof createJessicaTaskToolFactory>[0]['read']>;
   type Hook = Observation & { tool: string };
-  type Value = ReturnType<typeof validateDomainResult>;
+  type Value = ReturnType<typeof validateResult>;
   const hooks: Hook[] = [], returned: (Hook & { value: Value })[] = [];
   const after: { runId: string | undefined; callId: string | undefined; value: unknown; error: string | undefined }[] = [];
   const terminals: { runId: string | undefined; sessionKey: string | undefined; sessionId: string | undefined;
     success: boolean; messages: unknown[] }[] = [];
   const retainedChildGuards: (() => void)[] = [];
   const childSessionKey = `agent:jessica-vacuum:subagent:v6-${randomUUID()}`;
-  const parentSessionKey = `agent:main:v6-${randomUUID()}`, requestId = randomUUID();
-  let source: { identity: Source[1]; authority: Source[2]; parent: Hook } | undefined;
-  let accepted: Value | undefined, retainedRecord: Completion6 | undefined;
+  const parentSessionKey = host?.parentSessionKey ?? `agent:main:v6-${randomUUID()}`, requestId = host?.requestId ?? randomUUID();
+  let source: { identity: Source[1]; authority: Source[2]; parent: Hook | undefined } | undefined;
+  let directAdmission: NativeDispatchRunAdmission | undefined;
+  let accepted: ReturnType<typeof validateDomainResultEnvelope> | undefined, retainedRecord: Completion6 | undefined;
   let retainedAuthority: ReturnType<typeof createCompletionAuthority> | undefined;
   let backendReads = 0, consumed = false, negativeEvidenceCases = 0;
   api.on('before_tool_call', (event, ctx) => {
-    assert(['jessica_task', 'jessica_read'].includes(event.toolName));
+    if (host && !host.active()) return;
+    assert(['jessica_task', toolName].includes(event.toolName));
     assert(ctx.runId && ctx.toolCallId && ctx.sessionId && ctx.sessionKey);
     assert.equal(event.runId, ctx.runId); assert.equal(event.toolCallId, ctx.toolCallId);
     hooks.push({ tool: event.toolName, runId: ctx.runId, callId: ctx.toolCallId, sessionId: ctx.sessionId,
       sessionKey: ctx.sessionKey, requesterPresent: ctx.requester !== undefined });
   });
   api.on('after_tool_call', (event, ctx) => {
-    if (event.toolName === 'jessica_read') after.push({ runId: ctx.runId, callId: ctx.toolCallId, value: event.result, error: event.error });
+    if (host && !host.active()) return;
+    if (event.toolName === toolName) after.push({ runId: ctx.runId, callId: ctx.toolCallId, value: event.result, error: event.error });
   });
   api.on('agent_end', (event, ctx) => {
     if (ctx.sessionKey === childSessionKey) terminals.push({ runId: ctx.runId, sessionKey: ctx.sessionKey,
       sessionId: ctx.sessionId, success: event.success, messages: event.messages });
   });
   api.registerTool({ contextVersion: 2, create(ctx) {
+    if (host && !host.active()) return null;
     if (ctx.agentId !== 'jessica-vacuum') return null;
+    if (mutation) {
+      assert(source); const original = source;
+      let verifiedResult: Value | undefined;
+      const assertCurrent = () => { original.authority.signal.throwIfAborted(); original.authority.assertCurrent();
+        ctx.assertInvocationCurrent(); host?.assertCurrent(); assert.equal(source, original); assert.equal(ctx.sessionKey, childSessionKey); };
+      const createRaw = createJessicaExecuteToolFactory({ registryConfig: mutation.registry, policyConfig: policy, store: mutation.store,
+        roster: { accountId: host!.accountId, approvedIds: ['reader'], subjectForRoute: () => null }, clock: mutation.clock,
+        wait: async () => {}, pollCounts: { clean: 1 }, source: { identity: original.identity, authority: original.authority, requestEpoch: requestId },
+        driver: { async read() { assertCurrent(); const value = structuredClone(mutation.evidence), at = mutation.clock().toISOString();
+          value.status.observedAt = at; if (value.map) value.map.observedAt = at; return value;
+        }, async dispatch(_step, guard) {
+          await guard.assertMutationCurrent(); guard.assertCurrent(); backendReads++; mutation.tick(); const at = mutation.clock().toISOString();
+          mutation.evidence.status = { observedAt: at, sourceUpdatedAt: at, state: 'cleaning', activeSegments: [mutation.room.segmentId], currentSegment: null };
+          mutation.evidence.taskStatus = { observedAt: at, sourceUpdatedAt: at, state: 'room_cleaning' }; return { accepted: true };
+        } }, jsonResult: value => { verifiedResult = value;
+          return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; } });
+      const tool = createRaw({ ...ctx, assertInvocationCurrent: assertCurrent }); assert(tool && !Array.isArray(tool));
+      return { ...tool, async execute(callId, params, signal) {
+        assertCurrent(); retainedChildGuards.push(assertCurrent);
+        const matches = hooks.filter(item => item.tool === toolName && item.callId === callId && item.sessionId === ctx.sessionId);
+        assert.equal(matches.length, 1); const hook = matches[0]; assert(hook);
+        const raw = await tool.execute(callId, params, signal); assertCurrent();
+        // The executor already validated success against its private plan. A
+        // second validateResult(..., null) cannot manufacture that plan binding.
+        assert(verifiedResult); assert.equal(JSON.stringify(raw.details), JSON.stringify(verifiedResult));
+        returned.push({ ...hook, value: verifiedResult }); return raw;
+      } };
+    }
     return { name: 'jessica_read', label: 'Isolated controlled Domain read', description: 'Read the disposable domain through its existing owner.',
-      parameters: { type: 'object', properties: {}, additionalProperties: false },
+      parameters: READ_REQUEST_SCHEMA,
       async execute(callId, params, signal) {
-        assert.deepEqual(params, {}); assert(source); const original = source;
+        assert.deepEqual(params, { operation: 'status' }); assert(source); const original = source;
         const assertCurrent = () => {
           original.authority.signal.throwIfAborted(); original.authority.assertCurrent();
-          signal?.throwIfAborted(); ctx.assertInvocationCurrent(); authorize(policy, original.identity, 'read');
+          signal?.throwIfAborted(); ctx.assertInvocationCurrent(); host?.assertCurrent(); authorize(policy, original.identity, 'read');
           assert.equal(source, original); assert.equal(ctx.sessionKey, childSessionKey);
         };
         assertCurrent(); retainedChildGuards.push(assertCurrent);
         const matched = hooks.filter(item => item.tool === 'jessica_read' && item.callId === callId && item.sessionId === ctx.sessionId);
         assert.equal(matched.length, 1); const binding = matched[0]; assert(binding);
-        const value = await executeJessicaStatusTask(callId, { operation: 'status' }, { identity: original.identity,
-          authority: { signal: AbortSignal.any([original.authority.signal, ...(signal ? [signal] : [])]), assertCurrent },
+        const createRead = createJessicaReadToolFactory({ roster: { accountId: host?.accountId ?? 'fixture-account', approvedIds: ['reader'],
+          subjectForRoute: route => route === (host?.route ?? 'fixture-private') ? 'reader' : null }, policy,
+          source: original,
+          registryConfig: JSON.parse(readFileSync('/repo/agents/jessica-vacuum/config/registry.v1.json', 'utf8')) as unknown,
+          jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }),
           async read(_request, _identity, authority) {
             if (cancellation) {
               authority.assertCurrent();
@@ -108,34 +164,40 @@ function registerCompletionV6Proof(api: OpenClawPluginApi) {
               data: { kind: 'status', observedAt: at, sourceUpdatedAt: at, freshness: 'fresh', state: 'docked', batteryLevel: 100,
                 activeSegments: [], currentSegment: null }, warnings: [], error: null, pendingContext: null }, null, new Date(at));
           } });
+        const readTool = createRead({ ...ctx, assertInvocationCurrent: assertCurrent }); assert(readTool && !Array.isArray(readTool));
+        const raw = await readTool.execute(callId, params, signal); assert(plain(raw));
+        const value = validateResult(raw.details, null, new Date());
         assertCurrent(); returned.push({ ...binding, value });
-        return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+        return raw;
       } };
   } });
-  const create = createJessicaTaskToolFactory({ roster: { accountId: 'fixture-account', approvedIds: ['reader'],
-    subjectForRoute: route => route === 'fixture-private' ? 'reader' : null }, policy,
-    async read(request, identity, authority) {
-      authority.assertCurrent(); const parents = hooks.filter(item => item.tool === 'jessica_task' && item.sessionKey === parentSessionKey);
-      assert.equal(parents.length, 1); const parent = parents[0]; assert(parent);
+  async function readDomain(request: Source[0], identity: Source[1], authority: Source[2]) {
+      authority.assertCurrent(); host?.assertCurrent();
+      const parents = hooks.filter(item => item.tool === 'jessica_task' && item.sessionKey === parentSessionKey);
+      assert.equal(parents.length, directAdmission ? 0 : 1); const parent = parents[0];
+      if (!directAdmission) assert(parent);
       source = { identity, authority, parent }; const original = source;
       try {
-      const receipt = await api.runtime.subagent.run({ sessionKey: childSessionKey, message: 'G3_COMPLETION_CHILD: call jessica_read once with {} and return the completion.',
-        toolsAlsoAllow: ['jessica_read'], promptMode: 'minimal', deliver: false,
-        assertCurrent() { authority.signal.throwIfAborted(); authority.assertCurrent(); } });
+      const receipt = await api.runtime.subagent.run({ sessionKey: childSessionKey, message: mutation ? 'G3_JESSICA_MUTATION_CHILD: clean the living room once and return controlled Completion.'
+        : 'G3_COMPLETION_CHILD: call jessica_read once with {"operation":"status"} and return the completion.',
+        toolsAlsoAllow: [toolName], promptMode: 'minimal', deliver: false,
+        assertCurrent() { authority.signal.throwIfAborted(); authority.assertCurrent(); host?.assertCurrent(); } });
       const terminal = await api.runtime.subagent.waitForRun({ runId: receipt.runId, timeoutMs: 45_000 });
       if (cancellation) { authority.assertCurrent(); throw new Error('Cancelled source unexpectedly accepted child completion'); }
       assert.equal(terminal.status, 'ok'); assert.equal(receipt.sessionKey, childSessionKey);
       assert.equal(terminals.length, 1); const ended = terminals[0]; assert(ended);
       assert.equal(returned.length, 1); const child = returned[0]; assert(child);
-      const binding: Binding6 = { inputId: requestId, admissionId: parent.callId, conversationId: parentSessionKey,
+      const admissionId = directAdmission?.requestId ?? parent!.callId;
+      const binding: Binding6 = { inputId: requestId, admissionId, conversationId: parentSessionKey,
         runId: receipt.runId, agentId: 'jessica-vacuum', sessionKey: childSessionKey, sessionId: child.sessionId,
-        domain: 'jessica-vacuum', taskId: parent.callId, caller: { runId: parent.runId, agentId: 'main',
-          sessionKey: parent.sessionKey, sessionId: parent.sessionId }, completionTarget: 'CALLER', authorizationId: parent.callId,
-        parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } };
+        domain: 'jessica-vacuum', taskId: admissionId, caller: parent ? { runId: parent.runId, agentId: 'main',
+          sessionKey: parent.sessionKey, sessionId: parent.sessionId } : null,
+        completionTarget: directAdmission ? 'RESPONSE_CONTROLLER' : 'CALLER', authorizationId: admissionId,
+        parentContinuation: { eligible: !directAdmission, reason: null }, deliveryPolicy: { eligible: !!directAdmission, reason: null } };
       // This view permits deterministic evidence fault injection, never authorization.
       let view = { runId: ended.runId, success: ended.success, messages: ended.messages };
       const assertEvidence = (candidate: Readonly<Binding6>) => {
-        authority.signal.throwIfAborted(); authority.assertCurrent(); authorize(policy, identity, 'read');
+        authority.signal.throwIfAborted(); authority.assertCurrent(); host?.assertCurrent(); authorize(policy, identity, 'read');
         assert.equal(source, original); assert(!consumed, 'Completion already consumed');
         assert.equal(JSON.stringify(candidate), JSON.stringify(binding));
         assert.equal(view.runId, receipt.runId); assert.equal(child.runId, receipt.runId);
@@ -146,11 +208,11 @@ function registerCompletionV6Proof(api: OpenClawPluginApi) {
         const values = entries.filter(entry => entry.role === 'toolResult');
         assert.equal(calls.length, 1); assert.equal(values.length, 1);
         const call: unknown = calls[0], value = values[0]; assert(record(call) && value);
-        assert.equal(call.id, child.callId); assert.equal(call.name, 'jessica_read');
-        assert.equal(value.toolCallId, child.callId); assert.equal(value.toolName, 'jessica_read'); assert(!value.isError);
+        assert.equal(call.id, child.callId); assert.equal(call.name, toolName);
+        assert.equal(value.toolCallId, child.callId); assert.equal(value.toolName, toolName); assert(!value.isError);
         assert(Array.isArray(value.content)); assert.equal(value.content.length, 1); const content: unknown = value.content[0]; assert(record(content));
         assert.equal(content.type, 'text'); assert.equal(content.text, JSON.stringify(child.value));
-        assert.equal(hooks.filter(item => item.tool === 'jessica_read').length, 1);
+        assert.equal(hooks.filter(item => item.tool === toolName).length, 1);
         assert.equal(after.length, 1); const completed = after[0]; assert(completed && !completed.error);
         assert.equal(completed.runId, child.runId); assert.equal(completed.callId, child.callId);
         assert(record(completed.value)); assert.equal(JSON.stringify(completed.value.details), JSON.stringify(child.value));
@@ -164,20 +226,24 @@ function registerCompletionV6Proof(api: OpenClawPluginApi) {
       // completed evidence authorize consumption, never a fictional active child.
       assert.equal(retainedChildGuards.length, 1); assert.throws(retainedChildGuards[0]!);
       const facts = completionFacts(child.value);
-      const completionAuthority = createCompletionAuthority({ schemaVersion: 6, kind: 'domain-task', binding, knownFacts: facts,
-        results: [], coverage: 'complete', gaps: [], origin: 'agent' }, { assertCurrent: assertEvidence });
-      const final = ended.messages.findLast(item => record(item) && item.role === 'assistant'); assert(record(final) && Array.isArray(final.content));
-      const parts = final.content.filter((part: unknown) => record(part) && part.type === 'text'); assert.equal(parts.length, 1);
-      const part: unknown = parts[0]; assert(record(part) && typeof part.text === 'string');
-      const completion = acceptAgentCompletion(JSON.parse(part.text), completionAuthority); assert.equal(completion.schemaVersion, 6);
+      const observedAfter = after[0]; assert(observedAfter);
+      const normalized = normalizeJessicaCompletion({ binding, knownFacts: facts, ...host?.resultVersion ? { resultVersion: host.resultVersion } : {},
+        tool: { ...child, name: toolName }, after: observedAfter, terminal: ended,
+        custody: { assertCurrent: assertEvidence }, ...mutation ? { projectEffects(effects) {
+          const ref = effects[0]?.operationId; assert(typeof ref === 'string');
+          return { status: 'known', refs: [ref], details: effects, reconciliation: { required: false, reason: null } };
+        } } : {} });
+      const completionAuthority = normalized.authority, completion = normalized.record;
       assert.throws(() => validateCompletion({ ...completion, binding: { ...binding, runId: 'foreign-run' } }, completionAuthority));
-      const value = createCompletionDomainResult(completion, completionAuthority, { expectedRunId: receipt.runId });
-      assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, 'none');
-      assert.deepEqual(value.facts, child.value.facts); assert.deepEqual(value.content, child.value.content);
+      const value = normalized.result;
+      assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, mutation ? 'known' : 'none');
+      assert.deepEqual(JSON.parse(JSON.stringify(value.facts.data)), child.value.data);
+      if (!mutation) assert.deepEqual(JSON.parse(JSON.stringify(value.content)), { state: 'usable', text: renderJessicaStatusText(child.value, new Date()), language: 'he' });
       accepted = value; retainedRecord = completion; retainedAuthority = completionAuthority;
       // The deterministic outer read carrier remains a read carrier. The fixture
       // serializer below emits the separately controlled child result explicitly.
       assert(record(facts.data));
+      if (mutation) return child.value;
       return validateResult({ schemaVersion: facts.domainSchemaVersion, domain: facts.domain, operation: facts.operation, status: facts.status,
         verified: facts.verified, data: facts.data, warnings: facts.warnings, error: facts.error, pendingContext: facts.pendingContext }, null, new Date());
       } catch (error) {
@@ -185,16 +251,40 @@ function registerCompletionV6Proof(api: OpenClawPluginApi) {
           error: error instanceof Error ? error.message : 'Source read failed' });
         throw error;
       } finally { readSettled.resolve(); }
-    }, jsonResult(outer) {
-      assert(accepted && retainedRecord && retainedAuthority); assert.deepEqual(outer.facts, accepted.facts);
+  }
+  function consumeAccepted() {
+      assert(accepted && retainedRecord && retainedAuthority);
       validateCompletion(retainedRecord, retainedAuthority); consumed = true;
       assert.throws(() => validateCompletion(retainedRecord, retainedAuthority), /already consumed/);
-      return { content: [{ type: 'text', text: JSON.stringify(accepted) }], details: accepted };
-    } });
-  api.registerTool({ contextVersion: 2, create(ctx) {
+      assert(source);
+      host?.onCompletion({ binding: retainedRecord.binding, backendReads, negativeEvidenceCases, guard: source.authority.assertCurrent });
+      return { content: [{ type: 'text' as const, text: JSON.stringify(accepted) }], details: accepted };
+  }
+  const create = createJessicaTaskToolFactory({ ...host?.resultVersion ? { resultVersion: host.resultVersion } : {}, roster: { accountId: host?.accountId ?? 'fixture-account', approvedIds: ['reader'],
+    subjectForRoute: route => route === (host?.route ?? 'fixture-private') ? 'reader' : null }, policy,
+    ...host?.mutation ? { task: { source: host.mutation.source, async run(_request, work) {
+      assert.equal(work.execution.requestEpoch, requestId);
+      await readDomain({ operation: 'status' }, work.execution.identity, work.execution.authority);
+      assert(retainedRecord && retainedAuthority && accepted);
+      return { completion: retainedRecord, authority: retainedAuthority, effects: accepted.effects };
+    } } } : {},
+    read: readDomain, jsonResult(outer) { assert(accepted); assert.deepEqual(boundedCopy(outer.facts), boundedCopy(accepted.facts)); return consumeAccepted(); } });
+  const factory: OpenClawPluginToolFactory<2>['create'] = ctx => {
     const tool = create(ctx); if (!tool || Array.isArray(tool)) return tool;
     return { ...tool, description: 'Isolated adapter composition: authorize a read, await a controlled Domain Run, and return its validated DomainResult.' };
-  } });
+  };
+  if (host) return Object.assign(factory, {
+    async runDirect(admission: NativeDispatchRunAdmission, identity: Source[1], authority: Source[2]) {
+      assert(record(identity));
+      assert.equal(admission.schemaVersion, 4); assert.equal(admission.domain, 'jessica-vacuum');
+      assert.equal(admission.requestId, requestId); assert.equal(admission.authority.subject, identity.senderId);
+      assert.equal(admission.scope, 'read'); assert.equal(source, undefined);
+      authority.assertCurrent(); host.assertCurrent(); directAdmission = admission;
+      await readDomain({ operation: 'status' }, identity, authority);
+      return consumeAccepted().details;
+    },
+  });
+  api.registerTool({ contextVersion: 2, create: factory });
   api.on('gateway_start', async () => {
     try {
       const runIds: string[] = [], outcomes: string[] = [], sink: unknown[] = [], errors: string[] = [];
@@ -238,6 +328,7 @@ function registerCompletionV6Proof(api: OpenClawPluginApi) {
     } catch (error) { writeReport({ completion: 'BLOCKED', backendReads, hooks, after, terminals,
       error: error instanceof Error ? error.message : 'Completion fixture failed' }); }
   }, { timeoutMs: 100_000 });
+  return undefined;
 }
 
 /** Disposable variant of the existing plugin owner; never installed or loaded in production. */
@@ -325,7 +416,7 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
   assert(!completionV6Only || correlation);
   assert(!codeModeOnly || !correlation);
   assert(!mainHookSurfaceOnly || (!correlation && !codeModeOnly && !completionV6Only));
-  const exposedTools = whatsappInstallerOnly ? ['jessica_task'] : completionV6Only ? ['jessica_read', 'jessica_task'] : correlation ? ['jessica_read'] : ['jessica_read', 'jessica_task', 'reminder_task'];
+  const exposedTools = whatsappInstallerOnly ? ['jessica_task', 'jessica_read', 'jessica_execute', 'reminder_task', 'benson_reminder_create', 'benson_reminder_delete'] : completionV6Only ? ['jessica_read', 'jessica_task'] : correlation ? ['jessica_read'] : ['jessica_read', 'jessica_task', 'reminder_task'];
   assert.equal(JSON.parse(readFileSync('/repo/node_modules/openclaw/package.json', 'utf8')).version, '2026.10.4');
   for (const path of ['/tmp/home', '/tmp/state', '/tmp/workspace', '/tmp/plugin']) mkdirSync(path, { recursive: true });
   if (whatsappInstallerOnly) {
@@ -378,17 +469,30 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
       let body = ''; for await (const chunk of req) { body += String(chunk); assert(body.length <= 256 * 1024); }
       assert(++requests <= (correlation ? 8 : codeModeOnly ? 10 : 30), 'Provider request bound exceeded');
       const input: unknown = JSON.parse(body); assert(record(input)); assert(Array.isArray(input.messages));
+      // Scenarios are fixture data, never authority. Native harness messages may
+      // follow the scenario's user message. Bound history at that explicit input;
+      // the original unmarked correlation fixture still uses its full transcript.
+      const turnStart = input.messages.findLastIndex((item: unknown) => record(item) && item.role === 'user' && /G3_[A-Z_]+/u.test(JSON.stringify(item)));
+      const turnMessages = input.messages.slice(Math.max(0, turnStart));
+      const turnText = JSON.stringify(turnMessages);
       assert(input.tools === undefined || Array.isArray(input.tools));
-      const codeMode = /G3_MAIN_READ_CODE_/u.test(JSON.stringify(input.messages));
+      const codeMode = /G3_MAIN_READ_CODE_/u.test(turnText);
       assert(!codeMode || codeModeOnly, 'Code Mode needs its own isolated host configuration');
-      const completionParent = completionV6Only && JSON.stringify(input.messages).includes('G3_MAIN_READ_V6');
+      const completionParent = completionV6Only && turnText.includes('G3_MAIN_READ_V6');
+      const completionChild = whatsappInstallerOnly && turnText.includes('G3_COMPLETION_CHILD');
+      const mutationChild = whatsappInstallerOnly && turnText.includes('G3_JESSICA_MUTATION_CHILD');
+      const mutationParent = whatsappInstallerOnly && !mutationChild && turnText.includes('G3_MAIN_JESSICA_MUTATION');
+      const reminderDelete = whatsappInstallerOnly && (turnText.includes('G3_REMINDER_DELETE_CHILD') || turnText.includes('G3_MAIN_REMINDER_DELETE'));
+      const reminderTool = reminderDelete ? 'benson_reminder_delete' : 'benson_reminder_create';
+      const reminderChild = whatsappInstallerOnly && (turnText.includes('G3_REMINDER_CREATE_CHILD') || turnText.includes('G3_REMINDER_DELETE_CHILD'));
+      const reminderParent = whatsappInstallerOnly && !reminderChild && (turnText.includes('G3_MAIN_REMINDER_CREATE') || turnText.includes('G3_MAIN_REMINDER_DELETE'));
       assert.deepEqual((input.tools ?? []).map((tool: unknown) => {
         assert(record(tool) && record(tool.function)); return tool.function.name;
-      }), completionV6Only ? completionParent ? ['jessica_task'] : ['jessica_read'] : codeMode ? ['exec', 'wait'] : correlation || /G3_(HANDLED_TOOL_FAILURE|MAIN_READ_)/.test(JSON.stringify(input.messages)) ? exposedTools : [], 'The fixture must expose only its approved tools');
+      }), mutationChild ? ['jessica_execute'] : mutationParent ? ['jessica_task'] : reminderChild ? [reminderTool] : reminderParent ? ['reminder_task'] : completionChild ? ['jessica_read'] : completionV6Only ? completionParent ? ['jessica_task'] : ['jessica_read'] : codeMode ? ['exec', 'wait'] : whatsappInstallerOnly && /G3_MAIN_READ_/.test(turnText) ? [turnText.includes('G3_MAIN_READ_REMINDER') ? 'reminder_task' : 'jessica_task'] : correlation || /G3_(HANDLED_TOOL_FAILURE|MAIN_READ_)/.test(turnText) ? exposedTools : [], 'The fixture must expose only its approved tools');
       // These markers control only this synthetic provider's test behavior.
       // They supply no admission, execution or Response authority.
-      const content = JSON.stringify(whatsappMonitorOnly ? input.messages.findLast((message: unknown) =>
-        record(message) && message.role === 'user' && /G3_(BOUNDED_SUCCESS|TERMINAL_NATIVE_FALLBACK|MAIN_READ_JESSICA)/u.test(JSON.stringify(message))) : input.messages);
+      const content = JSON.stringify(whatsappMonitorOnly ? turnMessages.findLast((message: unknown) =>
+        record(message) && message.role === 'user' && /G3_(BOUNDED_SUCCESS|TERMINAL_NATIVE_FALLBACK|MAIN_READ_JESSICA|MAIN_READ_REMINDER|COMPLETION_CHILD|MAIN_REMINDER_CREATE|REMINDER_CREATE_CHILD|MAIN_JESSICA_MUTATION|JESSICA_MUTATION_CHILD|MAIN_REMINDER_DELETE|REMINDER_DELETE_CHILD)/u.test(JSON.stringify(message))) : turnMessages);
       assert(!whatsappMonitorOnly || typeof content === 'string', 'Monitor provider requires its actual fixture input');
       const scenario = !correlation && content.includes('G3_TERMINAL_PROVIDER_ERROR') ? 'provider-error'
         : !correlation && content.includes('G3_TERMINAL_NATIVE_TIMEOUT') ? 'native-timeout'
@@ -409,13 +513,13 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
         res.end(JSON.stringify({ error: { type: 'invalid_request_error', message: 'Isolated provider rejected the fixture request.' } }));
         return;
       }
-      const done = input.messages.some((item: unknown) => record(item) && item.role === 'tool');
+      const done = turnMessages.some((item: unknown) => record(item) && item.role === 'tool');
       const readMarker = content.match(/G3_MAIN_READ_[A-Z_]+/u)?.[0];
       const readTools = readMarker ? codeMode || readMarker.endsWith('MULTI') ? ['jessica_task', 'reminder_task']
         : [readMarker.endsWith('REMINDER') ? 'reminder_task' : 'jessica_task'] : null;
       if (readTools && done) {
-        const messages = input.messages.filter((item: unknown) => record(item) && item.role === 'tool');
-        const calls = input.messages.flatMap((item: unknown) => record(item) && item.role === 'assistant' && Array.isArray(item.tool_calls) ? item.tool_calls : []);
+        const messages = turnMessages.filter((item: unknown) => record(item) && item.role === 'tool');
+        const calls = turnMessages.flatMap((item: unknown) => record(item) && item.role === 'assistant' && Array.isArray(item.tool_calls) ? item.tool_calls : []);
         assert.equal(messages.length, codeMode ? 1 : readTools.length);
         assert.equal(calls.length, codeMode ? 1 : readTools.length);
         let guestValues: unknown[] = [];
@@ -436,7 +540,7 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
           // retained call/result pair; never derive host authority from that ID.
           assert.equal(message.tool_call_id, call.id);
           assert(typeof message.content === 'string'); const value: unknown = codeMode ? guestValues[index] : JSON.parse(message.content); assert(record(value));
-          assert.equal(value.kind, 'benson.domain-result'); assert.equal(value.schemaVersion, 2);
+          validateDomainResultEnvelope(value);
           const failed = readMarker?.includes('JESSICA_FAILURE') && tool === 'jessica_task' ||
             readMarker?.includes('REMINDER_FAILURE') && tool === 'reminder_task';
           assert(record(value.facts)); assert.equal(value.facts.verified, !failed); assert(record(value.content));
@@ -445,21 +549,47 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
           assert(readMarker); mainReadCarriers.push({ marker: readMarker, tool, callId: call.id, value });
         }
       }
-      const useTool = correlation || content.includes('G3_HANDLED_TOOL_FAILURE') || readTools !== null;
+      const useTool = mutationChild || mutationParent || correlation || completionChild || reminderChild || reminderParent || content.includes('G3_HANDLED_TOOL_FAILURE') || readTools !== null;
+      if ((reminderParent || mutationParent) && done) {
+        const messages = turnMessages.filter((item: unknown) => record(item) && item.role === 'tool'); assert.equal(messages.length, 1);
+        const calls = turnMessages.flatMap((item: unknown) => record(item) && item.role === 'assistant' && Array.isArray(item.tool_calls) ? item.tool_calls : []); assert.equal(calls.length, 1);
+        const message: unknown = messages[0], call: unknown = calls[0]; assert(record(message) && record(call) && record(call.function));
+        assert.equal(call.function.name, mutationParent ? 'jessica_task' : 'reminder_task'); assert.equal(message.tool_call_id, call.id); assert(typeof message.content === 'string' && typeof call.id === 'string');
+        const value = validateDomainResultEnvelope(JSON.parse(message.content)); assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, 'known');
+        mainReadCarriers.push({ marker: mutationParent ? 'G3_MAIN_JESSICA_MUTATION' : reminderDelete ? 'G3_MAIN_REMINDER_DELETE' : 'G3_MAIN_REMINDER_CREATE', tool: mutationParent ? 'jessica_task' : 'reminder_task', callId: call.id, value });
+      }
       let completionText: string | undefined;
-      if (completionV6Only && !completionParent && done && !completionCancellation) {
-        const message = input.messages.findLast((item: unknown) => record(item) && item.role === 'tool'); assert(record(message));
+      if (reminderChild && done) {
+        const message = turnMessages.findLast((item: unknown) => record(item) && item.role === 'tool'); assert(record(message) && typeof message.content === 'string');
+        const value = normalizeReminderServiceResult(reminderDelete ? 'delete-reminder' : 'create-intent', JSON.parse(message.content),
+          { taskId: 'fixture-provider-proposal', pendingBinding: null, pendingExpiresAt: null });
+        completionText = JSON.stringify({ schemaVersion: 6, kind: 'domain-task', facts: {
+          domain: value.domain, domainSchemaVersion: value.domainSchemaVersion, operation: value.operation, status: value.status,
+          verified: value.verified, verificationScope: ['reminder_transaction'], data: value.data, warnings: value.warnings, error: value.error,
+          pendingContext: value.pendingContext, effects: [{ kind: reminderDelete ? 'reminder-delete' : 'reminder-create', reminderId: reminderDelete ? 'isolated-existing' : 'isolated-created', verified: true }], uncertainty: [],
+        }, userResponse: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render the verified Reminder facts through the existing domain presentation owner.' } } });
+      }
+      if ((mutationChild || completionChild || completionV6Only && !completionParent) && done && !completionCancellation) {
+        const message = turnMessages.findLast((item: unknown) => record(item) && item.role === 'tool'); assert(record(message));
         assert(typeof message.content === 'string');
-        const value = validateDomainResult(JSON.parse(message.content));
-        completionText = JSON.stringify({ schemaVersion: 6, kind: 'domain-task', facts: completionFacts(value), userResponse: value.content });
+        const value = mutationChild ? decode(ResultSchema, JSON.parse(message.content), 'fixture_jessica_result_shape') : validateResult(JSON.parse(message.content));
+        completionText = JSON.stringify({ schemaVersion: 6, kind: 'domain-task', facts: completionFacts(value),
+          userResponse: mutationChild ? { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Use verified domain facts' } } : { state: 'usable', text: renderJessicaStatusText(value, new Date()), language: 'he' } });
       }
       const code = 'const results = []; results.push(await jessica_task({operation: "status"})); results.push(await reminder_task({operation: "list"})); return results;';
-      const delta = !useTool ? { content: 'Native Main fixture reply.' } : done ? { content: completionText ?? 'Fixture finished.' } : codeMode ? {
+      const delta = !useTool ? { content: 'Native Main fixture reply.' } : done ? { content: completionText ?? 'Fixture finished.' } : reminderChild || reminderParent ? {
+        tool_calls: [{ index: 0, id: 'fixture-reminder-create', type: 'function', function: { name: reminderChild ? reminderTool : 'reminder_task',
+          arguments: reminderChild ? readFileSync(`/tmp/reminder-${reminderDelete ? 'delete' : 'create'}-input.json`, 'utf8') : JSON.stringify({ kind: 'benson.self-contained-request', version: 1, request: reminderDelete ? REMINDER_DELETE_TEXT : REMINDER_CREATE_TEXT }) } }],
+      } : mutationChild || mutationParent ? {
+        tool_calls: [{ index: 0, id: 'fixture-jessica-mutation', type: 'function', function: { name: mutationChild ? 'jessica_execute' : 'jessica_task',
+          arguments: JSON.stringify(mutationChild ? { operation: 'clean', target: { kind: 'rooms', rooms: ['living_room'] } }
+            : { kind: 'benson.self-contained-request', version: 1, request: JESSICA_MUTATION_TEXT }) } }],
+      } : codeMode ? {
         tool_calls: [{ index: 0, id: 'fixture-code-cell', type: 'function', function: { name: 'exec',
           arguments: JSON.stringify({ title: 'Read both fixture domains', code }) } }],
       } : {
         tool_calls: (readTools ?? ['jessica_read']).map((name, index) => ({ index, id: readTools ? `fixture-read-${index}` : 'fixture-call', type: 'function',
-          function: { name, arguments: readTools ? JSON.stringify({ operation: name === 'jessica_task' ? 'status' : 'list' }) : '{}' } })) };
+          function: { name, arguments: readTools ? JSON.stringify({ operation: name === 'jessica_task' ? 'status' : 'list' }) : completionChild || completionV6Only ? '{"operation":"status"}' : '{}' } })) };
       assert.equal(input.stream, true);
       res.writeHead(200, { 'Content-Type': 'text/event-stream' });
       const base = { id: `fixture-${requests}`, object: 'chat.completion.chunk', created: 1, model: 'correlation' };
@@ -492,10 +622,11 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
     ...correlation ? {} : { diagnostics: { flags: ['reply.profiler'] }, logging: { consoleLevel: 'debug' as const } },
     ...supportedNativeOnly ? { tts: { auto: 'off' as const } } : {},
     discovery: { mdns: { mode: 'off' } }, cron: { enabled: false },
-    agents: { ...completionV6Only ? { ownership: 'explicit' as const } : {},
-      defaults: { ...completionV6Only ? { systemAgent: { agentId: 'main' } } : {}, workspace: '/tmp/workspace', model: { primary: 'fixture-local/correlation',
+    agents: { ...completionV6Only || whatsappInstallerOnly ? { ownership: 'explicit' as const } : {},
+      defaults: { ...completionV6Only || whatsappInstallerOnly ? { systemAgent: { agentId: 'main' } } : {}, workspace: '/tmp/workspace', model: { primary: 'fixture-local/correlation',
       ...correlation ? {} : { fallbacks: ['fixture-local/secondary'] } }, skipBootstrap: true },
-      entries: completionV6Only ? { main: { workspace: '/tmp/workspace' }, 'jessica-vacuum': { workspace: '/tmp/workspace' } }
+      entries: completionV6Only || whatsappInstallerOnly ? { main: { workspace: '/tmp/workspace' }, 'jessica-vacuum': { workspace: '/tmp/workspace' },
+        ...whatsappInstallerOnly ? { 'reminder-service': { workspace: '/tmp/workspace' } } : {} }
         : { [correlation ? 'jessica-vacuum' : 'main']: { workspace: '/tmp/workspace' } } },
     tools: { allow: exposedTools, toolSearch: false, codeMode: codeModeOnly ? { enabled: true, executor: 'node' } : false },
     models: { providers: { 'fixture-local': { baseUrl: `http://127.0.0.1:${address.port}/v1`, apiKey: 'fixture-placeholder', authHeader: false,
@@ -503,9 +634,9 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
         id, name: 'Deterministic fixture', reasoning: false, input: ['text'] as ['text'],
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 256 })) } } },
     ...whatsappMonitorOnly ? { channels: { whatsapp: { enabled: true, dmPolicy: 'allowlist' as const,
-      allowFrom: ['+15550000001'], accounts: Object.fromEntries(Array.from({ length: whatsappInstallerOnly ? 18 : 8 }, (_, index) => [`fixture-${index}`, { authDir: `/tmp/empty-fixture-auth/fixture-${index}` }])), sendReadReceipts: false } } } : {},
+      allowFrom: ['+15550000001'], accounts: Object.fromEntries(Array.from({ length: whatsappInstallerOnly ? 25 : 8 }, (_, index) => [`fixture-${index}`, { authDir: `/tmp/empty-fixture-auth/fixture-${index}` }])), sendReadReceipts: false } } } : {},
     plugins: { allow: [pluginId, ...whatsappMonitorOnly ? ['whatsapp'] : []], slots: { memory: 'none' }, load: { paths: ['/tmp/plugin', ...whatsappMonitorOnly && !whatsappInstallerOnly ? ['/whatsapp'] : []] }, entries: { ...whatsappMonitorOnly ? { whatsapp: { enabled: true } } : {}, [pluginId]: { enabled: true,
-      ...completionV6Only ? { hooks: { allowConversationAccess: true } } : {} } } } };
+      ...completionV6Only || whatsappInstallerOnly ? { hooks: { allowConversationAccess: true } } : {} } } } };
   if (whatsappInstallerOnly) {
     // Preserve the native install's config metadata/last-good lineage. A raw
     // replacement is correctly rejected and restored by native corruption checks.

@@ -1,7 +1,7 @@
 import { type Static } from 'typebox';
-import { GrantSchema, InvocationSchema, NativeReadInputSchema, NativeDispatchReadInputSchema, NativeDispatchSchema, SourceInputSchema,
+import { GrantSchema, InvocationSchema, NativeReadInputSchema, NativeDispatchReadInputSchema, NativeDispatchRunInputSchema, NativeDispatchSchema, SourceInputSchema,
   NativeRequestAdmissionSchema, type Admission, type SourceAdmission, type SourceInput,
-  type NativeReadAdmission, type NativeDispatchReadAdmission, type NoRunOutcome, type TaskEnvelope } from './contracts.js';
+  type NativeReadAdmission, type NativeDispatchReadAdmission, type NativeDispatchRunAdmission, type NoRunOutcome, type TaskEnvelope } from './contracts.js';
 import { assertion, decode, exact, fail, freeze, identifier, read, synchronous } from './value.js';
 import { createTaskEnvelope } from './task-envelope.js';
 import { validateNoRunOutcome } from './no-run.js';
@@ -40,6 +40,36 @@ export function projectRequestAdmission(raw: unknown): ProjectedAdmission {
 }
 function validRequest(value: unknown): value is string {
   return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value, 'utf8') <= MAX_CLASSIFIER_REQUEST_BYTES;
+}
+/** Version 4 deliberately has no validateOutcome/NoRun entry. Serialized fields
+ * correlate the request; only the retained native/domain callback grants use. */
+export function createNativeDispatchRunAdmissionController(deps: {
+  nativeDispatch: Static<typeof NativeDispatchSchema>;
+  assertCurrent(admission?: NativeDispatchRunAdmission): unknown;
+  now(): unknown;
+}) {
+  if (typeof deps.assertCurrent !== 'function' || typeof deps.now !== 'function') fail('native_run_dependencies_unavailable');
+  const dispatch = freeze(read(NativeDispatchSchema, deps.nativeDispatch, 'native_dispatch_context_invalid'));
+  if (!Object.values(dispatch).every(identifier)) fail('native_dispatch_context_invalid');
+  const issued = new WeakSet<object>();
+  const current = (admission?: NativeDispatchRunAdmission) => assertion(deps.assertCurrent(admission), 'source_authority_must_be_synchronous');
+  return freeze({
+    admit(raw: unknown): NativeDispatchRunAdmission {
+      exact(raw, Object.keys(NativeDispatchRunInputSchema.properties), 'source_contract_shape');
+      const input = read(NativeDispatchRunInputSchema, raw, 'native_dispatch_run_input_invalid');
+      if (input.domain !== dispatch.domain || !validRequest(input.request)) fail('native_dispatch_run_input_invalid');
+      current();
+      const admittedAt = synchronous(deps.now(), 'source_authority_must_be_synchronous');
+      if (typeof admittedAt !== 'number' || !Number.isSafeInteger(admittedAt) || admittedAt < 0 || admittedAt > 8640000000000000) fail('source_clock_invalid');
+      const admission: NativeDispatchRunAdmission = freeze({ ...input, kind: 'benson.source-admission', requestId: dispatch.requestId,
+        authority: { kind: 'native-dispatch', subject: dispatch.subject }, admittedAt });
+      current(admission); issued.add(admission); return admission;
+    },
+    assertCurrent(admission: NativeDispatchRunAdmission): void {
+      if (!issued.has(admission)) fail('source_admission_unowned');
+      current(admission);
+    },
+  });
 }
 export interface SourceAdmissionController<A extends Admission = Admission> {
   admit(raw: unknown): A;

@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { type Static } from 'typebox';
-import { createSourceAdmissionController, projectRequestAdmission } from '../core/request-control.js';
+import { createSourceAdmissionController, createNativeDispatchRunAdmissionController, projectRequestAdmission } from '../core/request-control.js';
 import { createCompletionAuthority, acceptAgentCompletion, validateCompletion, reconstructCompletion } from '../core/completion.js';
 import { controlReadResponse, controlResponse } from '../core/response-control.js';
 import { createNoRunDomainResult, createCompletionDomainResult } from '../core/domain-result.js';
@@ -14,6 +14,25 @@ import { boundedCopy, decode, JsonSchema, jsonCopy, type JsonValue } from '../co
 import { formatUserDatetime, UserDatetimeError } from '../../../../shared/benson-datetime.js';
 
 const currentTime = Date.parse('2026-10-17T10:00:00Z');
+test('native dispatch Run v4 retains private read-only authority without becoming NoRun v3', async () => {
+  let live = true, authorized = true;
+  const deps = { nativeDispatch: { requestId: 'native-run-input', domain: 'jessica-vacuum', subject: 'reader' },
+    now: () => currentTime, assertCurrent() { assert(live && authorized, 'run_closed_or_denied'); } };
+  const controller = createNativeDispatchRunAdmissionController(deps);
+  const input = { schemaVersion: 4, kind: 'benson.source-input', domain: 'jessica-vacuum', scope: 'read', request: 'Explain current status' };
+  const admission = controller.admit(input); controller.assertCurrent(admission);
+  assert(Object.isFrozen(admission)); assert(Object.isFrozen(admission.authority));
+  assert.throws(() => controller.assertCurrent({ ...admission }), /unowned/);
+  assert.throws(() => createNativeDispatchRunAdmissionController(deps).assertCurrent(admission), /unowned/);
+  for (const delta of [{ schemaVersion: 3 }, { schemaVersion: 5 }, { scope: 'action' }, { scope: 'notify' }, { domain: 'reminder' }, { request: '' }]) {
+    assert.throws(() => controller.admit({ ...input, ...delta }));
+  }
+  assert.throws(() => dispatchReadFixture().controller.admit(input));
+  assert.equal('validateOutcome' in controller, false);
+  await Promise.resolve(); authorized = false; assert.throws(() => controller.assertCurrent(admission), /run_closed_or_denied/);
+  authorized = true; live = false; assert.throws(() => controller.admit(input), /run_closed_or_denied/);
+  assert.throws(() => createNativeDispatchRunAdmissionController({ ...deps, async assertCurrent() {} }).admit(input), /synchronous/);
+});
 function dispatchReadFixture() {
   const state = { live: true, authorized: true };
   const controller = createSourceAdmissionController({ nativeDispatch: { requestId: 'native-message', domain: 'future-domain', subject: 'reader' },

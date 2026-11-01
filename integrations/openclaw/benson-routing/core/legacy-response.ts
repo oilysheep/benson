@@ -1,12 +1,13 @@
 import Type, { type Static } from 'typebox';
-import { ResponseV3Schema, type ResponseV3 } from './contracts.js';
-import { validateDomainResult } from './domain-result.js';
+import { ResponseV3Schema, ResponseV4Schema, type ResponseV3, type ResponseV4 } from './contracts.js';
+import { validateDomainResult, validateDomainResultEnvelope } from './domain-result.js';
 import { ExecutionRouteSchema, TaskResultSchema, ResponseSchema, RenderedOutputSchema,
   ResponsePolicySchema, ResponseLifecycleSchema, NativeCompletionSchema, ParentSessionSchema,
   ResponseSourceSchema, LegacyResultSchema, LegacyJessicaSchema, LegacyTrustedSchema, DOMAIN_VERSIONS,
   DOMAIN_AGENTS, type TaskResult, type Response, type ResponseLifecycle, type RenderedOutput } from './contracts.js';
 import { object, IdentifierSchema, candidate, exact, fail,
-  freeze, identifier, plain, pending, read, timestamp, MAX_RESPONSE_RESULTS, MAX_RENDERED_TEXT } from './value.js';
+  freeze, identifier, plain, pending, read, timestamp, MAX_RESPONSE_RESULTS, MAX_RENDERED_TEXT, MAX_BYTES,
+  MAX_DOMAIN_RESULT_V3_BYTES, assertArrayData } from './value.js';
 
 function policy(raw: unknown): Static<typeof ResponsePolicySchema> {
   exact(raw, Object.keys(ResponsePolicySchema.properties), 'policy_shape');
@@ -96,6 +97,10 @@ export function validateRenderedOutput(raw: unknown): RenderedOutput {
 export function validateResponseV3Envelope(raw: unknown): ResponseV3 {
   const value = read(ResponseV3Schema, raw, 'response_v3_invalid');
   const results = value.results.map(validateDomainResult);
+  return responseDomainSemantics({ ...value, results });
+}
+function responseDomainSemantics<T extends ResponseV3 | ResponseV4>(value: T): T {
+  const results = value.results;
   if (value.source.type === 'direct') {
     const result = results[0];
     if (results.length !== 1 || !result || result.executionMode !== value.source.executionMode ||
@@ -105,6 +110,27 @@ export function validateResponseV3Envelope(raw: unknown): ResponseV3 {
   }
   return freeze({ ...value, results, responsePolicy: policy(value.responsePolicy), lifecycle: lifecycle(value.lifecycle),
     messageCandidate: candidate(value.messageCandidate) });
+}
+export { MAX_RESPONSE_V4_BYTES } from './value.js';
+/** Validate/copy each component before aggregate traversal. Child depth is
+ * measured at its own boundary, as in Completion's component-budget family.
+ */
+export function validateResponseV4Envelope(raw: unknown): ResponseV4 {
+  exact(raw, Object.keys(ResponseV4Schema.properties), 'response_v4_invalid');
+  if (!Array.isArray(raw.results) || raw.results.length > MAX_RESPONSE_RESULTS) fail('response_results_count');
+  assertArrayData(raw.results);
+  const metadata = read(ResponseV4Schema, { ...raw, results: [] }, 'response_v4_invalid');
+  const results = raw.results.map(validateDomainResultEnvelope);
+  const cap = MAX_BYTES + results.reduce((sum, result) => sum + (result.schemaVersion === 3 ? MAX_DOMAIN_RESULT_V3_BYTES : MAX_BYTES), 0)
+    + Math.max(0, results.length - 1);
+  const value = { ...metadata, results };
+  if (Buffer.byteLength(JSON.stringify(value), 'utf8') > cap) fail('json_bytes_exceeded');
+  return responseDomainSemantics(value);
+}
+export function createResponseV4Envelope(candidateInput: unknown, trusted: unknown): ResponseV4 {
+  exact(candidateInput, ['messageCandidate'], 'response_v4_candidate_shape');
+  exact(trusted, Object.keys(ResponseV4Schema.properties).filter(key => !['schemaVersion', 'messageCandidate'].includes(key)), 'response_v4_trusted_shape');
+  return validateResponseV4Envelope({ schemaVersion: 4, ...trusted, messageCandidate: candidateInput.messageCandidate });
 }
 export function createResponseV3Envelope(candidateInput: unknown, trusted: unknown): ResponseV3 {
   exact(candidateInput, ['messageCandidate'], 'response_v3_candidate_shape');

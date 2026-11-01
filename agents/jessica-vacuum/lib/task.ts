@@ -2,7 +2,7 @@ import { assertInvocationCurrent } from '../../../integrations/openclaw/benson-r
 import Type from 'typebox';
 import { object, decode } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import { createSourceAdmissionController, NATIVE_READ_ADMISSION_VERSION, type SourceAdmissionController } from '../../../integrations/openclaw/benson-routing/core/request-control.js';
-import type { NativeDispatchReadAdmission } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { TaskEnvelopeSchema, type NativeDispatchReadAdmission } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
 import { createNoRunDomainResult, NATIVE_READ_OUTCOME_VERSION, RESPONSE_CONTRACT_VERSION } from '../../../integrations/openclaw/benson-routing/core/envelope.js';
 import { controlReadResponse } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
 import { renderJessicaStatusText } from './presentation.js';
@@ -10,6 +10,8 @@ import { validateResult, type Result } from './results.js';
 import { IdentitySchema } from './schemas.js';
 import type { InvocationAuthority } from './ports.js';
 export const JESSICA_TASK_SCHEMA = object({ operation: Type.Literal('status') });
+/** Opt-in intent entry; deterministic status remains independently strict. */
+export const JESSICA_TASK_ENTRY_SCHEMA = Type.Union([JESSICA_TASK_SCHEMA, TaskEnvelopeSchema]);
 export async function executeJessicaStatusTask(source: string | { controller: SourceAdmissionController<NativeDispatchReadAdmission>;
   admission: NativeDispatchReadAdmission }, raw: unknown, { identity, authority, read, clock = () => new Date() }:
   { identity: unknown; authority: InvocationAuthority; read: (request: unknown, identity: unknown, authority: InvocationAuthority) => Promise<Result>; clock?: () => Date }) {

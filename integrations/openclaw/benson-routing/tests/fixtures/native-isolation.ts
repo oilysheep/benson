@@ -47,10 +47,18 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
     // Stock package lifecycle may write only to an invisible, disposable SDK overlay.
     '--overlay-src', `${repo}/node_modules/openclaw`, '--tmp-overlay', '/repo/node_modules/openclaw',
     '--ro-bind', `${repo}/output/typescript`, '/repo/output/typescript',
+    '--ro-bind', `${repo}/agents/jessica-vacuum/config/registry.v1.json`, '/repo/agents/jessica-vacuum/config/registry.v1.json',
     ...whatsappMonitorOnly === 'installed' ? [
+      ...['config/policy.v1.json', 'tests/fixtures/map-stage2-live.json'].flatMap(file => [
+        '--ro-bind', join(repo, 'agents/jessica-vacuum', file), `/repo/agents/jessica-vacuum/${file}`,
+      ]),
       '--symlink', 'usr/bin', '/bin',
       '--dir', '/npm-cache-seed', '--ro-bind', join(npmCache!, '_cacache'), '/npm-cache-seed/_cacache',
       '--ro-bind', join(repo, 'integrations/openclaw/patches/whatsapp-response-controller'), '/whatsapp-response-controller',
+      '--dir', '/routing',
+      ...['classification.mjs', 'policy.mjs', 'rubric.json'].flatMap(file => [
+        '--ro-bind', join(repo, 'integrations/openclaw/benson-routing', file), `/routing/${file}`,
+      ]),
     ] : [],
     ...target === 'whatsapp-response-delivery' ? [
       '--ro-bind', join(whatsappDirectory!, 'package'), '/whatsapp',

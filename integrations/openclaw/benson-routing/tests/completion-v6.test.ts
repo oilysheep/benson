@@ -1,13 +1,15 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCompletionAuthority, acceptAgentCompletion, reconstructCompletion, validateCompletion,
-  completionProposalSchema, type CompletionCustody } from '../core/completion.js';
+  completionProposalSchema, settleNativeDomainCompletion, type CompletionCustody } from '../core/completion.js';
+import { MAX_BYTES, MAX_WARNINGS } from '../core/value.js';
 import { BOUNDED_COMPLETION_SCHEMA_VERSION, COMPLETION_SCHEMA_VERSION, CURRENT_COMPLETION_SCHEMA_VERSION,
   SUCCESSOR_COMPLETION_SCHEMA_VERSION, type Binding6, type Completion6 } from '../core/completion-contracts.js';
-import { createCompletionDomainResult } from '../core/domain-result.js';
+import { createCompletionDomainResult, createCompletionDomainResultV3 } from '../core/domain-result.js';
 import { renderJessicaDomainResult } from '../../../../agents/jessica-vacuum/lib/presentation.js';
 import { createResponseV3Envelope } from '../core/legacy-response.js';
 import { controlResponse } from '../core/response-control.js';
+import { normalizeJessicaCompletion, createJessicaCompletionToolFactory } from '../../plugins/benson-jessica-tool/src/completion.js';
 
 // Synthetic owner guards test the contract; they do not establish native authority.
 function fixture() {
@@ -36,6 +38,185 @@ function accepted() {
   const record = acceptAgentCompletion(f.proposal, authority);
   return { ...f, authority, record };
 }
+function native() {
+    const f = accepted(), value = { schemaVersion: '1' as const, domain: 'jessica-vacuum' as const,
+      operation: f.facts.operation, status: f.facts.status, verified: f.facts.verified,
+      data: f.facts.data, warnings: f.facts.warnings, error: f.facts.error, pendingContext: null };
+    const result = { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+    return { f, input: { binding: f.binding, knownFacts: f.facts,
+      tool: { runId: f.binding.runId, sessionKey: f.binding.sessionKey, sessionId: f.binding.sessionId, callId: 'tool-call', name: 'jessica_read' as const, value },
+      after: { runId: f.binding.runId, callId: 'tool-call', value: result, error: undefined as string | undefined },
+      terminal: { runId: f.binding.runId, sessionKey: f.binding.sessionKey, sessionId: f.binding.sessionId, success: true,
+        messages: [
+          { role: 'assistant', content: [{ type: 'toolCall', id: 'tool-call', name: 'jessica_read' }] },
+          { role: 'toolResult', toolCallId: 'tool-call', toolName: 'jessica_read', ...result },
+          { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(f.proposal) }] },
+        ] as unknown[] }, custody: f.custody } };
+  }
+test('native Jessica Completion adapter binds actual tool/terminal evidence and retains live source custody', async () => {
+  const f = native();
+  // Native wrappers may carry optional metadata outside the domain JSON.
+  Reflect.set(f.input.after.value, 'optionalNativeMetadata', undefined);
+  Reflect.set(f.input.tool, 'nativeGuard', () => { throw new Error('Host callbacks are not observation data'); });
+  const acceptedNative = normalizeJessicaCompletion(f.input);
+  assert.deepEqual(JSON.parse(JSON.stringify(acceptedNative.result.facts.data)), f.input.tool.value.data);
+  const factory = createJessicaCompletionToolFactory({ async readNativeCompletion() { return f.input; },
+    jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }) });
+  const caller = f.input.binding.caller; assert(caller);
+  const context = { agentId: 'main', sessionKey: caller.sessionKey, sessionId: caller.sessionId,
+    assertInvocationCurrent() { assert(f.f.state.live); } };
+  assert.equal(factory({ ...context, agentId: 'jessica-vacuum' }), null);
+  const tool = factory(context); assert(tool && !Array.isArray(tool));
+  assert.deepEqual((await tool.execute('validate', { runId: f.input.binding.runId })).details, { validated: true, result: acceptedNative.result });
+  await assert.rejects(tool.execute('duplicate', { runId: f.input.binding.runId }));
+  const foreign = factory({ ...context, sessionId: 'foreign-parent' }); assert(foreign && !Array.isArray(foreign));
+  await assert.rejects(foreign.execute('foreign', { runId: f.input.binding.runId }));
+  f.f.state.live = false; assert.throws(() => validateCompletion(acceptedNative.record, acceptedNative.authority));
+  f.input.custody = { assertCurrent() {} };
+  assert.throws(() => validateCompletion(acceptedNative.record, acceptedNative.authority), /custody unavailable/);
+  for (const mode of ['run', 'oversized-foreign-run', 'session', 'error', 'changed-tool', 'duplicate', 'reordered', 'false-custody', 'async-custody', 'known-facts', 'unknown-version', 'converted-carrier'] as const) {
+    const g = native();
+    if (mode === 'run') g.input.terminal.runId = 'foreign';
+    if (mode === 'oversized-foreign-run') {
+      g.input.terminal.runId = 'foreign';
+      g.input.terminal.messages[2] = { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(16385) }] };
+    }
+    if (mode === 'session') g.input.tool.sessionId = 'foreign';
+    if (mode === 'error') g.input.after.error = 'native tool failed';
+    if (mode === 'changed-tool') g.input.after.value.details = { ...g.input.after.value.details, operation: 'foreign' };
+    if (mode === 'duplicate') g.input.terminal.messages.splice(2, 0, g.input.terminal.messages[1]);
+    if (mode === 'reordered') [g.input.terminal.messages[0], g.input.terminal.messages[1]] = [g.input.terminal.messages[1], g.input.terminal.messages[0]];
+    if (mode === 'false-custody') g.input.custody = { assertCurrent() { return false; } };
+    if (mode === 'async-custody') g.input.custody = { async assertCurrent() {} };
+    if (mode === 'known-facts') g.input.knownFacts.data = { invented: true };
+    if (mode === 'unknown-version') Reflect.set(g.input.tool.value, 'schemaVersion', '2');
+    if (mode === 'converted-carrier') Reflect.set(g.input.tool, 'value', createCompletionDomainResult(g.f.record, g.f.authority));
+    assert.throws(() => normalizeJessicaCompletion(g.input), mode);
+  }
+});
+
+test('mutation reporting failure preserves verified effects in controlled UNKNOWN settlement without replay', () => {
+  for (const fault of ['malformed', 'oversized', 'uncertainty-capacity', 'missing', 'terminal-error', 'foreign-facts'] as const) {
+    const g = native();
+    const details = [{ kind: 'jessica-dispatch', operationId: 'original-operation', verified: true }];
+    g.input.tool.name = 'jessica_execute' as typeof g.input.tool.name;
+    g.input.tool.value.operation = 'clean'; g.input.tool.value.data = { operationId: 'original-operation' };
+    g.input.knownFacts.operation = 'clean'; g.input.knownFacts.data = g.input.tool.value.data; g.input.knownFacts.effects = details;
+    if (fault === 'uncertainty-capacity') g.input.knownFacts.uncertainty = Array.from({ length: 64 }, (_, i) => ({ code: 'EXISTING_UNCERTAINTY', detail: `Retained domain observation ${i}` }));
+    const carrier = { content: [{ type: 'text', text: JSON.stringify(g.input.tool.value) }], details: g.input.tool.value };
+    g.input.after.value = carrier;
+    g.input.terminal.messages = [
+      { role: 'assistant', content: [{ type: 'toolCall', id: 'tool-call', name: 'jessica_execute' }] },
+      { role: 'toolResult', toolCallId: 'tool-call', toolName: 'jessica_execute', ...carrier },
+      { role: 'assistant', content: [{ type: 'text', text: fault === 'foreign-facts'
+        ? JSON.stringify({ ...g.f.proposal, facts: { ...g.f.proposal.facts, data: { invented: true } } }) : '{bad json' }] },
+    ];
+    if (fault === 'missing') g.input.terminal.messages.pop();
+    if (fault === 'oversized') g.input.terminal.messages[2] = { role: 'assistant', content: [{ type: 'text', text: 'x'.repeat(16385) }] };
+    if (fault === 'terminal-error') g.input.terminal.success = false;
+    const recovered = normalizeJessicaCompletion({ ...g.input, tool: { ...g.input.tool, name: 'jessica_execute' }, projectEffects: effects => ({
+      status: 'known', refs: ['original-operation'], details: effects, reconciliation: { required: false, reason: null },
+    }) });
+    assert.equal(recovered.record.completion.outcome, 'FAILED'); assert.equal(recovered.record.facts.status, 'unknown');
+    assert.equal(recovered.result.outcome.disposition, 'unresolved'); assert.equal(recovered.result.outcome.status, 'unknown');
+    assert.deepEqual(JSON.parse(JSON.stringify(recovered.result.effects.details)), details);
+    assert.deepEqual(recovered.result.effects.refs, ['original-operation']); assert.equal(recovered.result.effects.status, 'known');
+    assert.equal(recovered.record.userResponse.state, 'unavailable');
+    assert.deepEqual(JSON.parse(JSON.stringify(recovered.result.uncertainty)), g.input.knownFacts.uncertainty);
+    if (fault === 'uncertainty-capacity') {
+      assert.deepEqual(JSON.parse(JSON.stringify(recovered.result.uncertainty)), g.input.knownFacts.uncertainty);
+      assert(recovered.result.evidence.gaps.some(gap => gap.code === 'REPORT'));
+    }
+    const response = createResponseV3Envelope({ messageCandidate: null }, {
+      requestId: 'request', source: { type: 'main', agentId: 'main', runId: 'parent-run' }, results: [recovered.result],
+      lifecycle: { domainExecution: 'uncertain', failure: null },
+      responsePolicy: { preferredMode: 'deterministic', allowedModes: ['deterministic', 'safe_failure'] },
+    });
+    const controlled = controlResponse(response, { language: 'he', now: '2026-10-26T08:01:00Z', timezone: 'Asia/Jerusalem',
+      assertResponseCurrent() { validateCompletion(recovered.record, recovered.authority); }, renderDomainResult: renderJessicaDomainResult });
+    assert.equal(controlled.mode, 'deterministic'); assert.match(controlled.rendered?.message ?? '', /לא אבצע.*שוב אוטומטית/u);
+    g.f.state.live = false;
+    assert.throws(() => validateCompletion(recovered.record, recovered.authority));
+  }
+});
+
+test('native recovery is nonexpanding for accepted byte/count boundaries and preserves all authoritative facts', () => {
+  const unavailable = { state: 'unavailable' as const, reason: { code: 'RUNTIME_WORDING_UNAVAILABLE',
+    detail: 'No owner-authored usable message is retained.' } };
+  const size = (value: unknown) => Buffer.byteLength(JSON.stringify(value), 'utf8');
+  const classes = [
+    { status: 'success', count: 0, atom: 'x' }, { status: 'partial', count: MAX_WARNINGS, atom: 'א' },
+    { status: 'failure', count: MAX_WARNINGS, atom: '\n' }, { status: 'unknown', count: MAX_WARNINGS, atom: '😀' },
+  ] as const;
+  for (const { status, count, atom } of classes) for (const budget of [MAX_BYTES - 1, MAX_BYTES]) {
+    for (const success of [true, false]) {
+      const g = native(), facts = g.input.knownFacts;
+      facts.status = status;
+      facts.effects = Array.from({ length: count || 1 }, (_, i) => ({ ref: `effect-${i}`, possible: true }));
+      facts.uncertainty = Array.from({ length: count }, (_, i) => ({ code: 'EXISTING_UNCERTAINTY', detail: `Keep ${i}` }));
+      facts.warnings = Array.from({ length: count }, (_, i) => ({ code: 'EXISTING_WARNING', detail: `Keep ${i}` }));
+      facts.verificationScope = Array.from({ length: count || 1 }, (_, i) => `scope-${i}`);
+      facts.error = status === 'failure' ? { code: 'DOMAIN_FAILURE', detail: 'Preserve the domain failure.' } : null;
+      const padding = Array.from({ length: 256 }, () => '');
+      facts.data = { padding };
+      const baseline = { schemaVersion: 6, kind: 'domain-task', binding: g.input.binding, facts,
+        results: [], userResponse: unavailable, completion: { outcome: 'NORMAL', gaps: [] } };
+      let remaining = budget - size(baseline);
+      const atomBytes = size(atom) - 2;
+      for (let i = 0; i < padding.length && remaining; i++) {
+        const n = Math.min(Math.floor(16384 / atom.length), Math.floor(remaining / atomBytes));
+        padding[i] = atom.repeat(n); remaining -= n * atomBytes;
+        if (remaining < atomBytes && padding[i]!.length < 16384) {
+          padding[i] += 'x'.repeat(remaining); remaining = 0;
+        }
+      }
+      assert.equal(remaining, 0); assert.equal(size(baseline), budget);
+      const authority = createCompletionAuthority({ ...g.f.evidence, knownFacts: facts }, g.f.custody);
+      const accepted = acceptAgentCompletion({ ...g.f.proposal, facts, userResponse: unavailable }, authority);
+      assert.equal(size(accepted), budget, 'the exact boundary payload is accepted before recovery');
+      Object.assign(g.input.tool.value, { status, data: facts.data, warnings: facts.warnings, error: facts.error });
+      const carrier = { content: [{ type: 'text', text: JSON.stringify(g.input.tool.value) }], details: g.input.tool.value };
+      g.input.after.value = carrier;
+      g.input.terminal.success = success;
+      g.input.terminal.messages = [
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'tool-call', name: 'jessica_read' }] },
+        { role: 'toolResult', toolCallId: 'tool-call', toolName: 'jessica_read', ...carrier },
+        { role: 'assistant', content: [{ type: 'text', text: '{bad json' }] },
+      ];
+      const original = JSON.stringify(facts);
+      const recovered = settleNativeDomainCompletion(g.input);
+      assert.equal(recovered.record.completion.outcome, 'FAILED');
+      assert.deepEqual(JSON.parse(JSON.stringify(recovered.record.facts)), { ...JSON.parse(original), status: 'unknown' });
+      assert.equal(JSON.stringify(facts), original, 'recovery never mutates authoritative evidence');
+      assert(size(recovered.record) <= size(accepted), 'recovery never consumes more bytes than its accepted baseline');
+      assert.equal(recovered.record.completion.gaps.length, 1);
+      assert.equal(recovered.record.completion.gaps[0]?.code, success ? 'REPORT' : 'RUN');
+      assert.equal(recovered.record.userResponse.state, 'unavailable');
+      const result = createCompletionDomainResultV3(recovered.record, recovered.authority, { projectEffects: details => ({
+        status: 'possible', refs: [], details, reconciliation: { required: true, reason: 'EFFECT_ACK_UNKNOWN' },
+      }) });
+      assert.equal(result.effects.status, 'possible'); assert(result.effects.reconciliation.required);
+      assert.equal(result.effects.reconciliation.reason, 'EFFECT_ACK_UNKNOWN');
+      assert.equal(JSON.stringify(result.effects.details), JSON.stringify(recovered.record.facts.effects));
+      assert.equal(result.outcome.status, 'unknown');
+      assert.equal(renderJessicaDomainResult(result, { language: 'en' }).kind, count ? 'unsupported' : 'rendered',
+        'warnings remain authoritative and cannot disappear into generic wording');
+      const forged = JSON.parse(JSON.stringify(recovered.record));
+      forged.userResponse.reason.detail = 'It worked.';
+      assert.throws(() => validateCompletion(forged, recovered.authority), /completion_runtime_response_mismatch/);
+      if (budget === MAX_BYTES) {
+        const oversized = structuredClone(facts);
+        assert(oversized.data && typeof oversized.data === 'object' && !Array.isArray(oversized.data));
+        const more = oversized.data.padding; assert(Array.isArray(more));
+        const index = more.findIndex(item => typeof item === 'string' && item.length < 16384);
+        assert(index >= 0); more[index] += 'x';
+        assert.throws(() => createCompletionAuthority({ ...g.f.evidence, knownFacts: oversized }, g.f.custody), /json_bytes_exceeded/);
+      }
+      g.f.state.live = false;
+      assert.throws(() => validateCompletion(recovered.record, recovered.authority), /custody unavailable/);
+    }
+  }
+});
 
 test('explicit domain-only v6 preserves full facts, wording and DomainResultV2 without fabricated generations', () => {
   const f = accepted(); assert.equal(f.record.schemaVersion, BOUNDED_COMPLETION_SCHEMA_VERSION);
@@ -161,4 +342,9 @@ test('v6 rejects foreign ownership, ineligible continuation/delivery, nested or 
   assert.throws(() => createCompletionAuthority({ ...f.evidence,
     knownFacts: { ...f.facts, data: Array(17).fill('x'.repeat(16384)) } }, f.custody), /bytes_exceeded|array_bound/);
   assert.throws(() => acceptAgentCompletion({ ...value.proposal, userResponse: { ...value.proposal.userResponse, text: 'x'.repeat(4097) } }, value.authority));
+});
+
+test('Jessica adapter rejects unknown result-version opt-in without silent legacy fallback', () => {
+  const g = native(); Reflect.set(g.input, 'resultVersion', 99);
+  assert.throws(() => normalizeJessicaCompletion(g.input), /domain_result_version/);
 });

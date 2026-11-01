@@ -2,14 +2,39 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createResponseEnvelope, createResponseV3Envelope, validateResponseEnvelope, validateResponseV3Envelope } from '../core/legacy-response.js';
 import { validateDomainResult } from '../core/domain-result.js';
-import { controlResponse, createMainResponseDelivery, createDirectReadResponseDelivery, type ResponseV3Options } from '../core/response-control.js';
-import { createSourceAdmissionController } from '../core/request-control.js';
+import { controlResponse, createMainResponseDelivery, createDirectReadResponseDelivery, createDirectAgenticResponseDelivery, type ResponseV3Options } from '../core/response-control.js';
+import { createSourceAdmissionController, createNativeDispatchRunAdmissionController } from '../core/request-control.js';
 import { type DomainResult, type ResponseV3, RESPONSE_CONTRACT_VERSION } from '../core/contracts.js';
 import { boundedCopy } from '../core/value.js';
 import { renderJessicaDomainResult } from '../../../../agents/jessica-vacuum/lib/presentation.js';
 import { renderReminderDomainResult } from '../../../../agents/reminder-service/lib/presentation.js';
 
 const settings = { language: 'en' as const, now: '2026-10-26T00:00:00Z', timezone: 'UTC' };
+for (const fault of ['none', 'foreign-run', 'effects', 'revoked', 'mutated', 'duplicate'] as const) {
+  test(`direct agentic v4 uses existing Response v3 custody and gate: ${fault}`, async () => {
+    let live = true;
+    const controller = createNativeDispatchRunAdmissionController({ nativeDispatch: { requestId: 'direct-run', domain: 'jessica-vacuum', subject: 'reader' },
+      assertCurrent() { assert(live); }, now: () => Date.parse(settings.now) });
+    const admission = controller.admit({ schemaVersion: 4, kind: 'benson.source-input', domain: 'jessica-vacuum', scope: 'read', request: 'Explain status' });
+    const value = result('jessica-vacuum', { executionMode: 'agentic', ...fault === 'effects' ? {
+      effects: { status: 'known', refs: ['effect'], details: [], reconciliation: { required: false, reason: null } } } : {} });
+    const response = createResponseV3Envelope({ messageCandidate: null }, { requestId: 'direct-run',
+      source: { type: 'direct', executionMode: 'agentic', agentId: 'jessica-vacuum', runId: fault === 'foreign-run' ? 'foreign' : 'actual-child' },
+      results: [value], lifecycle: { domainExecution: 'attempted', failure: null },
+      responsePolicy: { preferredMode: 'deterministic', allowedModes: ['deterministic'] } });
+    const delivery = createDirectAgenticResponseDelivery({ mode: 'native-resolver', requestId: 'direct-run', agentId: 'jessica-vacuum', admission,
+      runId: () => 'actual-child', assertCurrent() { assert(live); }, responseFor: () => response,
+      presentation: { ...settings, assertResponseCurrent(candidate) { assert(live); assert.deepEqual(candidate.results, [value]); },
+        renderDomainResult: () => ({ kind: 'rendered', text: 'Authorized read-only explanation.', pendingContext: null }) } });
+    const candidate = delivery.resolveNativeCandidate({ signal: AbortSignal.any([]), resolve: async () => ({ text: 'model candidate' }), copyMetadata: (_source, approved) => approved });
+    if (fault === 'foreign-run' || fault === 'effects') { await assert.rejects(candidate); assert.equal(delivery.beforeNativeDeliver({ text: 'fallback' }, { kind: 'final' }), null); return; }
+    const prepared = await candidate;
+    if (fault === 'revoked') live = false;
+    const output = delivery.beforeNativeDeliver(fault === 'mutated' ? { text: 'unapproved' } : prepared, { kind: 'final' });
+    assert.equal(output !== null, fault !== 'revoked' && fault !== 'mutated');
+    if (fault === 'duplicate') assert.equal(delivery.beforeNativeDeliver(prepared, { kind: 'final' }), null);
+  });
+}
 for (const fault of ['none', 'foreign-request', 'foreign-subject', 'foreign-domain', 'main-source', 'revoked', 'mutation', 'duplicate', 'fallback'] as const) {
   test(`direct native read uses the shared mandatory Response gate: ${fault}`, async () => {
     let live = true;
