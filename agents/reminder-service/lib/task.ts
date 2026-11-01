@@ -7,7 +7,34 @@ import { controlReadResponse } from '../../../integrations/openclaw/benson-routi
 import { executeReminderTool, type Dependencies } from './service.js';
 import { verifiedList, safeListResult, discoveryData } from './results.js';
 import { renderReminderList } from './presentation.js';
+import { TaskEnvelopeSchema } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { plain } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { normalizeReminderServiceResult } from './results.js';
+import type { CurrentRequestProjection } from '../../../integrations/openclaw/benson-routing/core/conversation-context.js';
 export const REMINDER_TASK_SCHEMA = object({ operation: Type.Literal('list') });
+/** Opt-in only; the existing list entry and its consumers remain strict. */
+export const REMINDER_TASK_ENTRY_SCHEMA = Type.Union([REMINDER_TASK_SCHEMA, TaskEnvelopeSchema]);
+/** Current-input creation uses the existing transaction and provenance owner.
+ * Legacy callers retain their existing evidence rules; this entry requires the
+ * full bundle and the exact original input identity before any transaction.
+ */
+export async function executeReminderCreateTask(callId: string, raw: unknown, source: CurrentRequestProjection, deps: Dependencies) {
+  assertInvocationCurrent(deps.authority);
+  assertReminderCreateSource(raw, source);
+  const result = await executeReminderTool('benson_reminder_create', raw, deps);
+  assertInvocationCurrent(deps.authority);
+  return normalizeReminderServiceResult('create-intent', result, { taskId: callId, pendingBinding: null, pendingExpiresAt: null });
+}
+/** Shared by the existing task entry and its raw native tool adapter. */
+export function assertReminderCreateSource(raw: unknown, source: CurrentRequestProjection): void {
+  const inputs = plain(raw) && plain(raw.input) && Array.isArray(raw.input.items) ? raw.input.items
+    : [plain(raw) ? raw.input : null];
+  for (const input of inputs) {
+    if (!source.context.current.entryId || !plain(input) || !plain(input.provenance) ||
+      input.provenance.currentEvidenceId !== source.context.current.entryId ||
+      input.provenance.contextId !== source.context.conversation.conversationRef) throw new Error('reminder_original_input_provenance_required');
+  }
+}
 /** Deterministic domain entry. The native adapter must supply live host custody. */
 export async function executeReminderListTask(callId: string, raw: unknown, deps: Dependencies) {
   decode(REMINDER_TASK_SCHEMA, raw, 'reminder_task_intent_invalid');

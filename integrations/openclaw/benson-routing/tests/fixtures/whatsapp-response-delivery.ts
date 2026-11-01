@@ -4,25 +4,34 @@ import { EventEmitter } from 'node:events';
 import { AsyncResource } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
-import { createHash } from 'node:crypto';
-import { existsSync, readFileSync } from 'node:fs';
+import { createHash, randomUUID } from 'node:crypto';
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry';
 import { copyReplyPayloadMetadata } from 'openclaw/plugin-sdk/reply-payload';
 import { getReplyFromConfig, type ReplyPayload } from 'openclaw/plugin-sdk/reply-runtime';
-import { createMainResponseDelivery, createDirectReadResponseDelivery } from '../../core/response-control.js';
-import { createSourceAdmissionController } from '../../core/request-control.js';
+import { createMainResponseDelivery, createDirectReadResponseDelivery, createDirectAgenticResponseDelivery } from '../../core/response-control.js';
+import { createSourceAdmissionController, createNativeDispatchRunAdmissionController, projectRequestAdmission } from '../../core/request-control.js';
 import { executeJessicaStatusTask } from '../../../../../agents/jessica-vacuum/lib/task.js';
 import { resolveTrustedIdentity } from '../../../../../agents/jessica-vacuum/lib/identity.js';
-import { createResponseEnvelope, createResponseV3Envelope } from '../../core/legacy-response.js';
-import { validateDomainResult } from '../../core/domain-result.js';
+import { createResponseEnvelope, createResponseV4Envelope } from '../../core/legacy-response.js';
+import { validateDomainResultEnvelope } from '../../core/domain-result.js';
 import { createJessicaTaskToolFactory } from '../../../plugins/benson-jessica-tool/src/tool.js';
 import { loadPolicy, authorize } from '../../../../../agents/jessica-vacuum/lib/policy.js';
 import { DomainError } from '../../../../../agents/jessica-vacuum/lib/errors.js';
 import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.js';
 import { renderJessicaDomainResult } from '../../../../../agents/jessica-vacuum/lib/presentation.js';
+import { runReminderNativeTask } from '../../../plugins/benson-reminder-tool/src/completion.js';
+import { createReminderTaskToolFactory, createReminderToolFactory } from '../../../plugins/benson-reminder-tool/src/tool.js';
+import { loadIdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
+import { renderReminderDomainResult } from '../../../../../agents/reminder-service/lib/presentation.js';
 import { plain, boundedCopy } from '../../core/value.js';
-import { isolated, worker, writeReport } from './native-correlation.js';
+import { isolated, worker, writeReport, registerCompletionV6Proof, REMINDER_CREATE_TEXT, JESSICA_MUTATION_TEXT, REMINDER_DELETE_TEXT } from './native-correlation.js';
+import type { Binding6 } from '../../core/completion-contracts.js';
+import { validateCompletion } from '../../core/completion.js';
+import type { CurrentRequestEvidence, CurrentRequestProjection } from '../../core/conversation-context.js';
+import { schemaForTool } from '../../../../../agents/reminder-service/lib/tool-contracts.js';
+import type { Dependencies } from '../../../../../agents/reminder-service/lib/service.js';
 
 type Dispatch = OpenClawPluginApi['runtime']['channel']['reply']['dispatchReplyFromConfig'];
 type Dispatcher = Parameters<Dispatch>[0]['dispatcher'];
@@ -60,9 +69,14 @@ if (monitorOnly && transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled !== t
 }
 
 type BusinessProof = {
-  clock: Date; reads: number; guards: (() => void)[];
-  results: ReturnType<typeof validateDomainResult>[];
-  calls: { callId: string; runId: string | undefined }[];
+  responseSchemaVersion?: 4; clock: Date; reads: number; guards: (() => void)[];
+  results: ReturnType<typeof validateDomainResultEnvelope>[];
+  calls: { callId: string; runId: string | undefined; sessionId: string; sessionKey: string }[];
+  agenticActive: boolean; reminderActive: boolean; agenticCurrent?: () => void;
+  directCase: string; directCurrent?: () => void;
+  directRuns: Map<string, NonNullable<ReturnType<typeof registerCompletionV6Proof>>['runDirect']>;
+  completion?: { binding: Binding6; backendReads: number; negativeEvidenceCases: number };
+  createActive: boolean; mutationActive: boolean; reminderOperation: 'create' | 'delete'; createSource?: CurrentRequestEvidence;
 };
 
 // Fixture consumer of the approved additive contract, not a business grant.
@@ -104,9 +118,23 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
   for (const [index, name] of ['success-and-duplicate', 'rejection', 'missing-binding', 'foreign-account',
     'disallowed-sender', 'retired-binding', 'model-fallback', 'cancel-after-resolution',
     ...installerOnly ? ['main-domain-read', 'direct-read', 'direct-read-failure', 'direct-denied', 'direct-revoked-read', 'direct-cancel-read',
-      'direct-destination-changed', 'direct-duplicate', 'direct-payload-changed', 'direct-missing-authority'] : []].entries()) {
-    const domainRead = name === 'main-domain-read';
-    const directRead = name.startsWith('direct-');
+      'direct-destination-changed', 'direct-duplicate', 'direct-payload-changed', 'direct-missing-authority', 'main-domain-agentic', 'main-reminder-read',
+      'direct-agentic-read', 'direct-agentic-cancel', 'main-reminder-create', 'main-jessica-mutation', 'main-reminder-delete'] : []].entries()) {
+    const mutation = name === 'main-jessica-mutation';
+    const agentic = name === 'main-domain-agentic' || mutation;
+    business.mutationActive = mutation;
+    const reminderDelete = name === 'main-reminder-delete';
+    const reminderCreate = name === 'main-reminder-create' || reminderDelete;
+    business.reminderOperation = reminderDelete ? 'delete' : 'create';
+    const reminder = name === 'main-reminder-read' || reminderCreate;
+    business.createActive = reminderCreate;
+    const domainRead = name === 'main-domain-read' || agentic || reminder;
+    business.agenticActive = agentic && !mutation;
+    business.reminderActive = reminder;
+    if (domainRead) { business.reads = 0; business.guards.length = 0; business.results.length = 0; business.calls.length = 0; }
+    const directAgentic = name.startsWith('direct-agentic-');
+    business.directCase = directAgentic ? name : '';
+    const directRead = name.startsWith('direct-') && !directAgentic;
     const accountId = `fixture-${index}`;
     const authDir = `/tmp/empty-fixture-auth/${accountId}`;
     const requestId = `native-monitor-${name}`;
@@ -122,6 +150,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     let sockets = 0, runId = '';
     let handoff: ReturnType<typeof readNativeHandoff> | undefined;
     let directEvidence: unknown;
+    let requestDecision: unknown;
     const terminalOutcomes: string[] = [];
     let emitSocket: (event: string, payload: unknown) => void = () => { throw new Error('Socket not created'); };
     ev.on('newListener', event => { if (event === 'connection.update') queueMicrotask(() => ev.emit('connection.update', { connection: 'open' })); });
@@ -147,6 +176,74 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
         assert.equal(ctx.From, '+15550000001'); assert.equal(ctx.To, '+15550000002');
         assert.equal(ctx.SessionKey, 'agent:main:main'); assert.equal(ctx.MessageSid, requestId);
         phases.push('controller-created');
+        if (directAgentic) {
+          let delivery: ReturnType<typeof createDirectAgenticResponseDelivery> | undefined;
+          let executionLive = false;
+          const policy = loadPolicy({ version: '1', defaultDecision: 'deny', rules:
+            [{ subject: 'reader', actionClass: 'read', deviceScope: 'jessica-vacuum', decision: 'allow' }] });
+          const assertNativeCurrent = () => {
+            isolated(); abort.signal.throwIfAborted(); assert(handoff); handoff.assertCurrent();
+            assert.equal(readAuthority?.(), true); assert.equal(channel.runtimeContexts.get(key), binding);
+          };
+          return Object.freeze({
+            beforeNativeDeliver(payload: ReplyPayload, info: { kind: string }) {
+              const approved = delivery?.beforeNativeDeliver(payload, info) ?? null;
+              if (approved) assert.equal(delivery?.beforeNativeDeliver(payload, info), null);
+              return approved;
+            },
+            async resolve(_resolveOriginal: () => Promise<unknown>, rawHandoff: unknown) {
+              phases.push('resolver-start');
+              try {
+                handoff = readNativeHandoff(rawHandoff, ctx); assertNativeCurrent();
+                const native = handoff.ctx;
+                assert.equal(native.RawBody, 'G3_DIRECT_READ_AGENTIC');
+                const identity = resolveTrustedIdentity({ channel: 'whatsapp', accountId, to: String(native.From),
+                  senderId: String(native.SenderId) }, { accountId, approvedIds: ['reader'],
+                  subjectForRoute: route => route === '+15550000001' ? 'reader' : null });
+                const assertAuthorized = () => { assertNativeCurrent(); authorize(policy, identity, 'read'); };
+                const controller = createNativeDispatchRunAdmissionController({
+                  nativeDispatch: { requestId, domain: 'jessica-vacuum', subject: identity.senderId },
+                  assertCurrent() { assert(executionLive, 'Run scope retired'); assertAuthorized(); }, now: () => Date.now(),
+                });
+                executionLive = true;
+                const admission = controller.admit({ schemaVersion: 4, kind: 'benson.source-input',
+                  domain: 'jessica-vacuum', scope: 'read', request: native.RawBody });
+                business.directCurrent = () => controller.assertCurrent(admission);
+                const run = business.directRuns.get(name); assert(run);
+                const result = await run(admission, identity, { signal: handoff.abortSignal,
+                  assertCurrent: () => controller.assertCurrent(admission) });
+                assert(business.completion); const completion = business.completion;
+                assert.equal(completion.binding.caller, null);
+                assert.equal(completion.binding.completionTarget, 'RESPONSE_CONTROLLER');
+                assert.equal(completion.binding.inputId, requestId); assert.equal(result.effects.status, 'none');
+                executionLive = false; assert.throws(() => controller.assertCurrent(admission), /Run scope retired/);
+                business.clock = new Date();
+                const source = { type: 'direct' as const, executionMode: 'agentic' as const,
+                  agentId: 'jessica-vacuum', runId: completion.binding.runId };
+                const response = createResponseV4Envelope({ messageCandidate: null }, { requestId, source, results: [result],
+                  lifecycle: { domainExecution: 'attempted', failure: null },
+                  responsePolicy: { preferredMode: 'deterministic', allowedModes: ['deterministic'] } });
+                delivery = createDirectAgenticResponseDelivery({ mode: 'native-resolver', requestId, agentId: source.agentId,
+                  admission, runId: () => completion.binding.runId, assertCurrent: assertAuthorized, responseFor: () => response,
+                  presentation: { language: 'he', get now() { return business.clock.toISOString(); }, timezone: 'Asia/Jerusalem',
+                    renderDomainResult: renderJessicaDomainResult,
+                    assertResponseCurrent(value) {
+                      assertAuthorized(); assert.equal(business.completion, completion);
+                      assert.deepEqual(boundedCopy(value.source), boundedCopy(source)); assert.deepEqual(value.results, [result]);
+                    } },
+                });
+                directEvidence = { responseSchemaVersion: response.schemaVersion, admission, result, completion, originalResolverCalls: 0, runScopeRetired: true };
+                if (name === 'direct-agentic-cancel') abort.abort();
+                return await delivery.resolveNativeCandidate({ signal: handoff.abortSignal,
+                  resolve: async () => { assert(result.content?.state === 'usable'); return { text: result.content.text }; },
+                  copyMetadata: (source, approved) => copyReplyPayloadMetadata(source as ReplyPayload, approved) });
+              } catch (error) {
+                directEvidence = { ...(plain(directEvidence) ? directEvidence : {}), rejected: true };
+                errors.push(String(error)); throw error;
+              } finally { executionLive = false; phases.push('controller-settled'); resolved.resolve(); }
+            },
+          });
+        }
         if (directRead) {
           // This fixture qualifies admission/Response integration for an explicitly
           // bound status capability. It does not classify text or prove Decision.
@@ -193,7 +290,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
                 executionLive = true;
                 const admission = controller.admit({ schemaVersion: 3, kind: 'benson.source-input', domain: 'jessica-vacuum',
                   scope: 'read', request: JSON.stringify({ operation: 'status' }) });
-                let result: ReturnType<typeof validateDomainResult>;
+                let result: ReturnType<typeof validateDomainResultEnvelope>;
                 try {
                   result = await executeJessicaStatusTask({ controller, admission }, { operation: 'status' }, {
                     identity, clock: () => business.clock,
@@ -221,7 +318,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
                 const source = { type: 'direct' as const, executionMode: 'deterministic' as const, agentId: 'jessica-vacuum',
                   admission: { authorityKind: 'native-dispatch' as const, requestId: admission.requestId,
                     domain: admission.domain, subject: admission.authority.subject } };
-                const response = createResponseV3Envelope({ messageCandidate: null }, { requestId, source, results: [result],
+                const response = createResponseV4Envelope({ messageCandidate: null }, { requestId, source, results: [result],
                   lifecycle: { domainExecution: 'attempted', failure: null },
                   responsePolicy: { preferredMode: 'deterministic', allowedModes: ['deterministic'] } });
                 delivery = createDirectReadResponseDelivery({ mode: 'native-resolver', requestId, agentId: 'jessica-vacuum', admission,
@@ -230,7 +327,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
                     renderDomainResult: renderJessicaDomainResult,
                     assertResponseCurrent(value) { assertAuthorized(); assert.deepEqual(boundedCopy(value.source), boundedCopy(source)); assert.deepEqual(value.results, [result]); } },
                 });
-                directEvidence = { reads, result, admission: source.admission, readScopeRetired: true, originalResolverCalls: 0 };
+                directEvidence = { responseSchemaVersion: response.schemaVersion, reads, result, admission: source.admission, readScopeRetired: true, originalResolverCalls: 0 };
                 const prepared = await delivery.resolveNativeCandidate({ signal: handoff.abortSignal,
                   resolve: async () => { assert(result.content?.state === 'usable'); return { text: result.content.text }; },
                   copyMetadata: (source, approved) => copyReplyPayloadMetadata(source as ReplyPayload, approved) });
@@ -247,40 +344,54 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
           });
         }
         const original = replyOptions.onAgentRunStart;
-        replyOptions.onAgentRunStart = (id: string) => { runId = id; if (typeof original === 'function') original(id); };
+        replyOptions.onAgentRunStart = (id: string) => {
+          if (name === 'main-domain-read') { assert(requestDecision); phases.push('main-started'); }
+          runId = id; if (typeof original === 'function') original(id);
+        };
         replyOptions.disableTools = !domainRead;
         const originalTerminal = replyOptions.onAgentRunTerminalOutcome;
         replyOptions.onAgentRunTerminalOutcome = (outcome: string) => {
           terminalOutcomes.push(outcome); if (typeof originalTerminal === 'function') originalTerminal(outcome);
         };
-        const delivery = createMainResponseDelivery({ mode: 'native-resolver', requestId, agentId: 'main', runId: () => runId,
-          assertCurrent: () => { isolated(); abort.signal.throwIfAborted(); assert.notEqual(name, 'rejection');
+        const assertMainCurrent = () => { isolated(); abort.signal.throwIfAborted(); assert.notEqual(name, 'rejection');
             assert(handoff); handoff.assertCurrent();
             if (installerOnly) assert.equal(readAuthority?.(), true, 'Native plugin authority must remain current at Controller boundaries');
-            assert(channel.runtimeContexts.get(key) === binding, 'Controller binding must remain current'); },
+            assert(channel.runtimeContexts.get(key) === binding, 'Controller binding must remain current'); };
+        if (agentic) business.agenticCurrent = () => {
+          assertMainCurrent(); assert(handoff); assert.equal(handoff.ctx.MessageSid, requestId);
+          assert.equal(handoff.ctx.AccountId, accountId); assert.equal(handoff.ctx.SessionKey, 'agent:main:main');
+        };
+        const delivery = createMainResponseDelivery({ mode: 'native-resolver', requestId, agentId: 'main', runId: () => runId,
+          assertCurrent: assertMainCurrent,
           responseFor: raw => {
             assert(plain(raw)); assert.equal(typeof raw.text, 'string');
             if (domainRead) {
               assert.deepEqual(terminalOutcomes, ['completed']);
               assert.equal(business.calls.length, 1); assert.equal(business.calls[0]?.runId, runId);
               assert.equal(business.results.length, 1); assert.equal(business.reads, 1);
-              return createResponseV3Envelope({ messageCandidate: null }, { requestId,
+              const response = createResponseV4Envelope({ messageCandidate: null }, { requestId,
                 source: { type: 'main', agentId: 'main', runId }, results: business.results,
                 lifecycle: { domainExecution: 'attempted', failure: null },
                 responsePolicy: { preferredMode: 'deterministic', allowedModes: ['deterministic'] } });
+              business.responseSchemaVersion = response.schemaVersion; return response;
             }
             return createResponseEnvelope({ messageCandidate: { text: raw.text as string, language: 'en' } }, {
               requestId, source: { type: 'main', agentId: 'main', runId }, status: 'success', results: [], pendingContext: null,
               provenance: { executionVerified: 'not_applicable', completionCorrelated: false }, lifecycle: { domainExecution: 'none', failure: null },
               responsePolicy: { preferredMode: 'pass_through', allowedModes: ['pass_through', 'safe_failure'] },
             });
-          }, presentation: { language: domainRead ? 'he' : 'en', now: business.clock.toISOString(), timezone: 'Asia/Jerusalem',
-            renderDomainResult: renderJessicaDomainResult,
+          }, presentation: { language: domainRead ? 'he' : 'en', get now() { return business.clock.toISOString(); }, timezone: 'Asia/Jerusalem',
+            renderDomainResult: reminder ? renderReminderDomainResult : renderJessicaDomainResult,
             assertResponseCurrent(response) {
               assert(domainRead); assert.equal(response.requestId, requestId);
               assert.equal(response.source.type, 'main'); assert.equal(response.source.runId, runId);
               assert.deepEqual(response.results, business.results); assert.equal(business.results.length, 1);
-              assert.equal(response.results[0]?.evidence.observations[0]?.ref, business.calls[0]?.callId);
+              if (agentic || reminderCreate) {
+                assert(business.completion); assert.equal(business.completion.binding.caller?.runId, runId);
+                assert.equal(business.completion.binding.taskId, business.calls[0]?.callId);
+                assert.equal(business.completion.binding.inputId, requestId);
+                assert.equal(response.results[0]?.executionMode, 'agentic');
+              } else assert.equal(response.results[0]?.evidence.observations[0]?.ref, business.calls[0]?.callId);
               assert.deepEqual(terminalOutcomes, ['completed']);
             } },
         });
@@ -289,6 +400,61 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
             phases.push('resolver-start');
             try {
               handoff = readNativeHandoff(rawHandoff, ctx);
+              if (reminderCreate || mutation) {
+                assertMainCurrent();
+                business.createSource = { request: String(handoff.ctx.RawBody),
+                  binding: { conversationRef: String(handoff.ctx.SessionKey), channel: 'whatsapp', accountId,
+                    kind: 'direct', peerId: String(handoff.ctx.From), threadId: null, requesterId: String(handoff.ctx.SenderId) },
+                  currentTurn: () => { assertMainCurrent(); assert(handoff); return { entryId: String(handoff.ctx.MessageSid), role: 'user', text: String(handoff.ctx.RawBody),
+                    sender: { source: 'canonical_peer_binding', id: String(handoff.ctx.SenderId), channel: 'whatsapp', accountId }, inputProvenance: { kind: 'external_user' } }; },
+                  assertCurrent: assertMainCurrent,
+                  assertAuthorized(turn) { assertMainCurrent(); assert.equal(turn.sender?.id, '+15550000001'); },
+                };
+              }
+              if (name === 'main-domain-read') {
+                assertMainCurrent();
+                const currentMessage = handoff.ctx.RawBody;
+                assert.equal(typeof currentMessage, 'string'); assert.equal(currentMessage, 'G3_MAIN_READ_JESSICA');
+                const projected = projectRequestAdmission({ schemaVersion: 1, kind: 'candidate', reason: null,
+                  requestId: handoff.ctx.MessageSid, sessionKey: handoff.ctx.SessionKey, request: currentMessage });
+                assert.equal(projected.kind, 'candidate'); assert(projected.kind === 'candidate');
+                phases.push('request-candidate');
+                // Load the existing owners read-only; this fixture installs no
+                // Decision provider, policy or production admission issuer.
+                const classificationUrl = 'file:///routing/classification.mjs', policyUrl = 'file:///routing/policy.mjs';
+                const classification = await import(classificationUrl) as {
+                  classifyCurrentMessage(options: { currentMessage: string; rubric: unknown; signal: AbortSignal;
+                    evaluate: OpenClawPluginApi['runtime']['decisions']['evaluate'] }): Promise<unknown>;
+                };
+                const policy = await import(policyUrl) as { evaluateRouting(outcome: unknown): unknown };
+                let calls = 0, nativeDecision: unknown;
+                const outcome = await classification.classifyCurrentMessage({ currentMessage: projected.taskEnvelope.request,
+                  rubric: JSON.parse(readFileSync('/routing/rubric.json', 'utf8')) as unknown,
+                  signal: AbortSignal.any([abort.signal, handoff.abortSignal]),
+                  evaluate: async (batch, options) => {
+                    assertMainCurrent(); assert.equal(++calls, 1); assert(plain(batch.state));
+                    assert.deepEqual(Object.keys(batch.state).sort(), ['currentMessage', 'kind', 'rubric', 'version']);
+                    assert.equal(batch.state.kind, 'benson.routing.classifier-input'); assert.equal(batch.state.version, 1);
+                    assert.equal(batch.state.currentMessage, currentMessage);
+                    try {
+                      const result = await api.runtime.decisions.evaluate(batch, options);
+                      nativeDecision = result.status === 'unavailable' ? { status: result.status, reason: result.reason } : { status: result.status };
+                      assertMainCurrent(); return result;
+                    } catch (error) {
+                      nativeDecision = error instanceof Error ? { name: error.name, message: error.message.slice(0, 300) } : { error: 'non-error rejection' };
+                      throw error;
+                    }
+                  } });
+                assertMainCurrent(); assert.equal(calls, 1); assert(plain(outcome));
+                assert.equal(outcome.kind, 'unavailable');
+                assert(['disabled', 'not_configured'].includes(String(outcome.reason)),
+                  `Only native disabled/unconfigured Decision is accepted here: ${JSON.stringify({ outcome, nativeDecision })}`);
+                const routing = policy.evaluateRouting(outcome); assert(plain(routing));
+                assert.equal(routing.route, 'main'); assert.equal(routing.eligible, false);
+                assert.equal(routing.reason, 'classifier_unavailable');
+                requestDecision = { requestId: projected.trusted.requestId, calls, classification: outcome, routing, nativeDecision };
+                phases.push('decision-settled');
+              }
               return await delivery.resolveNativeCandidate({ resolve: async () => {
                 const candidate = await resolve();
                 phases.push('native-candidate');
@@ -325,38 +491,40 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
       await Promise.race([deadline, connected.promise, monitor.then(() => { throw new Error('Monitor stopped before connection'); })]);
       assert.equal(existsSync(`${authDir}/creds.json`), false);
       const incoming = { type: 'notify', messages: [{ key: { remoteJid: `${name === 'disallowed-sender' ? '15550000003' : '15550000001'}@s.whatsapp.net`, id: requestId, fromMe: false },
-        message: { conversation: domainRead ? 'G3_MAIN_READ_JESSICA' : name === 'model-fallback' ? 'G3_TERMINAL_NATIVE_FALLBACK' : 'G3_BOUNDED_SUCCESS' },
+        message: { conversation: mutation ? JESSICA_MUTATION_TEXT : reminderDelete ? REMINDER_DELETE_TEXT : reminderCreate ? REMINDER_CREATE_TEXT : directAgentic ? 'G3_DIRECT_READ_AGENTIC' : domainRead ? reminder ? 'G3_MAIN_READ_REMINDER' : agentic ? 'G3_MAIN_READ_JESSICA_AGENTIC' : 'G3_MAIN_READ_JESSICA' : name === 'model-fallback' ? 'G3_TERMINAL_NATIVE_FALLBACK' : 'G3_BOUNDED_SUCCESS' },
         messageTimestamp: Math.floor(Date.now() / 1000), pushName: 'Fixture sender' }] };
       emitSocket('messages.upsert', incoming);
-      const allowed = domainRead || name === 'direct-read' || name === 'direct-read-failure' || name === 'direct-duplicate' || name === 'success-and-duplicate' || name === 'model-fallback';
+      const allowed = domainRead || name === 'direct-agentic-read' || name === 'direct-read' || name === 'direct-read-failure' || name === 'direct-duplicate' || name === 'success-and-duplicate' || name === 'model-fallback';
       if (allowed) {
         await Promise.race([deadline, accepted.promise,
           resolved.promise.then(() => { assert.deepEqual(errors, [], 'Controller resolution failed'); return accepted.promise; }),
           monitor.then(() => { throw new Error('Monitor stopped before delivery'); })]);
-        if (name === 'success-and-duplicate' || name === 'direct-duplicate') emitSocket('messages.upsert', incoming);
+        if (name === 'success-and-duplicate' || name === 'direct-duplicate' || reminderCreate || mutation) emitSocket('messages.upsert', incoming);
       } else if (!['missing-binding', 'foreign-account', 'disallowed-sender'].includes(name)) {
         await Promise.race([deadline, resolved.promise]);
       }
-      if (name !== 'cancel-after-resolution' && name !== 'direct-cancel-read') {
+      if (!['cancel-after-resolution', 'direct-cancel-read', 'direct-agentic-cancel'].includes(name)) {
         const controller = channel.runtimeContexts.get({ channelId: 'whatsapp', accountId, capability: 'connection-controller' }) as { getActiveListener(): { close(): Promise<void> } };
         assert(controller); await Promise.race([deadline, controller.getActiveListener().close()]);
       } else await Promise.race([deadline, monitor]);
       assert.equal(contexts.length, ['missing-binding', 'foreign-account', 'disallowed-sender'].includes(name) ? 0 : 1,
         JSON.stringify({ name, sends, statuses, sockets })); assert.equal(sends.length, allowed ? 1 : 0, name);
       if (allowed) {
-        const content = domainRead ? business.results[0]?.content : directRead && plain(directEvidence) && plain(directEvidence.result) ? validateDomainResult(directEvidence.result).content : null;
+        const content = domainRead ? business.results[0]?.content : (directRead || directAgentic) && plain(directEvidence) && plain(directEvidence.result) ? validateDomainResultEnvelope(directEvidence.result).content : null;
         if (directRead) assert(content?.state === 'usable');
-        if (domainRead) assert(content?.state === 'usable');
+        if (domainRead && !reminderCreate && !mutation) assert(content?.state === 'usable');
+        const created = mutation ? renderJessicaDomainResult(business.results[0]!, { language: 'he', now: business.clock.toISOString() }) : reminderCreate ? renderReminderDomainResult(business.results[0]!, { language: 'he', timezone: 'Asia/Jerusalem', now: business.clock.toISOString() }) : null;
+        if (created) assert.equal(created.kind, 'rendered');
         assert.deepEqual(sends, [{ jid: '15550000001@s.whatsapp.net',
-          text: content?.state === 'usable' ? content.text : 'Native Main fixture reply.' }]);
+          text: created?.kind === 'rendered' ? created.text : content?.state === 'usable' ? content.text : 'Native Main fixture reply.' }]);
       }
       if (domainRead) {
         assert.equal(business.guards.length, 1);
         assert.throws(business.guards[0]!, 'Retained native invocation must expire after the Main turn');
         assert.notEqual(sends[0]?.text, 'Fixture finished.', 'Model wording must not replace domain facts');
       }
-      if (contexts.length && !directRead) assert(runId, name);
-      if (directRead) { assert.equal(runId, ''); assert.deepEqual(terminalOutcomes, []); }
+      if (contexts.length && !directRead && !directAgentic) assert(runId, name);
+      if (directRead || directAgentic) { assert.equal(runId, ''); assert.deepEqual(terminalOutcomes, []); }
     } finally {
       clearTimeout(timer!); abort.abort();
       try { await monitor; } finally { lease?.dispose(); delete transportGlobal[transportSlot]; }
@@ -370,9 +538,10 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     assert.equal(existsSync(`${authDir}/creds.json`), false);
     cases.push({ name, sends, contexts, runId, sockets, phases, errors, stopped: true, leasesReleased: true,
       nativeHandoffReceived: handoff !== undefined,
-      ...directRead ? { direct: directEvidence ?? { rejected: true } } : {},
-      ...domainRead ? { business: { reads: business.reads, results: business.results, calls: business.calls,
-        expiredInvocationBlocked: true, terminalOutcomes } } : {} });
+      ...(directRead || directAgentic) ? { direct: directEvidence ?? { rejected: true } } : {},
+      ...domainRead ? { business: { responseSchemaVersion: business.responseSchemaVersion, reads: business.reads, results: business.results.slice(), calls: business.calls.slice(),
+        ...requestDecision ? { requestDecision } : {},
+        expiredInvocationBlocked: true, terminalOutcomes, ...(agentic || reminderCreate) ? { completion: business.completion } : {} } } : {} });
   }
   let nativeInstall: unknown;
   if (installerOnly) {
@@ -411,12 +580,41 @@ export default {
   id: 'benson-jessica-tool',
   register(api: OpenClawPluginApi) {
     isolated();
-    const business: BusinessProof = { clock: new Date(), reads: 0, guards: [], results: [], calls: [] };
+    const business: BusinessProof = { clock: new Date(), reads: 0, guards: [], results: [], calls: [], agenticActive: false, reminderActive: false,
+      directCase: '', directRuns: new Map(), createActive: false, mutationActive: false, reminderOperation: 'create' };
     if (installerOnly) {
+      const agenticCreate = registerCompletionV6Proof(api, { resultVersion: 3,
+        active: () => business.agenticActive, accountId: 'fixture-18', route: '+15550000001',
+        parentSessionKey: 'agent:main:main', requestId: 'native-monitor-main-domain-agentic',
+        assertCurrent() { assert(business.agenticActive && business.agenticCurrent); business.agenticCurrent(); },
+        onCompletion({ guard, ...proof }) {
+          business.completion = proof; business.reads = proof.backendReads;
+          business.guards.push(guard); business.clock = new Date();
+        },
+      });
+      assert(agenticCreate);
+      const mutationCreate = registerCompletionV6Proof(api, { resultVersion: 3,
+        active: () => business.mutationActive, accountId: 'fixture-23', route: '+15550000001',
+        parentSessionKey: 'agent:main:main', requestId: 'native-monitor-main-jessica-mutation',
+        assertCurrent() { assert(business.mutationActive && business.agenticCurrent); business.agenticCurrent(); },
+        mutation: { source() { assert(business.createSource); return business.createSource; } },
+        onCompletion({ guard, ...proof }) { business.completion = proof; business.reads = proof.backendReads; business.guards.push(guard); business.clock = new Date(); },
+      }); assert(mutationCreate);
+      for (const [offset, name] of ['direct-agentic-read', 'direct-agentic-cancel'].entries()) {
+        const direct = registerCompletionV6Proof(api, { resultVersion: 3,
+          active: () => business.directCase === name, accountId: `fixture-${20 + offset}`, route: '+15550000001',
+          parentSessionKey: 'agent:main:main', requestId: `native-monitor-${name}`,
+          assertCurrent() { assert(business.directCase === name && business.directCurrent); business.directCurrent(); },
+          onCompletion({ guard: _guard, ...proof }) { business.completion = proof; },
+        });
+        assert(direct); business.directRuns.set(name, direct.runDirect);
+      }
       api.on('before_tool_call', (event, context) => {
-        assert.equal(event.toolName, 'jessica_task'); assert(context.runId && context.toolCallId);
+        if (event.toolName === 'jessica_execute' || event.toolName === 'jessica_read' || event.toolName === 'benson_reminder_create' || event.toolName === 'benson_reminder_delete') return;
+        assert(['jessica_task', 'reminder_task'].includes(event.toolName)); assert(context.runId && context.toolCallId);
         assert.equal(event.runId, context.runId); assert.equal(event.toolCallId, context.toolCallId);
-        business.calls.push({ callId: context.toolCallId, runId: context.runId });
+        assert(context.sessionId && context.sessionKey);
+        business.calls.push({ callId: context.toolCallId, runId: context.runId, sessionId: context.sessionId, sessionKey: context.sessionKey });
       });
       const policy = loadPolicy({ version: '1', defaultDecision: 'deny', rules: ['read', 'control'].map(actionClass => ({
         subject: 'reader', actionClass, deviceScope: 'jessica-vacuum', decision: 'allow' })) });
@@ -432,21 +630,140 @@ export default {
             data: { kind: 'status', observedAt: at, sourceUpdatedAt: at, freshness: 'fresh', state: 'docked', batteryLevel: 100,
               activeSegments: [], currentSegment: null }, warnings: [], error: null, pendingContext: null }, null, business.clock);
         }, jsonResult(raw) {
-          const value = validateDomainResult(raw);
+          const value = validateDomainResultEnvelope(raw);
           return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
         } });
+      let reminderGuard: () => void = () => { throw new Error('Reminder invocation unavailable'); };
+      const reminderCreate = createReminderTaskToolFactory({
+        identities: loadIdentityContract({ accountId: 'fixture-19', trustedRequesterIds: ['reader'],
+          recipients: [{ id: 'reader', type: 'person', channel: 'whatsapp', to: '+15550000001' }] }),
+        clock: () => business.clock,
+        transaction: { async execute(request) {
+          reminderGuard(); assert.equal(request.operation, 'list-reminders'); assert.equal(request.requesterId, 'reader');
+          await Promise.resolve(); reminderGuard(); business.reads++;
+          const matches = [1, 2, 3].map(index => ({ schemaVersion: 4, reminderId: `native-reminder-${index}`,
+            status: 'active', content: `Native reminder ${index}`, schedules: [{ type: 'one-shot',
+              resolvedTime: '2026-11-02T10:00:00+02:00', timezone: 'Asia/Jerusalem' }] }));
+          return { status: 'success', operation: 'list', verified: true, matchCount: matches.length, matches, warnings: [] };
+        } },
+        jsonResult(value) { return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; },
+      });
+      function reminderMutationFactory(operation: 'create' | 'delete', accountId: string) {
+      const active = () => business.createActive && business.reminderOperation === operation;
+      const toolName = operation === 'create' ? 'benson_reminder_create' : 'benson_reminder_delete';
+      const reminderId = operation === 'create' ? 'isolated-created' : 'isolated-existing';
+      const createIdentities = loadIdentityContract({ accountId, trustedRequesterIds: ['reader'],
+        recipients: [{ id: 'reader', type: 'person', channel: 'whatsapp', to: '+15550000001' }] });
+      let createWork: { callId: string; source: CurrentRequestProjection; deps: Dependencies } | undefined;
+      let createChild: { runId: string; callId: string; sessionId: string; sessionKey: string; guard: () => void;
+        value: unknown } | undefined;
+      let createAfter: { runId: string | undefined; callId: string | undefined; value: unknown; error: string | undefined } | undefined;
+      let createHook: { runId: string; callId: string; sessionId: string; sessionKey: string } | undefined;
+      let createTerminal: { runId: string | undefined; sessionId: string | undefined; sessionKey: string; success: boolean; messages: unknown[] } | undefined;
+      const createSessionKey = `agent:reminder-service:subagent:${randomUUID()}`;
+      api.on('before_tool_call', (event, ctx) => {
+        if (!active() || event.toolName !== toolName) return;
+        assert.equal(createHook, undefined); assert(ctx.runId && ctx.toolCallId && ctx.sessionId && ctx.sessionKey);
+        assert.equal(event.runId, ctx.runId); assert.equal(event.toolCallId, ctx.toolCallId);
+        createHook = { runId: ctx.runId, callId: ctx.toolCallId, sessionId: ctx.sessionId, sessionKey: ctx.sessionKey };
+      });
+      api.on('after_tool_call', (event, ctx) => {
+        if (active() && event.toolName === toolName) createAfter = { runId: ctx.runId, callId: ctx.toolCallId, value: event.result, error: event.error };
+      });
+      api.on('agent_end', (event, ctx) => {
+        if (ctx.sessionKey === createSessionKey) createTerminal = { runId: ctx.runId, sessionId: ctx.sessionId, sessionKey: ctx.sessionKey, success: event.success, messages: event.messages };
+      });
+      const createTask = createReminderTaskToolFactory({ resultVersion: 3, identities: createIdentities, clock: () => new Date(),
+        transaction: { async execute(request, authority) {
+          authority.assertCurrent(); assert.equal(request.operation, operation === 'create' ? 'create-intent' : 'delete-reminder'); await Promise.resolve(); authority.assertCurrent();
+          assert(createWork);
+          if (request.operation === 'create-intent') { assert(!('items' in request.input)); assert.equal(request.input.provenance?.currentEvidenceId, createWork.source.context.current.entryId); }
+          else { assert(request.operation === 'delete-reminder'); assert.equal(request.reminderId, reminderId); }
+          business.reads++;
+          return { status: 'success', operation, transaction: { status: 'success', verified: true },
+            data: { reminderIds: [reminderId], ...(operation === 'delete' ? { padding: ['א'.repeat(10000), 'x'.repeat(10000)] } : {}),
+              record: { reminderId, status: operation === 'create' ? 'active' : 'deleted',
+              content: request.operation === 'create-intent' && !('items' in request.input) ? request.input.content : 'existing reminder',
+              ...(request.operation === 'create-intent' && !('items' in request.input) ? { schedule: request.input.schedule, calendar: request.input.calendar } : {}) } }, transport: { deliveries: [] }, warnings: [] };
+        } },
+        jsonResult(value) { return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; },
+        task: {
+          source() { assert(active() && business.createSource); return business.createSource; },
+          async run(_request, work) {
+            assert.equal(createWork, undefined); createWork = work; work.deps.authority.assertCurrent();
+            const parent = business.calls.find(call => call.callId === work.callId); assert(parent?.runId);
+            const now = new Date(), inputId = work.source.context.current.entryId, text = work.source.context.current.text;
+            const input = { sourceConversation: { type: work.deps.route.sourceType, id: work.deps.route.sourceId }, requesterId: work.deps.route.requesterId,
+              recipientIds: [work.deps.route.requesterId], content: 'drink water', schedule: { type: 'one-shot', resolvedTime: '2026-11-02T10:00:00+02:00', timezone: 'Asia/Jerusalem' }, calendar: { requested: false },
+              provenance: { schemaVersion: 1, contextId: work.source.context.conversation.conversationRef, revision: 1,
+                createdAt: now.toISOString(), expiresAt: new Date(now.getTime() + 300_000).toISOString(),
+                sourceConversation: { type: work.deps.route.sourceType, id: work.deps.route.sourceId }, requesterId: work.deps.route.requesterId,
+                currentEvidenceId: inputId, evidence: [{ id: inputId, text }], fieldEvidence: [
+                  { field: 'content', evidenceId: inputId, quote: 'drink water' }, { field: 'schedule', evidenceId: inputId, quote: 'November 2 at 10:00' },
+                  { field: 'calendar.requested', evidenceId: inputId, quote: 'without a calendar event' }] } };
+            writeFileSync(`/tmp/reminder-${operation}-input.json`, JSON.stringify(operation === 'create' ? { input } : { requesterId: work.deps.route.requesterId, reminderId }), { mode: 0o600 });
+            const normalized = await runReminderNativeTask(_request, work, { runtime: api.runtime.subagent,
+              toolsAlsoAllow: [toolName], resultVersion: 3,
+              sessionKey: createSessionKey, message: `${operation === 'create' ? 'G3_REMINDER_CREATE_CHILD' : 'G3_REMINDER_DELETE_CHILD'} ${JSON.stringify({ input })}`,
+              caller: { runId: parent.runId, agentId: 'main', sessionKey: parent.sessionKey, sessionId: parent.sessionId },
+              observe() {
+                assert(createChild && createTerminal && createAfter);
+                const child = createChild; assert.throws(child.guard, 'Retired child invocation is not a live grant');
+                const effects = [{ kind: `reminder-${operation}`, reminderId, verified: true }];
+                return { operation: operation === 'create' ? 'create-intent' : 'delete-reminder',
+                  tool: { ...child, name: toolName }, after: createAfter, terminal: createTerminal,
+                  effects: { status: 'known', refs: [reminderId], details: effects, reconciliation: { required: false, reason: null } }, uncertainty: [],
+                  custody: { assertCurrent() { work.deps.authority.assertCurrent(); assert.equal(createWork, work); assert.equal(createChild, child); } } };
+              },
+            });
+            assert.equal(normalized.completion.completion.outcome, 'NORMAL');
+            if (operation === 'delete') {
+              assert(JSON.stringify(normalized.completion.facts).length > 16384);
+              assert.equal(Buffer.byteLength(JSON.stringify(normalized.completion.facts.data), 'utf8') > 30000, true);
+            }
+            assert.throws(() => validateCompletion({ ...normalized.completion, binding: { ...normalized.completion.binding, inputId: 'foreign' } }, normalized.authority));
+            business.completion = { binding: normalized.completion.binding, backendReads: business.reads, negativeEvidenceCases: 1 }; business.clock = new Date();
+            return normalized;
+          },
+        },
+      });
+      api.registerTool({ contextVersion: 2, create(ctx) {
+        if (!active() || ctx.agentId !== 'reminder-service') return null;
+        assert(createWork); const work = createWork;
+        return { name: toolName, label: 'Isolated Reminder create', description: 'Create through the existing deterministic Reminder owner, synthetic transaction only.',
+          parameters: schemaForTool(toolName, createIdentities, work.deps.route), executionMode: 'sequential',
+          async execute(callId, params, signal) {
+            const assertCurrent = () => { work.deps.authority.assertCurrent(); signal?.throwIfAborted(); ctx.assertInvocationCurrent(); assert.equal(ctx.sessionKey, createSessionKey); };
+            assertCurrent(); assert.equal(createChild, undefined);
+            const createRaw = createReminderToolFactory({ name: toolName, source: work.deps, current: work.source,
+              jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }) });
+            const rawTool = createRaw({ ...ctx, assertInvocationCurrent: assertCurrent }); assert(rawTool && !Array.isArray(rawTool));
+            const rawResult = await rawTool.execute(callId, params, signal);
+            const value = rawResult.details;
+            assertCurrent(); assert(createHook && ctx.sessionId && ctx.sessionKey);
+            assert.equal(createHook.callId, callId); assert.equal(createHook.sessionId, ctx.sessionId); assert.equal(createHook.sessionKey, ctx.sessionKey);
+            createChild = { runId: createHook.runId, callId, sessionId: ctx.sessionId, sessionKey: ctx.sessionKey, guard: assertCurrent, value };
+            return rawResult;
+          } };
+      } });
+      return createTask;
+      }
+      const createTask = reminderMutationFactory('create', 'fixture-22');
+      const deleteTask = reminderMutationFactory('delete', 'fixture-24');
       api.registerTool({ contextVersion: 2, create(context) {
-        const tool = create(context); if (!tool || Array.isArray(tool)) return tool;
+        const tool = business.mutationActive ? mutationCreate(context) : business.createActive ? (business.reminderOperation === 'delete' ? deleteTask(context) : createTask(context)) : business.reminderActive ? reminderCreate(context) : business.agenticActive ? agenticCreate(context) : create(context);
+        if (!tool || Array.isArray(tool)) return tool;
         return { ...tool, async execute(callId, request, signal, onUpdate) {
           assert.equal(context.agentId, 'main'); assert.equal(context.deliveryContext?.channel, 'whatsapp');
-          assert.equal(context.deliveryContext?.accountId, 'fixture-8');
+          assert.equal(context.deliveryContext?.accountId, business.mutationActive ? 'fixture-23' : business.createActive ? business.reminderOperation === 'delete' ? 'fixture-24' : 'fixture-22' : business.reminderActive ? 'fixture-19' : business.agenticActive ? 'fixture-18' : 'fixture-8');
           assert.equal(context.deliveryContext?.to, '+15550000001'); assert.equal(context.requesterSenderId, '+15550000001');
           assert.equal(business.calls.at(-1)?.callId, callId);
+          if (business.reminderActive) { reminderGuard = () => context.assertInvocationCurrent(); business.guards.push(reminderGuard); }
           const result = await tool.execute(callId, request, signal, onUpdate);
           // Custody starts only after the canonical factory's final live guard
           // succeeds; serialization alone is not a released DomainResult.
           context.assertInvocationCurrent();
-          assert(plain(result)); business.results.push(validateDomainResult(result.details));
+          assert(plain(result)); business.results.push(validateDomainResultEnvelope(result.details));
           return result;
         } };
       } });

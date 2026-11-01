@@ -17,7 +17,8 @@ export interface CompletionAuthority { readonly [AUTHORITY]: true }
 /** Adapter-private live source/domain/terminal custody; serialized identities never supply authority. */
 export interface CompletionCustody { assertCurrent(binding: Readonly<Binding6>): unknown }
 interface Snapshot { schemaVersion: CompletionVersion; kind: CompletionKind; binding: Binding; facts: Facts;
-  results: Completion[]; gaps: Gap[]; outcome: CompletionOutcome; custody?: CompletionCustody['assertCurrent'] }
+  results: Completion[]; gaps: Gap[]; outcome: CompletionOutcome; custody?: CompletionCustody['assertCurrent'];
+  runtimeResponse?: UserResponse }
 const authorities = new WeakMap<object, Readonly<Snapshot>>();
 const recordKeys = ['schemaVersion', 'kind', 'facts', 'results', 'userResponse', 'binding', 'completion'];
 const callerKeys = ['runId', 'runGeneration', 'agentId', 'sessionKey', 'sessionId', 'sessionGeneration'] as const;
@@ -244,6 +245,10 @@ function workflowSemantics(raw: unknown, b: Binding4, known: Record<string, unkn
   }
 }
 export function createCompletionAuthority(native: unknown, liveCustody?: CompletionCustody): CompletionAuthority {
+  return createAuthority(native, liveCustody);
+}
+/** Runtime response selection is private authority state, never agent input. */
+function createAuthority(native: unknown, liveCustody?: CompletionCustody, runtimeResponse?: UserResponse): CompletionAuthority {
   if (!plain(native)) fail('native_evidence_shape');
   const version = Object.hasOwn(native, 'schemaVersion') ? field(native, 'schemaVersion') : COMPLETION_SCHEMA_VERSION;
   if (version !== 3 && version !== 4 && version !== 5 && version !== 6) fail('completion_version_or_kind');
@@ -289,7 +294,8 @@ export function createCompletionAuthority(native: unknown, liveCustody?: Complet
   gaps(missing);
   if (native.origin === 'agent' && missing.length) fail('completion_evidence_insufficient');
   const s: Snapshot = freeze({ schemaVersion: version, kind, binding: b, facts: f, results, gaps: missing,
-    outcome: native.origin === 'agent' ? 'NORMAL' : missing.length ? 'FAILED' : 'RECOVERED', ...(custody ? { custody } : {}) });
+    outcome: native.origin === 'agent' ? 'NORMAL' : missing.length ? 'FAILED' : 'RECOVERED', ...(custody ? { custody } : {}),
+    ...(runtimeResponse ? { runtimeResponse: userResponse(runtimeResponse) } : {}) });
   shape(fromSnapshot(s, 'unavailable'));
   assertCustody(s);
   const authority: CompletionAuthority = freeze({ [AUTHORITY]: true }); authorities.set(authority, s); return authority;
@@ -297,7 +303,7 @@ export function createCompletionAuthority(native: unknown, liveCustody?: Complet
 function fromSnapshot(s: Readonly<Snapshot>, response: UserResponse | 'unavailable'): unknown {
   const retained = s.schemaVersion === 4 && 'role' in s.binding && s.binding.role === 'direct-final' ? s.results[0]?.userResponse : undefined;
   return { schemaVersion: s.schemaVersion, kind: s.kind, facts: s.facts, results: s.results, binding: s.binding,
-    userResponse: response === 'unavailable' ? retained ?? { state: 'unavailable', reason: { code: 'RUNTIME_WORDING_UNAVAILABLE',
+    userResponse: response === 'unavailable' ? retained ?? s.runtimeResponse ?? { state: 'unavailable', reason: { code: 'RUNTIME_WORDING_UNAVAILABLE',
       detail: 'No owner-authored usable message is retained.' } } : response, completion: { outcome: s.outcome, gaps: s.gaps } };
 }
 export function validateCompletion(raw: unknown, authority: unknown): Completion {
@@ -324,6 +330,107 @@ export function acceptAgentCompletion(proposal: unknown, authority: unknown): Co
 export function reconstructCompletion(authority: unknown): Completion {
   const s = snapshot(authority); if (s.outcome === 'NORMAL') fail('completion_origin_mismatch');
   return validateCompletion(fromSnapshot(s, 'unavailable'), authority);
+}
+/** Private native observations for the accepted single-tool domain harness.
+ * The domain adapter supplies verified facts and retained live custody; neither
+ * model wording nor serialized identities can establish either.
+ */
+export interface NativeDomainCompletionInput {
+  binding: Binding6;
+  knownFacts: Facts;
+  tool: { runId: string; sessionKey: string; sessionId: string; callId: string; name: string; value: unknown };
+  after: { runId: string | undefined; callId: string | undefined; value: unknown; error: string | undefined };
+  terminal: { runId: string | undefined; sessionKey: string | undefined; sessionId: string | undefined; success: boolean; messages: unknown[] };
+  custody: CompletionCustody;
+}
+export function settleNativeDomainCompletion(input: NativeDomainCompletionInput) {
+  const b = structuredClone(input.binding);
+  // Capture the typed observation fields, not arbitrary native/host wrappers.
+  // SDK metadata and retained guard callbacks are neither business JSON nor
+  // transferable authority. Never clone or invoke those additional fields.
+  const tool = { runId: input.tool.runId, sessionKey: input.tool.sessionKey, sessionId: input.tool.sessionId,
+    callId: input.tool.callId, name: input.tool.name, value: boundedCopy(input.tool.value) };
+  const details = plain(input.after.value) ? Object.getOwnPropertyDescriptor(input.after.value, 'details') : undefined;
+  const after = { runId: input.after.runId, callId: input.after.callId, error: input.after.error,
+    details: details && 'value' in details ? boundedCopy(details.value) : null };
+  // Native transcript text is a carrier, not bounded domain JSON. Capture only
+  // the fields needed to correlate tool evidence; validate report text inside
+  // settlement so malformed/oversized reporting cannot erase verified effects.
+  assertArrayData(input.terminal.messages);
+  const messages = input.terminal.messages.map(entry => {
+    if (!plain(entry)) return null;
+    const content = field(entry, 'content');
+    if (Array.isArray(content)) assertArrayData(content);
+    return { role: field(entry, 'role'), stopReason: field(entry, 'stopReason'),
+      toolCallId: field(entry, 'toolCallId'), toolName: field(entry, 'toolName'), isError: field(entry, 'isError'),
+      content: Array.isArray(content) ? content.map((part: unknown) => plain(part)
+        ? { type: field(part, 'type'), id: field(part, 'id'), name: field(part, 'name'), text: field(part, 'text') }
+        : null) : null };
+  });
+  const terminal = { runId: input.terminal.runId, sessionKey: input.terminal.sessionKey,
+    sessionId: input.terminal.sessionId, success: input.terminal.success, messages };
+  const assertSource = input.custody.assertCurrent.bind(input.custody);
+  const ensure = (ok: unknown): void => { if (!ok) fail('native_completion_unverified'); };
+  const assertEvidence: CompletionCustody['assertCurrent'] = candidate => {
+    assertion(assertSource(candidate), 'completion_custody_must_be_synchronous');
+    ensure(same(boundedCopy(candidate), boundedCopy(b)));
+    ensure(terminal.runId === b.runId && terminal.sessionKey === b.sessionKey && terminal.sessionId === b.sessionId);
+    ensure(tool.runId === b.runId && tool.sessionKey === b.sessionKey && tool.sessionId === b.sessionId);
+    ensure(after.runId === tool.runId && after.callId === tool.callId && !after.error);
+    ensure(same(after.details, tool.value));
+    ensure(Array.isArray(terminal.messages));
+    const messages = terminal.messages as unknown[];
+    const calls = messages.flatMap(entry => plain(entry) && entry.role === 'assistant' && Array.isArray(entry.content)
+      ? entry.content.filter((part: unknown) => plain(part) && part.type === 'toolCall') : []);
+    const results = messages.filter(entry => plain(entry) && entry.role === 'toolResult');
+    ensure(calls.length === 1 && results.length === 1);
+    const call: unknown = calls[0], result: unknown = results[0];
+    ensure(plain(call) && call.id === tool.callId && call.name === tool.name);
+    ensure(plain(result) && result.toolCallId === tool.callId && result.toolName === tool.name && !result.isError);
+    if (!plain(result) || !Array.isArray(result.content)) fail('native_completion_unverified');
+    const part: unknown = result.content[0];
+    ensure(result.content.length === 1 && plain(part) && part.type === 'text' && part.text === JSON.stringify(tool.value));
+    const index = messages.findIndex(entry => plain(entry) && entry.role === 'assistant' && Array.isArray(entry.content) && entry.content.includes(call));
+    ensure(index >= 0 && messages.indexOf(result) > index);
+  };
+  assertEvidence(b);
+  const facts = structuredClone(input.knownFacts);
+  const evidence = { schemaVersion: 6, kind: 'domain-task', binding: b, knownFacts: facts,
+    results: [], coverage: 'complete', gaps: [], origin: 'agent' };
+  let authority = createCompletionAuthority(evidence, { assertCurrent: assertEvidence });
+  let record: Completion;
+  try {
+    if (!terminal.success) fail('native_domain_run_error');
+    const messages = terminal.messages as unknown[], final = messages.at(-1);
+    if (!plain(final) || final.role !== 'assistant' || final.stopReason === 'toolUse' ||
+      !Array.isArray(final.content) || final.content.length !== 1) fail('native_completion_missing');
+    const text: unknown = final.content[0];
+    if (!plain(text) || text.type !== 'text' || typeof text.text !== 'string') fail('native_completion_missing');
+    // Bound the serialized carrier, then validate parsed logical fields and the
+    // complete envelope. A JSON report is not itself one domain string field.
+    if (Buffer.byteLength(text.text, 'utf8') > MAX_BYTES) fail('json_bytes_exceeded');
+    record = acceptAgentCompletion(JSON.parse(text.text), authority);
+  } catch {
+    // A broken reporting step cannot erase a verified transaction or restart it.
+    // Recovery changes Run disposition, retaining all domain data/effect facts.
+    // Foreign/missing native evidence and lost live authority still fail closed.
+    assertEvidence(b);
+    // Nonexpanding recovery: the accepted NORMAL authority already budgets
+    // 128 bytes for unavailable wording. This response plus one REPORT/RUN gap
+    // uses at most 125 bytes; NORMAL/FAILED have equal length, and unknown is
+    // no longer than any accepted status. All other facts/binding are unchanged.
+    // Never append uncertainty or claim missing tool coverage: that evidence was
+    // verified above. The gap describes reporting failure, not missing effects.
+    // The reason/gap retain reconciliation and no-replay without growing domain
+    // collections, so even an exactly full accepted envelope can reconstruct.
+    authority = createAuthority({ ...evidence, origin: 'runtime',
+      knownFacts: { ...facts, status: 'unknown' },
+      gaps: [{ code: terminal.success ? 'REPORT' : 'RUN', path: 'run', detail: 'No replay.' }],
+    }, { assertCurrent: assertEvidence }, { state: 'unavailable', reason: { code: 'UNKNOWN', detail: 'Reconcile.' } });
+    record = reconstructCompletion(authority);
+  }
+  if (record.schemaVersion !== 6) fail('native_completion_version');
+  return { record, authority };
 }
 export function completionProposalSchema(authority: unknown) {
   const s = snapshot(authority); if (s.outcome !== 'NORMAL') fail('completion_origin_mismatch');

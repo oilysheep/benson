@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 import { decode } from '../../../../benson-routing/core/value.js';
 import { createDomainCore } from '../../../../../../agents/jessica-vacuum/lib/domain-core.js';
 import { RegistrySchema, MapSchema } from '../../../../../../agents/jessica-vacuum/lib/schemas.js';
@@ -6,7 +7,6 @@ import { preconditions } from '../../../../../../agents/jessica-vacuum/lib/verif
 import { loadRegistry } from '../../../../../../agents/jessica-vacuum/lib/registry.js';
 import { createOperationState, type Intent, type StateRecords } from '../../../../../../agents/jessica-vacuum/lib/operation-state.js';
 import type { AtomicKeyedState, StateObservation, StateWrite, InvocationAuthority, DeviceSnapshot } from '../../../../../../agents/jessica-vacuum/lib/ports.js';
-const read = (path: string): unknown => JSON.parse(readFileSync(path, 'utf8'));
 export class MemoryState implements AtomicKeyedState<StateRecords> {
   readonly data = new Map<string, unknown>();
   readonly tokens = new Map<string, object>();
@@ -28,9 +28,10 @@ export class MemoryState implements AtomicKeyedState<StateRecords> {
     this.data.set(key, structuredClone(value)); this.tokens.set(key, {});
   }
 }
-export function fixture() {
+export function fixture(root = '.', clockSource?: () => Date) {
+  const read = (path: string): unknown => JSON.parse(readFileSync(resolve(root, path), 'utf8'));
   let millis = Date.parse('2026-10-17T12:00:00Z');
-  const clock = () => new Date(millis), tick = () => { millis += 1_000; };
+  const clock = clockSource ?? (() => new Date(millis)), tick = () => { millis += 1_000; };
   const registry = decode(RegistrySchema, read('agents/jessica-vacuum/config/registry.v1.json'), 'fixture_registry');
   const policy = read('agents/jessica-vacuum/config/policy.v1.json');
   const map = decode(MapSchema, read('agents/jessica-vacuum/tests/fixtures/map-stage2-live.json'), 'fixture_map'); map.observedAt = clock().toISOString();

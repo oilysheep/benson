@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
-import { type Admission, type NativeDispatchReadAdmission, type NoRunOutcome, type TaskResult, type Response, type ResponseV3, type DomainResult, type RenderedOutput } from './contracts.js';
+import { type Admission, type NativeDispatchReadAdmission, type NativeDispatchRunAdmission, type NoRunOutcome, type TaskResult, type Response, type ResponseV3, type ResponseV4, type DomainResult, type AnyDomainResult, type RenderedOutput } from './contracts.js';
 import { type SourceAdmissionController } from './request-control.js';
-import { validateRenderedOutput, validateResponseEnvelope, validateResponseV3Envelope } from './legacy-response.js';
+import { validateRenderedOutput, validateResponseEnvelope, validateResponseV3Envelope, validateResponseV4Envelope } from './legacy-response.js';
 import { assertion, boundedCopy, exhaustive, fail, freeze, plain, synchronous, type JsonValue } from './value.js';
 
 export type Presentation = Readonly<{ kind: 'rendered'; text: string; pendingContext: JsonValue }> |
@@ -16,6 +16,19 @@ export interface ResponseV3Options extends Partial<PresentationOptions> {
   assertResponseCurrent(response: Readonly<ResponseV3>): unknown;
   renderDomainResult?(result: DomainResult, options: PresentationOptions): Presentation;
 }
+export interface ResponseV4Options extends Partial<PresentationOptions> {
+  assertResponseCurrent(response: Readonly<ResponseV4>): unknown;
+  renderDomainResult?(result: AnyDomainResult, options: PresentationOptions): Presentation;
+}
+type DomainResponse = ResponseV3 | ResponseV4;
+interface DomainResponseOptions extends Partial<PresentationOptions> {
+  assertResponseCurrent(response: Readonly<DomainResponse>): unknown;
+  renderDomainResult?(result: AnyDomainResult, options: PresentationOptions): Presentation;
+}
+function assertDomainResponse(response: DomainResponse, options: ResponseOptions | DomainResponseOptions): asserts options is DomainResponseOptions {
+  if (!('assertResponseCurrent' in options) || typeof options.assertResponseCurrent !== 'function') fail('response_v3_authority_unavailable');
+  assertion(options.assertResponseCurrent(response), 'response_v3_authority_unavailable');
+}
 /** Request-local Controller adapter. The default raw-delivery mode retains its
  * existing contract; native-resolver mode only prepares an authorized handoff.
  * Native admission, route custody, transport and receipts remain host-owned.
@@ -25,7 +38,7 @@ interface DeliveryOptions {
   agentId: string;
   assertCurrent(): unknown;
   responseFor(payload: unknown): unknown;
-  presentation: ResponseOptions | ResponseV3Options;
+  presentation: ResponseOptions | DomainResponseOptions;
 }
 type DeliveryMode = { mode?: never; deliver(payload: Readonly<{ text: string }>): Promise<void> } |
   { mode: 'native-resolver'; deliver?: never };
@@ -36,12 +49,20 @@ export function createMainResponseDelivery(options: DeliveryOptions & DeliveryMo
 /** Explicit read-only direct binding; admission data is correlation, while the
  * currentness and Response callbacks retain private execution/result custody. */
 export function createDirectReadResponseDelivery(options: DeliveryOptions & DeliveryMode & {
-  admission: NativeDispatchReadAdmission; presentation: ResponseV3Options;
+  admission: NativeDispatchReadAdmission; presentation: DomainResponseOptions;
 }) {
   return createBoundResponseDelivery({ ...options, binding: { type: 'direct-read', admission: options.admission } });
 }
+/** The host retains original admission and controlled Completion/result custody;
+ * a Run ID or serialized v4 admission alone cannot authorize a response. */
+export function createDirectAgenticResponseDelivery(options: DeliveryOptions & DeliveryMode & {
+  admission: NativeDispatchRunAdmission; runId(): string; presentation: DomainResponseOptions;
+}) {
+  return createBoundResponseDelivery({ ...options, binding: { type: 'direct-agentic', admission: options.admission, runId: options.runId } });
+}
 function createBoundResponseDelivery(options: DeliveryOptions & DeliveryMode & {
-  binding: { type: 'main'; runId(): string } | { type: 'direct-read'; admission: NativeDispatchReadAdmission };
+  binding: { type: 'main'; runId(): string } | { type: 'direct-read'; admission: NativeDispatchReadAdmission } |
+    { type: 'direct-agentic'; admission: NativeDispatchRunAdmission; runId(): string };
 }) {
   let outcome: 'pending' | 'blocked' | 'prepared' | 'sending' | 'delivered' | 'unknown' = 'pending';
   let failure: string | null = null;
@@ -54,17 +75,26 @@ function createBoundResponseDelivery(options: DeliveryOptions & DeliveryMode & {
     try {
       assertion(options.assertCurrent(), 'main_response_authority_unavailable');
       const raw = synchronous(options.responseFor(payload), 'main_response_must_be_synchronous');
-      const response = plain(raw) && raw.schemaVersion === 3 ? validateResponseV3Envelope(raw) : validateResponseEnvelope(raw);
+      const response = plain(raw) && raw.schemaVersion === 4 ? validateResponseV4Envelope(raw) :
+        plain(raw) && raw.schemaVersion === 3 ? validateResponseV3Envelope(raw) : validateResponseEnvelope(raw);
       if (response.requestId !== options.requestId || response.source.agentId !== options.agentId) fail('main_response_binding_invalid');
       if (options.binding.type === 'main') {
         const runId = synchronous(options.binding.runId(), 'main_response_run_must_be_synchronous');
         if (response.source.type !== 'main' || response.source.runId !== runId) fail('main_response_binding_invalid');
+      } else if (options.binding.type === 'direct-agentic') {
+        const admission = options.binding.admission;
+        const runId = synchronous(options.binding.runId(), 'main_response_run_must_be_synchronous');
+        if (admission.schemaVersion !== 4 || admission.scope !== 'read' || admission.authority.kind !== 'native-dispatch' ||
+          admission.requestId !== options.requestId || (response.schemaVersion !== 3 && response.schemaVersion !== 4) ||
+          response.source.type !== 'direct' || response.source.executionMode !== 'agentic' || response.source.runId !== runId ||
+          response.results.length !== 1 || response.results[0]?.domain !== admission.domain ||
+          response.results[0]?.effects.status !== 'none') fail('direct_agentic_response_binding_invalid');
       } else {
         const admission = options.binding.admission;
         const expected = { authorityKind: 'native-dispatch', requestId: admission.requestId,
           domain: admission.domain, subject: admission.authority.subject };
         if (admission.schemaVersion !== 3 || admission.scope !== 'read' || admission.requestId !== options.requestId ||
-          admission.authority.kind !== 'native-dispatch' || response.schemaVersion !== 3) fail('direct_read_response_binding_invalid');
+          admission.authority.kind !== 'native-dispatch' || (response.schemaVersion !== 3 && response.schemaVersion !== 4)) fail('direct_read_response_binding_invalid');
         const source = response.source;
         if (source.type !== 'direct' || source.executionMode !== 'deterministic') fail('direct_read_response_binding_invalid');
         if (Object.entries(expected).some(([key, value]) => Reflect.get(source.admission, key) !== value)) fail('direct_read_response_binding_invalid');
@@ -73,16 +103,10 @@ function createBoundResponseDelivery(options: DeliveryOptions & DeliveryMode & {
       if (!controlled.rendered) fail('main_response_rendering_unavailable');
       const prepared = Object.freeze({ text: controlled.rendered.message });
       assertion(options.assertCurrent(), 'main_response_authority_unavailable');
-      if (response.schemaVersion === 3) {
-        if (!('assertResponseCurrent' in options.presentation) || typeof options.presentation.assertResponseCurrent !== 'function') fail('response_v3_authority_unavailable');
-        assertion(options.presentation.assertResponseCurrent(response), 'response_v3_authority_unavailable');
-      }
+      if (response.schemaVersion === 3 || response.schemaVersion === 4) assertDomainResponse(response, options.presentation);
       revalidatePrepared = () => {
         assertion(options.assertCurrent(), 'main_response_authority_unavailable');
-        if (response.schemaVersion === 3) {
-          if (!('assertResponseCurrent' in options.presentation)) fail('response_v3_authority_unavailable');
-          assertion(options.presentation.assertResponseCurrent(response), 'response_v3_authority_unavailable');
-        }
+        if (response.schemaVersion === 3 || response.schemaVersion === 4) assertDomainResponse(response, options.presentation);
       };
       return prepared;
     } catch (error) {
@@ -196,12 +220,13 @@ function safeFailure(response: Response, language: 'en' | 'he'): RenderedOutput 
     : 'Additional warnings were reported, but I cannot safely summarize their details.'] : [];
   return validateRenderedOutput({ schemaVersion: 2, message: [base, ...warnings].join('\n') });
 }
-export function controlResponse(raw: unknown, options: ResponseOptions | ResponseV3Options | ReadResponseOptions = {}) {
+export function controlResponse(raw: unknown, options: ResponseOptions | DomainResponseOptions | ReadResponseOptions = {}) {
   if (plain(raw) && raw.kind === 'benson.no-run') {
     if (!('controller' in options)) fail('read_response_dependencies_unavailable');
     return controlReadResponse(raw, options);
   }
   if ('controller' in options) fail('response_language_invalid');
+  if (plain(raw) && raw.schemaVersion === 4) return controlV3(validateResponseV4Envelope(raw), options);
   if (plain(raw) && raw.schemaVersion === 3) return controlV3(validateResponseV3Envelope(raw), options);
   const response = validateResponseEnvelope(raw);
   const language = options.language;
@@ -242,9 +267,8 @@ export function controlResponse(raw: unknown, options: ResponseOptions | Respons
   return fail('response_mode_unavailable');
 }
 /** Explicit v3 branch of the same Controller; no native lifetime or authority is minted here. */
-function controlV3(response: ResponseV3, options: ResponseOptions | ResponseV3Options) {
-  if (!('assertResponseCurrent' in options) || typeof options.assertResponseCurrent !== 'function') fail('response_v3_authority_unavailable');
-  assertion(options.assertResponseCurrent(response), 'response_v3_authority_unavailable');
+function controlV3(response: DomainResponse, options: ResponseOptions | DomainResponseOptions) {
+  assertDomainResponse(response, options);
   const { language, now, timezone } = options;
   if (language !== 'en' && language !== 'he') fail('response_language_invalid');
   if (typeof now !== 'string' || !/^\d{4}-\d\d-\d\dT/u.test(now) || !Number.isFinite(Date.parse(now))) fail('response_clock_invalid');
@@ -269,7 +293,7 @@ function controlV3(response: ResponseV3, options: ResponseOptions | ResponseV3Op
     if (mode === 'safe_failure' && !segments.length) message = zeroResultFailure(response.lifecycle.domainExecution, language);
     if (message !== undefined) {
       const rendered = validateRenderedOutput({ schemaVersion: 2, message });
-      assertion(options.assertResponseCurrent(response), 'response_v3_authority_unavailable');
+      assertDomainResponse(response, options);
       return freeze({ mode, rendered });
     }
   }

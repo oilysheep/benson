@@ -1,7 +1,7 @@
 import { freeze, plain, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Presentation } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
-import type { DomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
-import { validateDomainResult } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
+import type { AnyDomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { validateDomainResultEnvelope } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
 import { validateResult } from './results.js';
 import { formatUserDatetime } from '../../../shared/benson-datetime.js';
 /** Shared status wording derives only from validated domain facts, never model prose. */
@@ -14,8 +14,22 @@ export function renderJessicaStatusText(raw: unknown, now: Date): string {
     'לא ניתן לאמת כעת את מצב Jessica. לא בוצעה פעולה במכשיר.';
 }
 /** Live custody establishes provenance; domain facts establish response claims. */
-export function renderJessicaDomainResult(raw: DomainResult, options: { language: 'en' | 'he'; now?: string }): Presentation {
-  const value = validateDomainResult(raw);
+export function renderJessicaDomainResult(raw: AnyDomainResult, options: { language: 'en' | 'he'; now?: string }): Presentation {
+  const value = validateDomainResultEnvelope(raw);
+  if (value.domain === 'jessica-vacuum' && value.executionMode === 'agentic' && value.outcome.status === 'unknown' &&
+    value.outcome.disposition === 'unresolved' && (value.uncertainty.length > 0 || value.evidence.gaps.length > 0) && !value.warnings.length && value.pendingContext === null) {
+    return rendered(options.language === 'he'
+      ? 'לא ניתן לאמת את השלמת בקשת Jessica. תיעוד ההשפעות נשמר; יש לבדוק את המצב לפני ניסיון נוסף. לא אבצע את הפעולה שוב אוטומטית.'
+      : 'The Jessica request has no verified final outcome. Effect evidence is retained; check the current state before retrying. I will not repeat the operation automatically.');
+  }
+  if (value.domain === 'jessica-vacuum' && value.executionMode === 'agentic' && value.operation !== 'status' &&
+    value.effects.status === 'known' && value.effects.refs.length > 0 && !value.effects.reconciliation.required &&
+    !value.warnings.length && !value.uncertainty.length && !value.evidence.gaps.length && value.pendingContext === null &&
+    value.outcome.status === 'success' && value.facts.verified && value.failures.domain === null && value.failures.handling === null) {
+    return renderJessicaPresentation({ schemaVersion: value.domainSchemaVersion, domain: value.domain, operation: value.operation,
+      status: value.outcome.status, verified: value.facts.verified, data: value.facts.data, warnings: value.warnings,
+      error: null, pendingContext: null }, options.language);
+  }
   if (value.domain !== 'jessica-vacuum' || value.operation !== 'status' ||
     value.effects.status !== 'none' || value.warnings.length || value.uncertainty.length || value.evidence.gaps.length ||
     value.pendingContext !== null || value.content?.state !== 'usable' || value.content.language !== options.language ||

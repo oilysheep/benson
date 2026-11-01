@@ -11,6 +11,8 @@ function check<S extends TSchema>(schema: S, value: unknown): value is Static<S>
 export const MAX_BYTES = 262144;
 export const MAX_WARNINGS = 64;
 export const MAX_RESPONSE_RESULTS = 16;
+export const MAX_DOMAIN_RESULT_V3_BYTES = 2 * MAX_BYTES;
+export const MAX_RESPONSE_V4_BYTES = MAX_BYTES + MAX_RESPONSE_RESULTS * MAX_DOMAIN_RESULT_V3_BYTES + MAX_RESPONSE_RESULTS - 1;
 export const MAX_RENDERED_TEXT = 4096;
 export const MAX_WORKFLOW_ADMISSIONS = 256;
 export const object = <P extends Type.TProperties>(properties: P) =>
