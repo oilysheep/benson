@@ -97,6 +97,7 @@ proven/partial/UNKNOWN/drift, acceptance/evidence level, findings, risks, deferr
 rollback and exact decision/action. Explain unapproved deltas before asking; specify
 runtime/canary actions and effects. Include relevant native/research evidence and useful
 Agentic Systems / Harness Architecture learning here, not production comments.
+Before requesting push/PR approval, provide Oren with a concise Hebrew executive summary: what was implemented, what works end-to-end, what was validated, what remains incomplete, and readiness for publication. Keep it simple and avoid repeating detailed logs. This is part of the existing briefing, not a new approval gate.
 Pre-push: acceptance, Plan closure and final PASS/EDITORIAL waiver; stop unless push
 for that final scope is already approved.
 
