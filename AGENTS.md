@@ -64,18 +64,25 @@ change is material and requires fresh review.
 
 Inspect → Decide → Backup → Change → Validate → Acceptance → Review → Push → PR → Merge → Snapshot
 
-Continue exact approved scope through validation, acceptance and automatic review until
-a HARD STOP, operator action or blocker; ask only for unapproved deltas. Batch related
-inspection/checkpoints/edits/validation/reporting. Approved local repairs are not
-redesign. Use PLANS.md inventory before future stages.
-Approval never waives security, fail-closed, verification, rollback or acceptance.
-Backup: verify Git commit/branch; preserve affected uncommitted content. Non-Git state:
-one verified restorable checkpoint outside active directories. Copies: exact targets,
-hashes/modes, comparison, restore/validation and irreversible effects.
-Reuse checkpoints only while recovery coverage remains valid; cover new affected state
-before mutation. Reuse valid unchanged evidence; rerun for relevant changes, failures,
-freshness or unresolved concerns. Batch Plan updates at acceptance/material scope/evidence
-changes; retain required closure and dated evidence.
+Before changes, define the intended end-to-end flow, measurable Plan acceptance and
+minimum sufficient evidence. Use PLANS.md inventory for new stages. Prioritize working
+flows in dependency order; continue approved slices through acceptance and stable-candidate
+review, not stopping at routine tests, repairs or milestones. If blocked, continue only
+independent, approved, safe work. Approval waives no security, effects verification,
+fail-closed, rollback or acceptance requirement.
+
+Before mutation, verify Git commit/branch and preserve affected uncommitted/non-Git state
+in a verified restorable checkpoint outside active directories: exact targets, hashes/modes,
+comparisons, restore/validation and irreversible effects. Batch related changes; reuse valid
+coverage, extending it before touching new state. Batch Plan updates at acceptance/material
+scope or evidence changes, retaining dated closure. Report genuine gates, not routine ceremony.
+
+Use focused risk-based tests: failure regression first, affected suite once, required
+representative E2E. Reuse passing evidence while affected code/native assumptions/freshness
+remain valid; broaden only for changed risk, failures or unresolved concerns. Mandatory
+acceptance/security checks remain required. Diagnose recurring failures and durable side
+effects at the canonical invariant/contract owner; repair the failure class with regression
+coverage, not successive value/cardinality-specific fixes, silent fallbacks or weakened limits.
 Evidence levels: source/unit/fixture → isolated native → runtime integration →
 production/channel → physical; never promote. SIGNIFICANT architecture/runtime/user-facing
 changes need representative E2E at highest applicable approved level. Plan records lower
@@ -84,94 +91,77 @@ Prefer Oren's interaction and deterministic verification; global identity/equiva
 
 ## Gate briefings and learning
 
-Goals: production quality and Oren's Agentic Systems / Harness Architecture learning.
-One concise Hebrew briefing per genuine gate covers applicable fields:
-
-1. Objective/flow; invariant, owner and failure class.
-2. Proven/partial/UNKNOWN/drift; validation, acceptance and evidence level.
-3. Planned/actual files, KEEP/REPAIR/EXTEND/REPLACE/REMOVE; Benson vs OpenClaw/type.
-4. Best-practice/native evidence; exact approved runtime/canary actions, rollback/effects.
-5. Findings/dispositions, limitations, decisions, approvals, blockers and deferrals.
-6. Learning point/example when useful.
-
-Start: STOP for unapproved SIGNIFICANT scope. Mid-stage: explain the blocker/unapproved
-delta before asking. Close/pre-push: validation, acceptance, Plan closure and final
-PASS/EDITORIAL waiver precede one briefing; STOP unless push already approved for this
-final scope. Avoid redundant reports; teach here, not production comments.
+One concise Hebrew briefing per genuine gate covers flow/invariant/owner/failure class,
+change class/files/disposition (KEEP/REPAIR/EXTEND/REPLACE/REMOVE), Benson/OpenClaw scope,
+proven/partial/UNKNOWN/drift, acceptance/evidence level, findings, risks, deferrals,
+rollback and exact decision/action. Explain unapproved deltas before asking; specify
+runtime/canary actions and effects. Include relevant native/research evidence and useful
+Agentic Systems / Harness Architecture learning here, not production comments.
+Pre-push: acceptance, Plan closure and final PASS/EDITORIAL waiver; stop unless push
+for that final scope is already approved.
 
 ## Git / PR workflow
 
-One SIGNIFICANT stage/branch/PR unless approved otherwise. Branch from latest accepted synced
-main; commit stage files only.
-Complete acceptance, applicable Plan closure, review, pre-push briefing; approval,
-then push. After a successful approved push, reuse the open PR for that branch
-against main; otherwise create it automatically without separate approval. Verify
-the PR head/base and report its URL. Never enable auto-merge; Oren merges.
-English PR descriptions use concise, accessible bullets covering What, Why, How,
-Validation and material Risks; include relevant architecture impact, invariants,
-evidence, limitations and rollback. Sync main, verify the required accepted-state
-snapshot, then next stage. PRs replace no checkpoint, migration, recovery,
-acceptance or snapshot requirement.
+One SIGNIFICANT stage/branch/PR unless approved otherwise. Branch from latest accepted
+synced main; commit stage files only. Push only after the gate above and explicit approval.
+After approved push, reuse the branch's open PR against main or create it automatically;
+verify head/base and report its URL. Never enable auto-merge. English PR bullets cover
+What, Why, How, Validation and material Risks, including architecture impact, invariants,
+evidence limits and rollback. After Oren merges, sync main and verify the required
+accepted-state snapshot before the next stage. A PR replaces no recovery/acceptance gate.
 
 ## Independent review
 
 Non-EDITORIAL PRs require review; EDITORIAL waiver requires Oren. Automatically launch
-the configured fresh isolated read-only reviewer once on the stable final diff.
-Rerun for material changes, finding repairs or invalidated evidence; escalation below
-still applies. No inherited/forked/resumed Builder conversation,
-reasoning, session state, summaries/conclusions or prior reviewer context. Pass only
-target label, diff range/PR reference, reviewer profile instructions. Reviewer builds
-context independently: diff first, minimum authoritative context.
-Review full merge-base change: committed/uncommitted stage and approved relevant
-external policy/config diffs; owner/Plan, relevant architecture/domain/nested contracts,
-code/tests, runtime evidence. No fixes/edits/commits/push/PR/merge/
-next-stage work. Report PASS/BLOCKED, concrete findings, acceptance established,
-risks/unproven claims, merge readiness. Explain findings, responses/dispositions and
-uncertainty in Hebrew; validate. Refresh Plan closure before re-review if behavior,
-evidence, limitations or deferrals changed. Never substitute Builder self-review.
+the configured fresh isolated read-only reviewer once after acceptance on a stable integrated
+candidate, not each intermediate slice/test/repair. Material changes, finding repairs or
+invalidated evidence require fresh review after affected validation and Plan closure;
+batch repairs before re-review, subject to escalation below.
+No inherited/forked/resumed Builder conversation, reasoning, state, summaries/conclusions
+or prior reviewer context. Pass only target label, diff range/PR reference and profile
+instructions. Review diff first, full merge-base change including uncommitted stage and
+approved relevant external policy/config diffs; independently inspect minimum authoritative
+owner/Plan/architecture/domain/nested contracts, code/tests and runtime evidence.
+No edits, implementation, Git/publication or next-stage actions. Report PASS/BLOCKED,
+referenced findings, established acceptance, risks/unproven claims and merge readiness.
+Explain validated dispositions and uncertainty in Hebrew. Builder self-review is no substitute.
 STOP and ask Oren before another run: three consecutive BLOCKED rounds; same blocker after targeted
 repair; architecture/ownership/acceptance disagreement; profile launch failure;
 unreliable canonical review ownership.
 
 ## Parallel sub-agents
 
-Builder may spawn fresh isolated investigators for independent bounded work when
-latency/evidence benefit exceeds coordination/token cost. Parallelize evidence;
-serialize architecture/overlapping writes. Ordinary investigators need no review approval.
-Minimal bounded concurrency/context; no full Builder session copy/fork by default.
-Read-only sandbox/tools where supported; otherwise constrain tasks and avoid unnecessary
-mutation tools. Builder remains sole implementation owner/integrator/writer unless
-Oren approves another writer; disjoint implementation may produce scratch diffs.
-No overlapping edits, independent shared Architecture/Plan/policy/lifecycle evolution,
-production/runtime/device actions, competing owners or replacement of formal review.
-Use supported delegation/configured profiles, no hardcoded models: strongest
-appropriate profile/high reasoning for architecture/native research/hard or ambiguous
-diagnosis; sufficient implementation profile for code/tests; tools/Builder for mechanics.
-Accept inherited settings/existing approved read-only profiles; no orchestration just
-to switch models. Architecture/Plan/ownership/registration/public-surface/security/
-lifecycle discovery: freeze dependent work, finish only unaffected read-only work,
-report to Builder, follow Oren's gate.
+Fresh isolated investigators: bounded independent work only when evidence/latency benefit
+exceeds coordination cost; no review approval needed. Minimize concurrency/context, no full
+Builder fork by default; read-only sandbox/tools where supported, otherwise constrain tasks.
+Builder is sole writer/integrator unless Oren approves another; disjoint scratch diffs allowed.
+Parallelize evidence, serialize architecture/writes. No overlapping edits, independent shared
+policy/Architecture/Plan/lifecycle evolution, runtime/production/device actions, competing
+owners or replacement of review. Use supported configured profiles, no hardcoded models or
+orchestration to switch them: strongest appropriate/high reasoning for architecture/native/
+ambiguous diagnosis; sufficient for code/tests; tools for mechanics.
+New architecture/Plan/ownership/registration/public-surface/security/lifecycle boundaries:
+freeze dependent work, finish only unaffected read-only work, report and follow Oren's gate.
 
 ## Native behavior and recovery
 
-Enforce canonical architecture's deterministic/authorization/verification/idempotency/
-fencing/reconciliation/native-ownership boundaries and fail-closed rules. Text matching,
-timing guesses, confidence/run-specific heuristics are not authority. Availability
-justifies no extra framework/infrastructure/MCP/A2A/orchestration.
-OpenClaw core exceptions require approval, version-coupling analysis, checkpoint,
-rollback, preferred upstream/native alternative. Existing core changes: IMPLEMENTATION
-DRIFT; inventory/preserve; extension/reapply/deletion require separate approval.
-SIGNIFICANT OpenClaw decisions: global research plus installed/SDK evidence; record
-version/provenance, compare alternatives, choose smallest correct native option.
-Verify installed support, contract/minimal reproduction/runtime evidence before blaming
-native behavior; separate primitive from adjacent persistence/transport/channel/
-observability failure. ROUTINE work independent of uncertain native behavior needs no new research;
-upgrades reverify affected assumptions.
-Approved exposure requires supported config/registration validation, exact batch,
-runtime checkpoint, minimal reloads (normally one/batch). Source PASS is not runtime
-acceptance. Revert shared history; compatible affected restores only. Preserve durable
-operation/ownership/idempotency/completion/frozen-delivery history. Reconcile irreversible
-physical/external effects/messages via canonical owners; files cannot undo them.
+Enforce architecture's deterministic/authorization/verification/idempotency/fencing/
+reconciliation/native-ownership and fail-closed rules. Text matching, timing guesses,
+confidence/run-specific heuristics are not authority; availability justifies no extra
+framework/infrastructure/MCP/A2A/orchestration.
+Core exceptions require approval, version-coupling analysis, checkpoint/rollback and
+preferred upstream/native alternative. Existing core changes: IMPLEMENTATION DRIFT;
+inventory/preserve; extension/reapply/deletion need separate approval.
+SIGNIFICANT OpenClaw decisions require current research and installed/SDK evidence,
+version/provenance, alternatives and smallest correct native option. Prove installed
+support/contract/minimal reproduction/runtime behavior before blaming native code;
+distinguish persistence/transport/channel/observability failures. Independent ROUTINE
+work needs no repeated research; upgrades reverify affected assumptions.
+Approved exposure: validate supported config/registration, exact batch, runtime checkpoint,
+minimal reloads (normally one/batch). Source PASS is not runtime acceptance. Revert shared
+history; compatible affected restores only. Preserve durable operation/ownership/idempotency/
+completion/frozen-delivery history. Reconcile physical/external effects/messages through
+canonical owners; files cannot undo them.
 
 ## Snapshots and instruction loading
 
