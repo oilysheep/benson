@@ -1,19 +1,20 @@
 import Type from 'typebox';
 import { isDeepStrictEqual } from 'node:util';
 import type { OpenClawPluginToolFactory, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
-import { executeJessicaStatusTask, JESSICA_TASK_SCHEMA, JESSICA_TASK_ENTRY_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/task.js';
+import { executeJessicaStatusTask, bindJessicaTaskPending, JESSICA_TASK_SCHEMA, JESSICA_TASK_ENTRY_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/task.js';
 import { resolveTrustedIdentity, assertRosterPolicyAgreement, type FamilyRoutes } from '../../../../../agents/jessica-vacuum/lib/identity.js';
 import { authorize, type loadPolicy } from '../../../../../agents/jessica-vacuum/lib/policy.js';
 import { DOMAIN_RESULT_OUTPUT_SCHEMA, DOMAIN_RESULT_V3_OUTPUT_SCHEMA, createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
-import { TaskEnvelopeSchema, type TaskEnvelope, type Effects, type AnyDomainResult } from '../../../benson-routing/core/contracts.js';
+import type { TaskEnvelope, Effects, AnyDomainResult } from '../../../benson-routing/core/contracts.js';
 import { assertInvocationCurrent } from '../../../benson-routing/core/invocation.js';
-import { boundedCopy, decode, synchronous, fail } from '../../../benson-routing/core/value.js';
+import { boundedCopy, synchronous, fail } from '../../../benson-routing/core/value.js';
 import { createCurrentRequestContext, type CurrentRequestEvidence, type CurrentRequestProjection } from '../../../benson-routing/core/conversation-context.js';
 import { validateCompletion, type CompletionAuthority } from '../../../benson-routing/core/completion.js';
 import type { ExecutionContext } from '../../../../../agents/jessica-vacuum/lib/executor.js';
 import { READ_REQUEST_SCHEMA, parseReadRequest } from '../../../../../agents/jessica-vacuum/lib/schemas.js';
 import { loadRegistry } from '../../../../../agents/jessica-vacuum/lib/registry.js';
 import { validateResult, type Result } from '../../../../../agents/jessica-vacuum/lib/results.js';
+import { validateTaskEnvelope } from '../../../benson-routing/core/task-envelope.js';
 
 type Tool = Exclude<NonNullable<ReturnType<OpenClawPluginToolFactory<2>['create']>>, unknown[]>;
 type ToolResult = Awaited<ReturnType<Tool['execute']>>;
@@ -83,7 +84,9 @@ export function createJessicaTaskToolFactory(options: {
   clock?: () => Date; resultVersion?: 2 | 3;
   task?: {
     source(context: OpenClawPluginToolContext<2>): CurrentRequestEvidence;
-    run(request: TaskEnvelope, work: { callId: string; source: CurrentRequestProjection; execution: ExecutionContext }):
+    history?(context: OpenClawPluginToolContext<2>, callId: string): Promise<Parameters<typeof bindJessicaTaskPending>[1] & { assertRetainedCurrent(): void }>;
+    run(request: TaskEnvelope, work: { callId: string; source: CurrentRequestProjection; execution: ExecutionContext;
+      pending?: ReturnType<typeof bindJessicaTaskPending> }):
       Promise<{ completion: unknown; authority: CompletionAuthority; effects: Effects }>;
   };
 }): OpenClawPluginToolFactory<2>['create'] {
@@ -120,7 +123,7 @@ export function createJessicaTaskToolFactory(options: {
           if (!options.task) throw new Error('jessica_task_source_unavailable');
           const callerSessionKey = context.sessionKey, callerSessionId = context.sessionId;
           if (!callerSessionKey || !callerSessionId) throw new Error('jessica_task_caller_unavailable');
-          const task = decode(TaskEnvelopeSchema, request, 'jessica_task_intent_invalid');
+          const task = validateTaskEnvelope(request);
           const evidence = synchronous(options.task.source(context), 'jessica_task_source_must_be_synchronous');
           const current = createCurrentRequestContext({ ...evidence, assertCurrent() {
             assertInvocationCurrent(authority); return evidence.assertCurrent();
@@ -132,7 +135,8 @@ export function createJessicaTaskToolFactory(options: {
           if (task.request !== source.context.current.text || !source.context.current.entryId || binding.channel !== 'whatsapp' ||
             binding.accountId !== accountId || binding.peerId !== to || binding.requesterId !== (senderId || to) ||
             binding.kind !== identity.channelKind) throw new Error('jessica_task_source_mismatch');
-          const assertCurrent = () => {
+          let pending: ReturnType<typeof bindJessicaTaskPending> | undefined;
+          const assertSource = () => {
             assertInvocationCurrent(authority);
             if (context.sessionKey !== callerSessionKey || context.sessionId !== callerSessionId ||
               context.requesterSenderId !== senderId || context.deliveryContext?.channel !== channel ||
@@ -142,11 +146,17 @@ export function createJessicaTaskToolFactory(options: {
             if (fresh.senderId !== identity.senderId || fresh.channelKind !== identity.channelKind) throw new Error('jessica_task_identity_changed');
             authorize(options.policy, fresh, 'read');
           };
+          const assertCurrent = () => { assertSource(); pending?.assertCurrent(); };
           assertResultCurrent = assertCurrent;
           assertCurrent();
           if (taskStarted) throw new Error('jessica_task_already_started');
           taskStarted = true;
-          const handoff = await options.task.run(task, { callId, source,
+          if (options.task.history) {
+            const history = await options.task.history(context, callId); assertSource();
+            pending = bindJessicaTaskPending(task, history, source, options.clock ?? (() => new Date()), () => history.assertRetainedCurrent());
+          } else if (task.version === 2) fail('jessica_pending_history_unavailable');
+          assertCurrent();
+          const handoff = await options.task.run(task, { callId, source, ...pending ? { pending } : {},
             execution: { identity, requestEpoch: source.context.current.entryId, authority: { signal: authority.signal, assertCurrent } } });
           assertCurrent();
           if (released.has(handoff.authority)) throw new Error('jessica_completion_already_released');
@@ -157,7 +167,9 @@ export function createJessicaTaskToolFactory(options: {
             completion.binding.caller?.agentId !== 'main' || completion.binding.caller.sessionKey !== callerSessionKey ||
             completion.binding.caller.sessionId !== callerSessionId || completion.binding.completionTarget !== 'CALLER') throw new Error('jessica_task_completion_binding');
           result = project(completion, handoff.authority, { projectEffects: () => handoff.effects });
-          assertCompletionCurrent = () => { validateCompletion(handoff.completion, handoff.authority); };
+          if (pending) result = pending.project(result);
+          const retainedPending = pending;
+          assertCompletionCurrent = () => { validateCompletion(handoff.completion, handoff.authority); retainedPending?.assertCurrent(); };
           assertCurrent(); released.add(handoff.authority);
         }
         const serialized = synchronous(options.jsonResult(result, callId, assertCompletionCurrent), 'jessica_task_serialization_must_be_synchronous');

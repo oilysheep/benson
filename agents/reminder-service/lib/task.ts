@@ -7,13 +7,88 @@ import { controlReadResponse } from '../../../integrations/openclaw/benson-routi
 import { executeReminderTool, type Dependencies } from './service.js';
 import { verifiedList, safeListResult, discoveryData } from './results.js';
 import { renderReminderList } from './presentation.js';
-import { TaskEnvelopeSchema } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { TaskEnvelopeSchema, type TaskEnvelope, type ConsumedPending, type AnyDomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { reconstructDomainPending } from '../../../integrations/openclaw/benson-routing/core/conversation-context.js';
+import { withDomainPending } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
+import { ProvenanceSchema, type ServiceRequest } from './schemas.js';
+import { isDeepStrictEqual } from 'node:util';
+import { read, fail, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import { plain } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import { normalizeReminderServiceResult } from './results.js';
 import type { CurrentRequestProjection } from '../../../integrations/openclaw/benson-routing/core/conversation-context.js';
 export const REMINDER_TASK_SCHEMA = object({ operation: Type.Literal('list') });
 /** Opt-in only; the existing list entry and its consumers remain strict. */
-export const REMINDER_TASK_ENTRY_SCHEMA = Type.Union([REMINDER_TASK_SCHEMA, TaskEnvelopeSchema]);
+// Native parameter normalization inspects direct object variants only.
+export const REMINDER_TASK_ENTRY_SCHEMA = Type.Union([REMINDER_TASK_SCHEMA, ...TaskEnvelopeSchema.anyOf]);
+
+/** Minimal create continuation over the existing provenance contract. Other
+ * pending value shapes and lifecycle selections remain unavailable. */
+export function bindReminderTaskPending(task: TaskEnvelope, history: Parameters<typeof reconstructDomainPending>[0],
+  source: CurrentRequestProjection, deps: Pick<Dependencies, 'route' | 'clock'>, assertCurrent: () => void) {
+  const clock = deps.clock ?? (() => new Date());
+  const provenance = (pending: NonNullable<AnyDomainResult['pendingContext']>) => {
+    const value = read(ProvenanceSchema, pending.value, 'reminder_pending_unsupported');
+    if (value.requesterId !== deps.route.requesterId || value.sourceConversation.type !== deps.route.sourceType ||
+      value.sourceConversation.id !== deps.route.sourceId || value.contextId !== source.context.conversation.conversationRef ||
+      value.expiresAt !== pending.expiresAt || !Number.isFinite(Date.parse(value.createdAt)) ||
+      Date.parse(value.createdAt) >= Date.parse(value.expiresAt) || value.revision !== value.evidence.length ||
+      new Set(value.evidence.map(item => item.id)).size !== value.evidence.length ||
+      value.evidence.at(-1)?.id !== value.currentEvidenceId || value.fieldEvidence.some(item =>
+        !value.evidence.find(evidence => evidence.id === item.evidenceId)?.text.includes(item.quote))) fail('reminder_pending_invalid');
+    return value;
+  };
+  const reference = (pending: NonNullable<AnyDomainResult['pendingContext']>, result: AnyDomainResult): ConsumedPending => {
+    const value = provenance(pending);
+    if (result.executionMode !== 'agentic' || result.operation !== 'create' || result.outcome.status !== 'clarification_required' ||
+      !history.results.some(row => isDeepStrictEqual(boundedCopy(row.result.pendingContext), boundedCopy(pending)) &&
+        row.requestId === value.currentEvidenceId)) fail('reminder_pending_invalid');
+    return { schemaVersion: 1, domain: 'reminder', binding: pending.binding,
+      contextId: value.contextId, revision: value.revision, currentEvidenceId: value.currentEvidenceId };
+  };
+  const successor = (previous: NonNullable<AnyDomainResult['pendingContext']>, next: unknown) => {
+    const old = provenance(previous), value = read(ProvenanceSchema, next, 'reminder_pending_provenance_required');
+    if (value.contextId !== old.contextId || value.requesterId !== old.requesterId ||
+      !isDeepStrictEqual(value.sourceConversation, old.sourceConversation) || value.createdAt !== old.createdAt ||
+      value.expiresAt !== old.expiresAt || value.revision !== old.revision + 1 ||
+      value.evidence.length !== old.evidence.length + 1 || !isDeepStrictEqual(value.evidence.slice(0, -1), old.evidence) ||
+      value.evidence.at(-1)?.id !== value.currentEvidenceId || value.currentEvidenceId === old.currentEvidenceId) fail('reminder_pending_successor_invalid');
+    return value;
+  };
+  const view = reconstructDomainPending(history, { domain: 'reminder',
+    binding: { requesterId: source.context.conversation.requesterId, conversationId: source.context.conversation.conversationRef },
+    currentInputId: source.context.current.entryId!, reference, clock, assertCurrent,
+    replacement(previous, result) { if (!result.pendingContext) fail('reminder_pending_successor_invalid'); successor(previous, result.pendingContext.value); } });
+  const binding = view.bindTask(task), selected = binding.selected;
+  return Object.freeze({ ...binding,
+    assertRequest(request: ServiceRequest) {
+      binding.assertCurrent(); if (!selected || request.operation === 'list-reminders' || request.operation === 'find-reminders') return;
+      if (request.operation !== 'create-intent' || 'items' in request.input) fail('reminder_pending_operation_unsupported');
+      const value = successor(selected.pending, request.input.provenance);
+      if (value.currentEvidenceId !== source.context.current.entryId || value.evidence.at(-1)?.text !== source.context.current.text) fail('reminder_pending_current_input_mismatch');
+    },
+    project(result: AnyDomainResult): AnyDomainResult {
+      binding.assertCurrent();
+      if (result.pendingContext) {
+        const pending = result.pendingContext, value = provenance(pending), time = clock().getTime();
+        if (result.executionMode !== 'agentic' || result.operation !== 'create' || result.outcome.status !== 'clarification_required' ||
+            result.failures.handling !== null || result.evidence.gaps.length || result.uncertainty.length || result.warnings.length ||
+            result.effects.status !== 'none' || result.effects.reconciliation.required ||
+            pending.binding.requesterId !== source.context.conversation.requesterId ||
+            pending.binding.conversationId !== source.context.conversation.conversationRef || !Number.isFinite(time) ||
+            Date.parse(value.createdAt) > time || Date.parse(value.expiresAt) <= time ||
+            value.currentEvidenceId !== source.context.current.entryId || value.evidence.at(-1)?.text !== source.context.current.text) fail('reminder_pending_outcome_invalid');
+        if (selected) successor(selected.pending, value);
+        else if (value.revision !== 1 || value.evidence.length !== 1) fail('reminder_pending_current_only_required');
+      }
+      if (!selected) return result;
+      if (result.domain !== 'reminder' || result.operation !== 'create') fail('reminder_pending_outcome_mismatch');
+      const terminal = ['success', 'failure', 'clarification_required'].includes(result.outcome.status) &&
+        result.failures.handling === null && !result.evidence.gaps.length && !result.uncertainty.length &&
+        result.effects.status !== 'possible' && !result.effects.reconciliation.required;
+      return withDomainPending(result, terminal ? selected.reference : null);
+    },
+  });
+}
 /** Current-input creation uses the existing transaction and provenance owner.
  * Legacy callers retain their existing evidence rules; this entry requires the
  * full bundle and the exact original input identity before any transaction.

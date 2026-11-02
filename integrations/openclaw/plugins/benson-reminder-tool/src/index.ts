@@ -55,6 +55,11 @@ export default definePluginEntry({
         },
         task: {
           source: ctx => currentNativeTurn(api, ctx).source(ctx),
+          async history(ctx, callId) {
+            const turn = currentNativeTurn(api, ctx);
+            originalHistory = await turn.originalUserTurns(ctx);
+            return originalHistory.acquireTaskResults(callId);
+          },
           async originalUserTurns() {
             const history = originalHistory;
             if (!history) fail('reminder_original_context_unavailable');
@@ -64,13 +69,9 @@ export default definePluginEntry({
           async run(request, work) {
             assertInvocationCurrent(work.deps.authority);
             const turn = currentNativeTurn(api, context), caller = turn.caller(context, work.callId);
-            const originals = await turn.originalUserTurns(context);
-            originalHistory = originals;
-            const prior = await originals.acquireTaskResults(work.callId);
-            prior.assertCurrent(); originals.assertCurrent(); assertInvocationCurrent(work.deps.authority);
-            // Semantic pending selection/clearing is not accepted yet. Retain
-            // every original result; no null carrier silently clears a bundle.
-            if (prior.results.some(item => item.result.pendingContext !== null)) fail('reminder_pending_continuation_not_enabled');
+            const originals = originalHistory;
+            if (!originals) fail('reminder_original_context_unavailable');
+            originals.assertCurrent(); assertInvocationCurrent(work.deps.authority);
             const retainedCurrent = () => { turn.assertCurrent(); originals.assertCurrent(); };
             const sessionKey = `agent:reminder-service:subagent:${randomUUID()}`;
             const scope = collector.begin(sessionKey, retainedCurrent);
@@ -90,11 +91,19 @@ export default definePluginEntry({
                 // Original text remains quoted data. Native agent guidance and
                 // deterministic domain checks retain all execution authority.
                 message: JSON.stringify({ request: request.request, contextId: work.source.context.conversation.conversationRef,
-                  currentEvidenceId: work.source.context.current.entryId, originalUserTurns: originals.turns.map(item => ({ text: item.text })) }),
+                  currentEvidenceId: work.source.context.current.entryId,
+                  requesterId: work.deps.route.requesterId,
+                  sourceConversation: { type: work.deps.route.sourceType, id: work.deps.route.sourceId },
+                  pendingBinding: { requesterId: work.source.context.conversation.requesterId,
+                    conversationId: work.source.context.conversation.conversationRef },
+                  now: (work.deps.clock?.() ?? new Date()).toISOString(),
+                  pendingContext: work.pending?.selected?.pending ?? null,
+                  originalUserTurns: work.pending?.selected ? originals.turns.map(item => ({ text: item.text }))
+                    : [{ text: work.source.context.current.text }] }),
                 observe(runId) {
                   const identity = evidence.inspectIdentity(runId), native = evidence.evidence(runId);
                   const observed = scope.complete(identity, native), selected = observed.observations.at(-1);
-                  if (!selected) fail('reminder_reasoning_only_producer_not_enabled');
+                  if (!selected) return { noTools: true as const, terminal: observed.terminal, custody: observed.custody };
                   const coverage = readToolExecutionEvidence(native, identity), receipt = coverage.receipts.at(-1);
                   if (!receipt || receipt.callId !== selected.tool.callId) fail('reminder_native_receipt_missing');
                   const operation = parseRequest(selected.tool.name as ToolName, receipt.executionArgs).operation;

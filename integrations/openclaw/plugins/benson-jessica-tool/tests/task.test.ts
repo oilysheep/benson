@@ -7,7 +7,7 @@ import { fixture as domainFixture } from './fixtures/domain-state.js';
 import { Compile } from 'typebox/compile';
 import { loadPolicy } from '../../../../../agents/jessica-vacuum/lib/policy.js';
 import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.js';
-import { validateDomainResult } from '../../../benson-routing/core/domain-result.js';
+import { validateDomainResult, readDomainFactsData } from '../../../benson-routing/core/domain-result.js';
 import { createJessicaExecuteToolFactory } from '../src/execute-tool.js';
 import { createCompletionAuthority, acceptAgentCompletion } from '../../../benson-routing/core/completion.js';
 import { normalizeLegacyTaskResult } from '../../../benson-routing/core/legacy-response.js';
@@ -36,11 +36,26 @@ function fixture() {
 }
 
 for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller', 'missing-caller', 'changed-source',
-  'changed-caller', 'cancelled', 'retired-after-effect', 'changed-at-serialization', 'duplicate'] as const) {
+  'changed-caller', 'cancelled', 'retired-after-effect', 'changed-at-serialization', 'duplicate',
+  'pending', 'pending-possible-effects', 'pending-multiple', 'pending-wrong-target', 'pending-v1', 'pending-null', 'pending-stale', 'pending-expired',
+  'pending-replayed', 'pending-missing-history'] as const) {
   test(`Main intent entry retains original Jessica mutation custody: ${fault}`, async () => {
     const f = domainFixture(); let changed = false, effects = 0, taskLive = true;
     let retainedCompletion: (() => void) | undefined;
-    const text = 'Clean the living room';
+    const pendingCase = fault.startsWith('pending');
+    const text = pendingCase ? 'The living room' : 'Clean the living room';
+    const reference = { schemaVersion: 1 as const, domain: 'jessica-vacuum' as const,
+      binding: { requesterId: 'fixture-private', conversationId: 'original-conversation' }, clarificationId: 'original-question' };
+    const expiresAt = new Date(f.clock().getTime() + (fault === 'pending-expired' ? -1 : 600_000)).toISOString();
+    const prior = validateDomainResult({ schemaVersion: 2, kind: 'benson.domain-result', domain: 'jessica-vacuum',
+      domainSchemaVersion: '1', executionMode: 'agentic', operation: 'clean', outcome: { disposition: 'handled', status: 'clarification_required' },
+      facts: { verified: false, verificationScope: [], data: { question: 'Which room did you mean?', candidates: [
+        { room: fault === 'pending-wrong-target' ? 'hallway' : 'living_room', label: 'Living room' }] } },
+      evidence: { observations: [], gaps: [] }, warnings: [], failures: { domain: null, handling: null },
+      effects: fault === 'pending-possible-effects' ? { status: 'possible', refs: [], details: [], reconciliation: { required: true, reason: 'UNRESOLVED_DISPATCH' } } : { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } }, uncertainty: fault === 'pending-possible-effects' ? [{ code: 'UNRESOLVED_DISPATCH' }] : [],
+      pendingContext: { schemaVersion: 1, binding: reference.binding, expiresAt,
+        value: { version: '1', clarificationId: reference.clarificationId, expiresAt } },
+      content: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render question' } } });
     const context: OpenClawPluginToolContext<2> = { agentId: 'main', sessionKey: 'actual-main', sessionId: 'actual-main-id',
       requesterSenderId: 'fixture-private', deliveryContext: { channel: 'whatsapp', accountId: 'fixture-account', to: 'fixture-private' },
       assertInvocationCurrent() { assert(taskLive, 'Task invocation retired'); f.authority.assertCurrent(); } };
@@ -48,11 +63,19 @@ for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller'
     const create = createJessicaTaskToolFactory({ roster: { accountId: 'fixture-account', approvedIds: [...new Set(loadPolicy(f.policy).rules.map(rule => rule.subject))],
       subjectForRoute: route => route === 'fixture-private' ? 'oren' : null }, policy: loadPolicy(f.policy),
       read: async () => { throw new Error('Intent cannot use the status path'); },
+      clock: f.clock,
       jsonResult(value, callId, assertCompletion) {
         assert.equal(callId, 'original-call'); assert.equal(typeof assertCompletion, 'function'); retainedCompletion = assertCompletion;
         if (fault === 'changed-at-serialization') changed = true;
         return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; },
       task: {
+        ...pendingCase && fault !== 'pending-missing-history' ? { async history() {
+          return { results: Array.from({ length: fault === 'pending-multiple' ? 5 : 1 }, (_, i) => ({
+            input: { entryId: 'persisted-question-' + i }, requestId: fault === 'pending-replayed' ? 'original-input' : 'question-input-' + i, entryId: 'question-result-' + i,
+            result: i === 0 ? prior : validateDomainResult({ ...prior, pendingContext: { ...prior.pendingContext!,
+              value: { ...prior.pendingContext!.value, clarificationId: 'other-' + i } } }) })),
+            assertCurrent() { f.authority.assertCurrent(); }, assertRetainedCurrent() { f.authority.assertCurrent(); } };
+        } } : {},
         source: () => ({ request: text,
           binding: { conversationRef: 'original-conversation', channel: 'whatsapp', accountId: fault === 'foreign-source' ? 'foreign' : 'fixture-account',
             kind: 'direct', peerId: 'fixture-private', threadId: null, requesterId: 'fixture-private' },
@@ -67,6 +90,7 @@ for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller'
           const rawFactory = createJessicaExecuteToolFactory({ registryConfig: f.registry, policyConfig: f.policy,
             roster: { accountId: 'fixture-account', approvedIds: [...new Set(loadPolicy(f.policy).rules.map(rule => rule.subject))], subjectForRoute: () => null },
             source: work.execution, store: f.store, clock: f.clock, wait: async () => {}, pollCounts: { clean: 1 },
+            ...work.pending ? { pending: work.pending } : {},
             driver: { async read() { return structuredClone(f.evidence); }, async dispatch(_step, guard) {
               await guard.assertMutationCurrent(); guard.assertCurrent(); effects++; f.tick(); const at = f.clock().toISOString();
               f.evidence.status = { observedAt: at, sourceUpdatedAt: at, state: 'cleaning', activeSegments: [f.room.segmentId], currentSegment: null };
@@ -98,11 +122,15 @@ for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller'
         },
       } });
     const tool = create(context); assert(tool && !Array.isArray(tool));
-    const request = { kind: 'benson.self-contained-request', version: 1, request: fault === 'forged-intent' ? 'replacement' : text };
+    const request = { kind: 'benson.self-contained-request', version: pendingCase && fault !== 'pending-v1' ? 2 : 1,
+      request: fault === 'forged-intent' ? 'replacement' : text,
+      ...pendingCase && fault !== 'pending-v1' ? { pending: fault === 'pending-null' ? null : {
+        ...reference, clarificationId: fault === 'pending-stale' ? 'stale' : reference.clarificationId } } : {} };
     const output = tool.execute('original-call', request, f.abort.signal);
-    if (fault === 'none' || fault === 'duplicate') {
+    if (fault === 'none' || fault === 'duplicate' || fault === 'pending' || fault === 'pending-multiple') {
       const result = validateDomainResult((await output).details); assert.equal(result.executionMode, 'agentic');
       assert.equal(result.facts.verified, true); assert.equal(result.effects.status, 'known'); assert.equal(effects, 1);
+      if (pendingCase) assert.deepEqual(JSON.parse(JSON.stringify(readDomainFactsData(result.facts.data).consumedPending)), reference);
       if (fault === 'duplicate') { await assert.rejects(tool.execute('retry', request), /already_started/); assert.equal(effects, 1); }
       assert(retainedCompletion); taskLive = false; retainedCompletion();
       await assert.rejects(tool.execute('after-retirement', request), /Task invocation retired/);

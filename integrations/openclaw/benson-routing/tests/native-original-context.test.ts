@@ -1,11 +1,12 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { registerHooks } from 'node:module';
 import { acquireOriginalUserTurns, retainOriginalUserWrite } from '../adapters/openclaw/conversation.js';
 import { MAX_TRANSCRIPT_HYDRATION_BYTES, MAX_TRANSCRIPT_HYDRATION_EVENTS } from '../core/request-control.js';
 import { validateProvenance } from '../../../../agents/reminder-service/lib/provenance.js';
 import type { CreateInput } from '../../../../agents/reminder-service/lib/schemas.js';
-import { formatTaskEnvelope } from '../core/task-envelope.js';
-import { validateDomainResultEnvelope } from '../core/domain-result.js';
+import { formatTaskEnvelope, createPendingTaskEnvelope } from '../core/task-envelope.js';
+import { validateDomainResultEnvelope, withDomainPending } from '../core/domain-result.js';
 
 const binding = { conversationRef: 'agent:main:main', channel: 'whatsapp', accountId: 'test',
   kind: 'group' as const, peerId: 'group@g.us', threadId: null, requesterId: '+15550000001' };
@@ -40,7 +41,20 @@ function fixture() {
   return { state, readers, options, original, source };
 }
 
-test('supported original-context custody retains exact same-sender turns without fabricating provenance or pending', async () => {
+test('native history is disabled before transcript access without proven pre-hydration bounds', async () => {
+  const f = fixture(); let sdkResolutions = 0, payloadAccesses = 0;
+  const hooks = registerHooks({ resolve(specifier, context, next) {
+    if (specifier === 'openclaw/plugin-sdk/session-transcript-runtime' || specifier === 'openclaw/plugin-sdk/agent-sessions') sdkResolutions++;
+    return next(specifier, context);
+  } });
+  try {
+    const write = new Proxy(f.options.write, { get() { payloadAccesses++; throw Error('History payload must remain unread'); } });
+    await assert.rejects(acquireOriginalUserTurns({ ...f.options, write }), /native_original_history_resource_bounds_unavailable/);
+    assert.equal(sdkResolutions, 0); assert.equal(payloadAccesses, 0);
+  } finally { hooks.deregister(); }
+});
+
+test('isolated original-context custody retains exact same-sender turns without fabricating provenance or pending', async () => {
   const f = fixture(), acquired = await acquireOriginalUserTurns(f.options, f.readers);
   assert.deepEqual(acquired.turns.map(turn => [turn.entryId, turn.text, turn.inputProvenance]),
     [['entry-0', 'Remind me to buy milk', null], ['entry-3', 'Tomorrow at nine', null]]);
@@ -203,6 +217,25 @@ function taskHistory(history = taskMessages('earlier')) {
     } };
   return { ...f, rawState: state, readers };
 }
+
+test('original consumption retains transport identity and must match the pre-effect v2 selection', async () => {
+  const reference = { schemaVersion: 1 as const, domain: 'reminder' as const,
+    binding: { requesterId: binding.requesterId, conversationId: binding.conversationRef },
+    contextId: binding.conversationRef, revision: 1, currentEvidenceId: 'earlier' };
+  for (const fault of ['none', 'v1', 'null', 'other-reference'] as const) {
+    const messages = taskMessages('answer', false), result = withDomainPending(historicalResult(false), reference);
+    const block = (messages[1]!.content as Record<string, unknown>[])[0]!;
+    block.arguments = fault === 'v1' ? JSON.parse(formatTaskEnvelope(messages[0]!.content)) :
+      createPendingTaskEnvelope(messages[0]!.content, fault === 'null' ? null :
+        { ...reference, currentEvidenceId: fault === 'other-reference' ? 'foreign' : 'earlier' });
+    messages[2]!.details = result; messages[2]!.content = [{ type: 'text', text: JSON.stringify(result) }];
+    const f = taskHistory([...taskMessages('earlier'), ...messages]);
+    const originals = await acquireOriginalUserTurns(f.options, f.readers);
+    if (fault !== 'none') { await assert.rejects(originals.acquireTaskResults(), /context_unavailable/); continue; }
+    const history = await originals.acquireTaskResults();
+    assert.deepEqual(history.results.map(row => [row.input.entryId, row.requestId]), [['entry-0', 'earlier'], ['entry-3', 'answer']]);
+  }
+});
 
 function appendHistory(f: ReturnType<typeof taskHistory>, message: Record<string, unknown>) {
   const i = f.state.messages.length, entry = { entryId: `entry-${i}`, parentId: `entry-${i - 1}`, seq: i + 1, message };

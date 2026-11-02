@@ -89,9 +89,11 @@ for (const [path, expected] of sources) assert.equal(digest(read(join(sdk, 'dist
 if (!process.argv.includes('--noEmit')) {
   // The native routing entry reads this existing domain-owned resource relative
   // to its emitted module. Keep its exact bytes; never load runtime/secret state.
-  const resource = 'agents/reminder-service/config/recipients.json';
-  generate(join(root, options.outDir, resource), read(join(root, resource)));
-  assert.equal(digest(read(join(root, options.outDir, resource))), digest(read(join(root, resource))));
+  for (const resource of ['agents/reminder-service/config/recipients.json',
+    'agents/jessica-vacuum/config/policy.v1.json', 'agents/jessica-vacuum/config/registry.v1.json']) {
+    generate(join(root, options.outDir, resource), read(join(root, resource)));
+    assert.equal(digest(read(join(root, options.outDir, resource))), digest(read(join(root, resource))));
+  }
   // Both native domain entries consume the single canonical receipt pin.
   const receiptManifest = 'integrations/openclaw/patches/tool-execution-receipts/manifest.json';
   generate(join(root, options.outDir, receiptManifest), read(join(root, receiptManifest)));

@@ -3,11 +3,11 @@ import type { ToolExecutionEvidenceProvider } from '../../../benson-routing/core
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry';
 import { PublicSchemas, parseRequest, type ServiceOperation, type ToolName } from '../../../../../agents/reminder-service/lib/schemas.js';
 import { SERVICE_OPERATIONS, normalizeReminderServiceResult } from '../../../../../agents/reminder-service/lib/results.js';
-import { MAX_NATIVE_TOOL_CALLS, settleNativeDomainCompletion, type NativeDomainCompletionInput } from '../../../benson-routing/core/completion.js';
+import { MAX_NATIVE_TOOL_CALLS, settleNativeDomainCompletion, type NativeDomainCompletionInput, type NativeDomainNoToolCompletionInput } from '../../../benson-routing/core/completion.js';
 import { createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
-import { assertion, synchronous, fail, plain, boundedCopy, decode, ObjectListSchema } from '../../../benson-routing/core/value.js';
+import { assertion, synchronous, fail, plain, boundedCopy, decode, ObjectListSchema, read, TextSchema, MAX_BYTES } from '../../../benson-routing/core/value.js';
 import type { Binding6 } from '../../../benson-routing/core/completion-contracts.js';
-import { EffectsSchema, type Effects } from '../../../benson-routing/core/contracts.js';
+import { EffectsSchema, FactsSchema, type Effects } from '../../../benson-routing/core/contracts.js';
 import type { createReminderTaskToolFactory } from './tool.js';
 
 function serviceOperation(value: unknown): value is ServiceOperation {
@@ -17,6 +17,30 @@ function serviceOperation(value: unknown): value is ServiceOperation {
 type Observation = { resultVersion?: 2 | 3 } & Omit<NativeDomainCompletionInput, 'binding' | 'knownFacts'> & {
   operation: ServiceOperation; effects: Effects; uncertainty: NativeDomainCompletionInput['knownFacts']['uncertainty'];
 };
+type ReasoningObservation = Omit<NativeDomainNoToolCompletionInput, 'binding' | 'knownFacts'>;
+
+/** A semantic question is not execution evidence. Only a sealed zero-tool Run
+ * may propose this narrow create clarification; Task validates its provenance
+ * against the original source before releasing the resulting pending. */
+function normalizeReminderReasoningCompletion(input: ReasoningObservation & { binding: Binding6; resultVersion?: 2 | 3 }) {
+  const final = input.terminal.messages.at(-1);
+  if (!plain(final) || final.role !== 'assistant' || !Array.isArray(final.content) || final.content.length !== 1) fail('reminder_clarification_missing');
+  const part: unknown = final.content[0];
+  if (!plain(part) || part.type !== 'text' || typeof part.text !== 'string' || Buffer.byteLength(part.text, 'utf8') > MAX_BYTES) fail('reminder_clarification_missing');
+  const proposal: unknown = JSON.parse(part.text);
+  if (!plain(proposal)) fail('reminder_clarification_missing');
+  const facts = read(FactsSchema, proposal.facts, 'reminder_clarification_invalid');
+  if (facts.domain !== 'reminder' || facts.domainSchemaVersion !== 'legacy-unversioned' || facts.operation !== 'create' ||
+      facts.status !== 'clarification_required' || facts.verified !== false || facts.verificationScope.length ||
+      facts.effects.length || facts.uncertainty.length || facts.warnings.length || facts.error !== null || facts.pendingContext === null ||
+      !plain(facts.data) || Object.keys(facts.data).join(',') !== 'question') fail('reminder_clarification_invalid');
+  read(TextSchema, facts.data.question, 'reminder_clarification_invalid');
+  const { record, authority } = settleNativeDomainCompletion({ ...input, knownFacts: facts });
+  const effects: Effects = { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } };
+  const project = input.resultVersion === 3 ? createCompletionDomainResultV3 : createCompletionDomainResult;
+  const result = project(record, authority, { expectedRunId: input.binding.runId, projectEffects: () => effects });
+  return { completion: record, authority, effects: result.effects, result };
+}
 /** Canonical transaction identity validation, shared by aggregation and the
  * receipt/domain correlation check. No report or transcript grants authority. */
 function reminderEffectIds(name: string, raw: unknown, operation: ServiceOperation, requestedId?: unknown): string[] {
@@ -146,7 +170,7 @@ export async function runReminderNativeTask(request: Parameters<Task['run']>[0],
   executionEvidence: ToolExecutionEvidenceProvider;
   /** Retained original-source/domain/terminal custody, independent of the
    * active Task invocation. It permits result consumption, never execution. */
-  observe(runId: string): Observation;
+  observe(runId: string): Observation | ReasoningObservation;
 }) {
   if (options.resultVersion !== undefined && options.resultVersion !== 2 && options.resultVersion !== 3) fail('domain_result_version');
   const signal = work.deps.authority.signal, assertSource = work.deps.authority.assertCurrent.bind(work.deps.authority);
@@ -167,15 +191,17 @@ export async function runReminderNativeTask(request: Parameters<Task['run']>[0],
   current();
   await options.executionEvidence.waitForSettlement(receipt.runId, signal); current();
   const observed = synchronous(options.observe(receipt.runId), 'reminder_native_observation_must_be_synchronous');
-  if ([...(observed.preceding ?? []), observed].some(item => !tools.some(name => name === item.tool.name))) {
+  if (!('noTools' in observed) && [...(observed.preceding ?? []), observed].some(item => !tools.some(name => name === item.tool.name))) {
     throw new Error('reminder_native_tool_not_admitted');
   }
   const binding: Binding6 = { inputId, admissionId: inputId, conversationId: work.source.context.conversation.conversationRef,
-    runId: receipt.runId, agentId: 'reminder-service', sessionKey, sessionId: observed.tool.sessionId,
+    runId: receipt.runId, agentId: 'reminder-service', sessionKey, sessionId: 'noTools' in observed
+      ? observed.terminal.sessionId ?? fail('reminder_native_terminal_identity_missing') : observed.tool.sessionId,
     domain: 'reminder', taskId: work.callId, caller, completionTarget: 'CALLER', authorizationId: inputId,
     parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } };
-  const settled = normalizeReminderCompletion({ ...observed, executionEvidence: options.executionEvidence.evidence(receipt.runId),
-    ...options.resultVersion !== undefined ? { resultVersion: options.resultVersion } : {}, binding });
+  const evidence = { ...observed, executionEvidence: options.executionEvidence.evidence(receipt.runId),
+    ...options.resultVersion !== undefined ? { resultVersion: options.resultVersion } : {}, binding };
+  const settled = 'noTools' in evidence ? normalizeReminderReasoningCompletion(evidence) : normalizeReminderCompletion(evidence);
   // Task invocation authority remains mandatory through production. The
   // normalized result retains its independent source/domain/native custody
   // after this invocation ends; it does not retain an execution grant.

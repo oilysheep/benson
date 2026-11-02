@@ -30,21 +30,36 @@ import { normalizeReminderServiceResult } from '../../../../../agents/reminder-s
 import { parseRequest as parseReminderRequest } from '../../../../../agents/reminder-service/lib/schemas.js';
 
 const report = '/tmp/correlation-result.json';
-const pluginId = 'benson-jessica-tool';
+const pluginId = process.env.BENSON_NATIVE_REMINDER_PRODUCT_ONLY === '1' ? 'benson-ts04-product-observer' : 'benson-jessica-tool';
 export const REMINDER_CREATE_TEXT = 'G3_MAIN_REMINDER_CREATE: Remind me to drink water on November 2 at 10:00, without a calendar event.';
 export const PRODUCT_REMINDER_DATE = new Date(Date.now() + 86_400_000).toISOString().slice(0, 10);
 export const PRODUCT_REMINDER_CREATE_TEXT = `G3_MAIN_REMINDER_CREATE: Remind me to drink water on ${PRODUCT_REMINDER_DATE} at 10:00, without a calendar event.`;
-export function reminderProductInput(source = { contextId: 'agent:main:main', currentEvidenceId: 'product-reminder-1' }) {
+export const PRODUCT_REMINDER_PENDING_TEXT = 'G3_MAIN_REMINDER_CREATE: Remind me to drink water.';
+export const PRODUCT_REMINDER_ANSWER_TEXT = `G3_MAIN_REMINDER_CREATE: On ${PRODUCT_REMINDER_DATE} at 10:00, without a calendar event.`;
+type ProductSource = { contextId: string; currentEvidenceId: string; request?: string; now?: string;
+  requesterId?: string; sourceConversation?: { type: string; id: string }; pendingBinding?: { requesterId: string; conversationId: string };
+  pendingContext?: { value: Record<string, unknown>; binding: { requesterId: string; conversationId: string }; expiresAt: string } | null };
+function reminderProductProvenance(source: ProductSource) {
+  const old = source.pendingContext?.value;
   const evidenceId = source.currentEvidenceId;
+  const previous = old?.evidence;
+  assert(previous === undefined || Array.isArray(previous));
+  const evidence = [...previous ?? [], { id: evidenceId, text: source.request ?? PRODUCT_REMINDER_CREATE_TEXT }];
+  const contentId = previous?.length ? (previous[0] as { id: string }).id : evidenceId;
+  return { schemaVersion: 1, contextId: source.contextId, revision: evidence.length,
+    createdAt: old?.createdAt ?? source.now ?? new Date().toISOString(),
+    expiresAt: old?.expiresAt ?? new Date(Date.parse(source.now ?? new Date().toISOString())+300_000).toISOString(),
+    sourceConversation: source.sourceConversation ?? { type: 'private', id: '+15550000001' }, requesterId: source.requesterId ?? 'reader',
+    currentEvidenceId: evidenceId, evidence, fieldEvidence: [{ field: 'content', evidenceId: contentId, quote: 'drink water' },
+      ...source.request === PRODUCT_REMINDER_PENDING_TEXT ? [] : [
+        { field: 'schedule', evidenceId, quote: `${PRODUCT_REMINDER_DATE} at 10:00` },
+        { field: 'calendar.requested', evidenceId, quote: 'without a calendar event' }] ] };
+}
+export function reminderProductInput(source: ProductSource = { contextId: 'agent:main:main', currentEvidenceId: 'product-reminder-1' }) {
   const input = { input: {
     sourceConversation: { type: 'private', id: '+15550000001' }, requesterId: 'reader', recipientIds: ['reader'], content: 'drink water',
     schedule: { type: 'one-shot', resolvedTime: `${PRODUCT_REMINDER_DATE}T10:00:00+02:00`, timezone: 'Asia/Jerusalem' }, calendar: { requested: false },
-    provenance: { schemaVersion: 1, contextId: source.contextId, revision: 1, createdAt: new Date().toISOString(),
-      expiresAt: new Date(Date.now()+300_000).toISOString(), sourceConversation: { type: 'private', id: '+15550000001' }, requesterId: 'reader',
-      currentEvidenceId: evidenceId, evidence: [{ id: evidenceId, text: PRODUCT_REMINDER_CREATE_TEXT }], fieldEvidence: [
-        { field: 'content', evidenceId, quote: 'drink water' },
-        { field: 'schedule', evidenceId, quote: `${PRODUCT_REMINDER_DATE} at 10:00` },
-        { field: 'calendar.requested', evidenceId, quote: 'without a calendar event' }] },
+    provenance: reminderProductProvenance(source),
   } };
   parseReminderRequest('benson_reminder_create', input); return input;
 }
@@ -463,10 +478,13 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
   assert(!codeModeOnly || !correlation);
   assert(!mainHookSurfaceOnly || (!correlation && !codeModeOnly && !completionV6Only));
   const reminderManifest = reminderProduct ? JSON.parse(readFileSync('/reminder-plugin-manifest.json', 'utf8')) as { contracts: { tools: string[] } } : undefined;
-  const exposedTools = reminderManifest?.contracts.tools ?? (whatsappInstallerOnly ? ['jessica_task', 'jessica_read', 'jessica_execute', 'reminder_task', 'benson_reminder_create', 'benson_reminder_delete'] : completionV6Only ? ['jessica_read', 'jessica_task'] : correlation ? ['jessica_read'] : ['jessica_read', 'jessica_task', 'reminder_task']);
+  const exposedTools = reminderManifest ? [...reminderManifest.contracts.tools, 'jessica_task'] : (whatsappInstallerOnly ? ['jessica_task', 'jessica_read', 'jessica_execute', 'reminder_task', 'benson_reminder_create', 'benson_reminder_delete'] : completionV6Only ? ['jessica_read', 'jessica_task'] : correlation ? ['jessica_read'] : ['jessica_read', 'jessica_task', 'reminder_task']);
   assert.equal(JSON.parse(readFileSync('/repo/node_modules/openclaw/package.json', 'utf8')).version, '2026.10.4');
   for (const path of ['/tmp/home', '/tmp/state', '/tmp/workspace', '/tmp/plugin']) mkdirSync(path, { recursive: true });
   if (reminderProduct) {
+    writeFileSync('/repo/output/typescript/agents/jessica-vacuum/config/registry.v1.json', readFileSync('/repo/agents/jessica-vacuum/config/registry.v1.json'));
+    writeFileSync('/repo/output/typescript/agents/jessica-vacuum/config/policy.v1.json', JSON.stringify({ version: '1', defaultDecision: 'deny',
+      rules: ['read', 'control'].map(actionClass => ({ subject: 'reader', actionClass, deviceScope: 'jessica-vacuum', decision: 'allow' })) }));
     reminderProductInput(); // Validate synthetic tool arguments before any native install/launch.
     writeFileSync('/repo/output/typescript/agents/reminder-service/config/recipients.json', JSON.stringify({ accountId: 'fixture-0',
       trustedRequesterIds: ['reader'], recipients: [{ id: 'reader', type: 'person', channel: 'whatsapp', to: '+15550000001' }] }));
@@ -574,7 +592,8 @@ process.stdout.write(JSON.stringify(value));
       const offeredTools = (input.tools ?? []).map((tool: unknown) => {
         assert(record(tool) && record(tool.function)); return tool.function.name;
       });
-      let productSource: { contextId: string; currentEvidenceId: string } | undefined;
+      let productSource: ProductSource | undefined;
+      const productRequest = turnText.includes(PRODUCT_REMINDER_ANSWER_TEXT) ? PRODUCT_REMINDER_ANSWER_TEXT : turnText.includes(PRODUCT_REMINDER_PENDING_TEXT) ? PRODUCT_REMINDER_PENDING_TEXT : PRODUCT_REMINDER_CREATE_TEXT;
       if (reminderProduct) {
         productRequests.push({ tools: offeredTools, roles: turnMessages.map((item: unknown) => record(item) ? item.role : null),
           calls: turnMessages.flatMap((item: unknown) => record(item) && Array.isArray(item.tool_calls) ? item.tool_calls : []) });
@@ -583,11 +602,12 @@ process.stdout.write(JSON.stringify(value));
           const text = typeof user.content === 'string' ? user.content : JSON.stringify(user.content);
           const source: unknown = JSON.parse(text.slice(text.indexOf('{"request":'), text.lastIndexOf('}') + 1));
           assert(record(source) && typeof source.contextId === 'string' && typeof source.currentEvidenceId === 'string');
-          assert.equal(source.request, PRODUCT_REMINDER_CREATE_TEXT); assert(Array.isArray(source.originalUserTurns));
-          productSource = { contextId: source.contextId, currentEvidenceId: source.currentEvidenceId };
+          assert([PRODUCT_REMINDER_CREATE_TEXT, PRODUCT_REMINDER_PENDING_TEXT, PRODUCT_REMINDER_ANSWER_TEXT].includes(String(source.request))); assert(Array.isArray(source.originalUserTurns));
+          assert(record(source.pendingBinding) && record(source.sourceConversation) && typeof source.requesterId === 'string');
+          productSource = source as ProductSource;
         }
       }
-      if (reminderProduct) assert.deepEqual(offeredTools.toSorted(), (productChild ? exposedTools.filter(name => name !== 'reminder_task') : ['reminder_task']).toSorted());
+      if (reminderProduct) assert.deepEqual(offeredTools.toSorted(), ['jessica_task', 'reminder_task']);
       else assert.deepEqual((input.tools ?? []).map((tool: unknown) => {
         assert(record(tool) && record(tool.function)); return tool.function.name;
       }), mutationChild ? ['jessica_execute'] : mutationParent ? ['jessica_task'] : reminderChild ? [reminderTool] : reminderParent ? ['reminder_task'] : completionChild ? ['jessica_read'] : completionV6Only ? completionParent ? ['jessica_task'] : ['jessica_read'] : codeMode ? ['exec', 'wait'] : whatsappInstallerOnly && /G3_MAIN_READ_/.test(turnText) ? [turnText.includes('G3_MAIN_READ_REMINDER') ? 'reminder_task' : 'jessica_task'] : correlation || /G3_(HANDLED_TOOL_FAILURE|MAIN_READ_)/.test(turnText) ? exposedTools : [], 'The fixture must expose only its approved tools');
@@ -654,12 +674,12 @@ process.stdout.write(JSON.stringify(value));
         }
       }
       const useTool = mutationChild || mutationParent || correlation || completionChild || reminderChild || reminderParent || content.includes('G3_HANDLED_TOOL_FAILURE') || readTools !== null;
-      if ((reminderParent || mutationParent) && done) {
+      if ((reminderParent || mutationParent) && done && !reminderProduct) {
         const messages = turnMessages.filter((item: unknown) => record(item) && item.role === 'tool'); assert.equal(messages.length, 1);
         const calls = turnMessages.flatMap((item: unknown) => record(item) && item.role === 'assistant' && Array.isArray(item.tool_calls) ? item.tool_calls : []); assert.equal(calls.length, 1);
         const message: unknown = messages[0], call: unknown = calls[0]; assert(record(message) && record(call) && record(call.function));
         assert.equal(call.function.name, mutationParent ? 'jessica_task' : 'reminder_task'); assert.equal(message.tool_call_id, call.id); assert(typeof message.content === 'string' && typeof call.id === 'string');
-        const value = validateDomainResultEnvelope(JSON.parse(message.content)); assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, 'known');
+        const value = validateDomainResultEnvelope(JSON.parse(message.content)); assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, productRequest === PRODUCT_REMINDER_PENDING_TEXT ? 'none' : 'known');
         mainReadCarriers.push({ marker: mutationParent ? 'G3_MAIN_JESSICA_MUTATION' : reminderDelete ? 'G3_MAIN_REMINDER_DELETE' : 'G3_MAIN_REMINDER_CREATE', tool: mutationParent ? 'jessica_task' : 'reminder_task', callId: call.id, value });
       }
       let completionText: string | undefined;
@@ -673,6 +693,20 @@ process.stdout.write(JSON.stringify(value));
           pendingContext: value.pendingContext, effects: [{ kind: reminderDelete ? 'reminder-delete' : 'reminder-create', reminderId: reminderDelete ? 'isolated-existing' : 'isolated-created', verified: true }], uncertainty: [],
         }, userResponse: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render the verified Reminder facts through the existing domain presentation owner.' } } });
       }
+      const productQuestion = productChild && productSource?.request === PRODUCT_REMINDER_PENDING_TEXT;
+      if (productQuestion) {
+        assert(!done && productSource?.pendingBinding);
+        const provenance = reminderProductProvenance(productSource);
+        completionText = JSON.stringify({ schemaVersion: 6, kind: 'domain-task', facts: {
+          domain: 'reminder', domainSchemaVersion: 'legacy-unversioned', operation: 'create', status: 'clarification_required',
+          verified: false, verificationScope: [], data: { question: 'מתי להזכיר לך?' }, warnings: [], error: null,
+          pendingContext: { schemaVersion: 1, value: provenance, binding: productSource.pendingBinding, expiresAt: provenance.expiresAt },
+          effects: [], uncertainty: [],
+        }, userResponse: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render the question.' } } });
+      }
+      let productSelection: unknown;
+      const productV2 = reminderProduct && reminderParent && productRequest === PRODUCT_REMINDER_ANSWER_TEXT;
+      if (productV2) productSelection = null; // Explicit no-selection still requires complete safe history.
       if ((mutationChild || completionChild || completionV6Only && !completionParent) && done && !completionCancellation) {
         const message = turnMessages.findLast((item: unknown) => record(item) && item.role === 'tool'); assert(record(message));
         assert(typeof message.content === 'string');
@@ -681,9 +715,9 @@ process.stdout.write(JSON.stringify(value));
           userResponse: mutationChild ? { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Use verified domain facts' } } : { state: 'usable', text: renderJessicaStatusText(value, new Date()), language: 'he' } });
       }
       const code = 'const results = []; results.push(await jessica_task({operation: "status"})); results.push(await reminder_task({operation: "list"})); return results;';
-      const delta = !useTool ? { content: 'Native Main fixture reply.' } : done ? { content: completionText ?? 'Fixture finished.' } : reminderChild || reminderParent ? {
+      const delta = productQuestion ? { content: completionText } : !useTool ? { content: 'Native Main fixture reply.' } : done ? { content: completionText ?? 'Fixture finished.' } : reminderChild || reminderParent ? {
         tool_calls: [{ index: 0, id: 'fixture-reminder-create', type: 'function', function: { name: reminderChild ? reminderTool : 'reminder_task',
-          arguments: reminderChild ? productChild ? JSON.stringify(reminderProductInput(productSource)) : readFileSync(`/tmp/reminder-${reminderDelete ? 'delete' : 'create'}-input.json`, 'utf8') : JSON.stringify({ kind: 'benson.self-contained-request', version: 1, request: reminderDelete ? REMINDER_DELETE_TEXT : reminderProduct ? PRODUCT_REMINDER_CREATE_TEXT : REMINDER_CREATE_TEXT }) } }],
+          arguments: reminderChild ? productChild ? JSON.stringify(reminderProductInput(productSource)) : readFileSync(`/tmp/reminder-${reminderDelete ? 'delete' : 'create'}-input.json`, 'utf8') : JSON.stringify({ kind: 'benson.self-contained-request', version: productV2 ? 2 : 1, ...productV2 ? { pending: productSelection } : {}, request: reminderDelete ? REMINDER_DELETE_TEXT : reminderProduct ? productRequest : REMINDER_CREATE_TEXT }) } }],
       } : mutationChild || mutationParent ? {
         tool_calls: [{ index: 0, id: 'fixture-jessica-mutation', type: 'function', function: { name: mutationChild ? 'jessica_execute' : 'jessica_task',
           arguments: JSON.stringify(mutationChild ? { operation: 'clean', target: { kind: 'rooms', rooms: ['living_room'] } }
@@ -706,7 +740,7 @@ process.stdout.write(JSON.stringify(value));
         return;
       }
       res.write(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta, finish_reason: null }] })}\n\n`);
-      res.end(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: !useTool || done ? 'stop' : 'tool_calls' }],
+      res.end(`data: ${JSON.stringify({ ...base, choices: [{ index: 0, delta: {}, finish_reason: !useTool || done || productQuestion ? 'stop' : 'tool_calls' }],
         usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } })}\n\ndata: [DONE]\n\n`);
     } catch (error) {
       if (contractFailures.length < 3) contractFailures.push(error instanceof Error ? error.message : 'Unknown contract failure');
@@ -731,6 +765,7 @@ process.stdout.write(JSON.stringify(value));
   if (reminderProduct) for (const [id, manifest, entry] of [
     ['benson-routing', '/routing-plugin-manifest.json', 'benson-routing'],
     ['benson-reminder-tool', '/reminder-plugin-manifest.json', 'plugins/benson-reminder-tool'],
+    ['benson-jessica-tool', '/jessica-plugin-manifest.json', 'plugins/benson-jessica-tool'],
   ]) {
     const path = `/tmp/product-tree/integrations/openclaw/${entry}`; mkdirSync(path, { recursive: true }); productPaths.push(path);
     writeFileSync(`${path}/openclaw.plugin.json`, readFileSync(manifest!));

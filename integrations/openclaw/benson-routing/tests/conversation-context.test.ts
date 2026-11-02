@@ -221,7 +221,7 @@ function pendingResult(pending: Pending | null, consumed: ConsumedPending | null
     pendingContext: pending, content: { state: 'unavailable', reason: { code: 'PRESENTATION_REQUIRED', detail: 'Use domain renderer' } } });
   return withDomainPending(value, consumed);
 }
-function pendingHistory(rows: { input: { entryId: string }; entryId: string; result: AnyDomainResult }[], inputId = 'fresh') {
+function pendingHistory(rows: { input: { entryId: string }; requestId: string; entryId: string; result: AnyDomainResult }[], inputId = 'fresh') {
   const state = { live: true, historyLive: true, clock: new Date(pendingTime) };
   const view = reconstructDomainPending({ results: rows, assertCurrent() { assert(state.historyLive); } }, {
     domain: 'reminder', binding: { ...pendingBinding }, currentInputId: inputId,
@@ -231,7 +231,26 @@ function pendingHistory(rows: { input: { entryId: string }; entryId: string; res
   });
   return { state, view };
 }
-const pendingRow = (entryId: string, inputId: string, result: AnyDomainResult) => ({ entryId, input: { entryId: inputId }, result });
+const pendingRow = (entryId: string, inputId: string, result: AnyDomainResult) => ({ entryId, requestId: inputId, input: { entryId: 'persisted-' + inputId }, result });
+
+test('Task binding selects exact pending before execution and never auto-selects current-only requests', () => {
+  const items = Array.from({ length: 5 }, (_, i) => domainPending('original-' + i));
+  const rows = items.map((pending, i) => pendingRow('question-' + i, 'input-' + i, pendingResult(pending)));
+  const { view, state } = pendingHistory(rows);
+  const legacy = { kind: 'benson.self-contained-request' as const, version: 1 as const, request: 'answer' };
+  assert.throws(() => view.bindTask(legacy), /selection_required/);
+  assert.throws(() => view.bindTask({ ...legacy, version: 2, pending: null }), /selection_required/);
+  const reference = pendingReference(items[3]!);
+  const bound = view.bindTask({ ...legacy, version: 2, pending: reference });
+  assert.deepEqual(bound.selected?.reference, reference); bound.assertCurrent();
+  reference.binding.requesterId = 'changed-after-selection'; bound.assertCurrent();
+  assert.equal(view.pending.length, 5);
+  assert.throws(() => view.bindTask({ ...legacy, version: 2, pending: reference }), /binding_mismatch/);
+  state.clock = new Date(items[3]!.expiresAt); assert.throws(() => bound.assertCurrent(), /unavailable/);
+  const empty = pendingHistory([]).view;
+  assert.equal(empty.bindTask(legacy).selected, null);
+  assert.equal(empty.bindTask({ ...legacy, version: 2, pending: null }).selected, null);
+});
 
 test('versioned domain facts preserve legacy data and reject unknown or incomplete metadata', () => {
   const value = pendingResult(null);
@@ -347,3 +366,22 @@ test('failed reporting, unresolved effects and missing evidence never carry cons
     { uncertainty: [{ code: 'UNRESOLVED' }] },
   ]) assert.throws(() => withDomainPending({ ...legacy, ...changed } as AnyDomainResult, reference));
 });
+
+for (const fault of ['possible', 'reconciliation', 'handling', 'gaps', 'uncertainty'] as const) {
+  test('pending reconstruction fails closed on unresolved history: ' + fault, () => {
+    const pending = domainPending('original');
+    for (const later of [false, true]) {
+      const clean = pendingResult(later ? null : pending);
+      const unresolved = validateDomainResultEnvelope({ ...clean,
+        effects: fault === 'possible' ? { status: 'possible', refs: [], details: [], reconciliation: { required: true, reason: 'UNRESOLVED' } }
+          : fault === 'reconciliation' ? { status: 'known', refs: ['effect'], details: [], reconciliation: { required: true, reason: 'UNRESOLVED' } } : clean.effects,
+        failures: { ...clean.failures, handling: fault === 'handling' ? { code: 'HANDLING_FAILED', message: 'Unresolved completion', retryable: false } : null },
+        evidence: { ...clean.evidence, gaps: fault === 'gaps' ? [{ code: 'FACT_NOT_ESTABLISHED', path: 'facts.data', detail: 'NOT_OBSERVED' }] : [] },
+        uncertainty: fault === 'uncertainty' ? [{ code: 'UNRESOLVED_EXECUTION' }] : [],
+      });
+      const rows = later ? [pendingRow('q', 'old', pendingResult(pending)), pendingRow('attempt', 'answer', unresolved)]
+        : [pendingRow('q', 'old', unresolved)];
+      assert.throws(() => pendingHistory(rows), /pending_history_unresolved/);
+    }
+  });
+}

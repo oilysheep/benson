@@ -9,6 +9,7 @@ import { synchronous } from '../../../benson-routing/core/value.js';
 import { parseExecuteRequest } from '../../../../../agents/jessica-vacuum/lib/schemas.js';
 import { createHaDevice } from '../../../../../agents/jessica-vacuum/lib/adapters/ha-device.js';
 import type { HaTransport } from '../../../../../agents/jessica-vacuum/lib/adapters/ha-transport.js';
+import type { bindJessicaTaskPending } from '../../../../../agents/jessica-vacuum/lib/task.js';
 
 type Tool = Exclude<NonNullable<ReturnType<OpenClawPluginToolFactory<2>['create']>>, unknown[]>;
 type ToolResult = Awaited<ReturnType<Tool['execute']>>;
@@ -23,6 +24,7 @@ export function createJessicaExecuteToolFactory(options: Omit<ExecutorOptions, '
 ) & {
   roster: FamilyRoutes;
   source: ExecutionContext;
+  pending?: ReturnType<typeof bindJessicaTaskPending>;
   jsonResult(value: Result, assertCompletion: (args: unknown, value: unknown) => void, callId: string): ToolResult;
 }): OpenClawPluginToolFactory<2>['create'] {
   const registry = loadRegistry(options.registryConfig), policy = loadPolicy(options.policyConfig);
@@ -98,6 +100,7 @@ export function createJessicaExecuteToolFactory(options: Omit<ExecutorOptions, '
           assertCurrent() {
             synchronous(context.assertInvocationCurrent(), 'jessica_execute_authority_must_be_synchronous');
             assertInvocationCurrent(sourceAuthority);
+            options.pending?.assertRequest(raw);
           } };
         assertInvocationCurrent(authority);
         const executor = fixedExecutor ?? createJessicaExecutor({ ...options, driver: driverFor(raw) });

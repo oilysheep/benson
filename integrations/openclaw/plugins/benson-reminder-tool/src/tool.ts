@@ -1,6 +1,6 @@
 import Type from 'typebox';
 import type { OpenClawPluginToolFactory, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
-import { executeReminderListTask, assertReminderCreateSource, REMINDER_TASK_SCHEMA, REMINDER_TASK_ENTRY_SCHEMA } from '../../../../../agents/reminder-service/lib/task.js';
+import { executeReminderListTask, assertReminderCreateSource, bindReminderTaskPending, REMINDER_TASK_SCHEMA, REMINDER_TASK_ENTRY_SCHEMA } from '../../../../../agents/reminder-service/lib/task.js';
 import type { IdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
 import { executeReminderTool, type ReminderTransaction, type Dependencies } from '../../../../../agents/reminder-service/lib/service.js';
 import { schemaForTool } from '../../../../../agents/reminder-service/lib/tool-contracts.js';
@@ -10,13 +10,14 @@ import { parseRequest } from '../../../../../agents/reminder-service/lib/schemas
 import { boundedCopy } from '../../../benson-routing/core/value.js';
 import type { ToolName } from '../../../../../agents/reminder-service/lib/schemas.js';
 import { DOMAIN_RESULT_OUTPUT_SCHEMA, DOMAIN_RESULT_V3_OUTPUT_SCHEMA, createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
-import { TaskEnvelopeSchema, type TaskEnvelope, type Effects, type AnyDomainResult } from '../../../benson-routing/core/contracts.js';
+import type { TaskEnvelope, Effects, AnyDomainResult } from '../../../benson-routing/core/contracts.js';
 import { validateCompletion, type CompletionAuthority } from '../../../benson-routing/core/completion.js';
 import { createCurrentRequestContext, type CurrentRequestEvidence, type CurrentRequestProjection } from '../../../benson-routing/core/conversation-context.js';
 import { assertInvocationCurrent } from '../../../benson-routing/core/invocation.js';
-import { decode, synchronous, fail } from '../../../benson-routing/core/value.js';
+import { synchronous, fail } from '../../../benson-routing/core/value.js';
 import { resolveReminderRuntimeRoute } from './identity.js';
 import type { OriginalUserTurn } from '../../../../../agents/reminder-service/lib/provenance.js';
+import { validateTaskEnvelope } from '../../../benson-routing/core/task-envelope.js';
 
 type Tool = Exclude<NonNullable<ReturnType<OpenClawPluginToolFactory<2>['create']>>, unknown[]>;
 type ToolResult = Awaited<ReturnType<Tool['execute']>>;
@@ -76,12 +77,14 @@ export function createReminderTaskToolFactory(options: {
   clock?: () => Date; resultVersion?: 2 | 3;
   task?: {
     source(context: OpenClawPluginToolContext<2>): CurrentRequestEvidence;
+    history?(context: OpenClawPluginToolContext<2>, callId: string): Promise<Parameters<typeof bindReminderTaskPending>[1] & { assertRetainedCurrent(): void }>;
     /** Optional original-source custody; omission keeps current-input-only
      * evidence. This supplies quotes, never pending or effect authority. */
     originalUserTurns?(context: OpenClawPluginToolContext<2>): Promise<{
       turns: readonly OriginalUserTurn[]; assertCurrent(): void;
     }>;
-    run(request: TaskEnvelope, context: { callId: string; source: CurrentRequestProjection; deps: Dependencies }):
+    run(request: TaskEnvelope, context: { callId: string; source: CurrentRequestProjection; deps: Dependencies;
+      pending?: ReturnType<typeof bindReminderTaskPending> }):
       Promise<{ completion: unknown; authority: CompletionAuthority; effects: Effects }>;
   };
 }): OpenClawPluginToolFactory<2>['create'] {
@@ -122,7 +125,7 @@ export function createReminderTaskToolFactory(options: {
           if (!options.task) throw new Error('reminder_task_source_unavailable');
           const callerSessionKey = context.sessionKey, callerSessionId = context.sessionId;
           if (!callerSessionKey || !callerSessionId) throw new Error('reminder_task_caller_unavailable');
-          const task = decode(TaskEnvelopeSchema, request, 'reminder_task_intent_invalid');
+          const task = validateTaskEnvelope(request);
           const evidence = synchronous(options.task.source(context), 'reminder_task_source_must_be_synchronous');
           const current = createCurrentRequestContext({ ...evidence, assertCurrent() {
             assertInvocationCurrent(authority); return evidence.assertCurrent();
@@ -136,7 +139,8 @@ export function createReminderTaskToolFactory(options: {
             throw new Error('reminder_task_source_mismatch');
           }
           let originals: { turns: readonly OriginalUserTurn[]; assertCurrent(): void } | undefined;
-          const assertCurrent = () => {
+          let pending: ReturnType<typeof bindReminderTaskPending> | undefined;
+          const assertSource = () => {
             assertInvocationCurrent(authority);
             if (context.sessionKey !== callerSessionKey || context.sessionId !== callerSessionId) throw new Error('reminder_task_caller_changed');
             if (current.revalidateProjection(source, { signal: authority.signal }).status !== 'available') throw new Error('reminder_task_source_retired');
@@ -144,11 +148,14 @@ export function createReminderTaskToolFactory(options: {
             if (!fresh || Object.entries(route).some(([key, value]) => Reflect.get(fresh, key) !== value)) throw new Error('reminder_task_route_changed');
             originals?.assertCurrent();
           };
+          const assertCurrent = () => { assertSource(); pending?.assertCurrent(); };
           const taskDeps: Dependencies = { ...deps, authority: { signal: authority.signal, assertCurrent }, evidence: {
             async readCurrentUserText() { assertCurrent(); return source.context.current.text; },
             async readOriginalUserTurns() {
               assertCurrent();
-              if (!options.task?.originalUserTurns) return [{ text: source.context.current.text }];
+              // Historical quotes are available only under an exact live v2
+              // pending selection. Expiry never renews the old evidence.
+              if (!pending?.selected || !options.task?.originalUserTurns) return [{ text: source.context.current.text }];
               if (!originals) {
                 const acquired = await options.task.originalUserTurns(context);
                 assertCurrent(); acquired.assertCurrent();
@@ -159,13 +166,27 @@ export function createReminderTaskToolFactory(options: {
               }
               assertCurrent(); return structuredClone(originals.turns);
             },
-          } };
+          }, transaction: { async execute(request, transactionAuthority) {
+            assertCurrent(); pending?.assertRequest(request);
+            // Recheck the immutable request at the canonical backend's own
+            // authorization fence, without changing its arguments or state.
+            const guarded = { signal: transactionAuthority.signal, assertCurrent() {
+              assertInvocationCurrent(transactionAuthority); pending?.assertRequest(request);
+            } };
+            const result = await deps.transaction.execute(request, guarded);
+            assertCurrent(); return result;
+          } } };
           assertResultCurrent = assertCurrent;
           assertCurrent();
           if (taskStarted) throw new Error('reminder_task_already_started');
           // An ambiguous attempt must reconcile through the domain, never replay.
           taskStarted = true;
-          const handoff = await options.task.run(task, { callId, source, deps: taskDeps });
+          if (options.task.history) {
+            const history = await options.task.history(context, callId); assertSource();
+            pending = bindReminderTaskPending(task, history, source, deps, () => history.assertRetainedCurrent());
+          } else if (task.version === 2) fail('reminder_pending_history_unavailable');
+          assertCurrent();
+          const handoff = await options.task.run(task, { callId, source, deps: taskDeps, ...pending ? { pending } : {} });
           assertCurrent();
           if (released.has(handoff.authority)) throw new Error('reminder_completion_already_released');
           const completion = validateCompletion(handoff.completion, handoff.authority);
@@ -175,7 +196,9 @@ export function createReminderTaskToolFactory(options: {
             completion.binding.caller.sessionKey !== callerSessionKey || completion.binding.caller.sessionId !== callerSessionId ||
             completion.binding.completionTarget !== 'CALLER') throw new Error('reminder_task_completion_binding');
           result = project(completion, handoff.authority, { projectEffects: () => handoff.effects });
-          assertCompletionCurrent = () => { validateCompletion(handoff.completion, handoff.authority); };
+          if (pending) result = pending.project(result);
+          const retainedPending = pending;
+          assertCompletionCurrent = () => { validateCompletion(handoff.completion, handoff.authority); retainedPending?.assertCurrent(); };
           if (result.operation !== null && !Object.values(SERVICE_OPERATIONS).some(operation => operation === result.operation)) throw new Error('reminder_task_operation_not_enabled');
           assertCurrent(); released.add(handoff.authority);
         }

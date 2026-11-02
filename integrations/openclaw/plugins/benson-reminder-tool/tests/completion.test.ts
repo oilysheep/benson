@@ -399,13 +399,15 @@ test('Reminder native Completion bounds the JSON carrier in UTF-8 bytes and logi
 });
 
 test('Reminder product producer binds native launch, original input, caller and terminal observation', async () => {
-  for (const fault of ['none', 'foreign-receipt', 'foreign-terminal', 'timeout-only', 'retired', 'false-custody', 'retired-task'] as const) {
+  for (const fault of ['none', 'foreign-receipt', 'foreign-terminal', 'timeout-only', 'retired', 'false-custody', 'retired-task', 'clarification', 'clarification-hidden-tool', 'clarification-effects', 'clarification-foreign-terminal'] as const) {
     const f = fixture(), abort = new AbortController();
     let taskLive = true;
+    const clarification = fault.startsWith('clarification');
+    const text = clarification ? 'Remind me to drink water.' : 'Delete the existing reminder.';
     const assertTaskCurrent = () => { assert(taskLive, 'Task invocation retired'); assert(f.state.live); return fault !== 'false-custody'; };
-    const source = createCurrentRequestContext({ request: 'Delete the existing reminder.',
+    const source = createCurrentRequestContext({ request: text,
       binding: { conversationRef: 'conversation', channel: 'whatsapp', accountId: 'fixture', kind: 'direct', peerId: 'peer', threadId: null, requesterId: 'peer' },
-      currentTurn: () => ({ entryId: 'original-input', role: 'user', text: 'Delete the existing reminder.',
+      currentTurn: () => ({ entryId: 'original-input', role: 'user', text,
         sender: { source: 'canonical_peer_binding', id: 'peer', channel: 'whatsapp', accountId: 'fixture' }, inputProvenance: { kind: 'external_user' } }),
       assertCurrent() { assert(f.state.live); }, assertAuthorized() { assert(f.state.live); },
     }).projectCurrentRequest();
@@ -426,10 +428,24 @@ test('Reminder product producer binds native launch, original input, caller and 
           return { status: fault === 'timeout-only' ? 'timeout' : 'ok', runId: options.runId }; } },
       observe(runId) { assert.equal(runId, f.input.binding.runId);
         if (fault === 'timeout-only') throw new Error('No terminal observation');
-        if (fault === 'foreign-terminal') f.input.terminal.runId = 'foreign'; return f.input; },
+        if (fault === 'foreign-terminal') f.input.terminal.runId = 'foreign';
+        if (clarification) {
+          const facts = { domain: 'reminder', domainSchemaVersion: 'legacy-unversioned', operation: 'create', status: 'clarification_required',
+            verified: false, verificationScope: [], data: { question: 'מתי להזכיר לך?' }, warnings: [], error: null,
+            pendingContext: { schemaVersion: 1, binding: { requesterId: 'peer', conversationId: 'conversation' }, expiresAt: '2026-11-02T09:00:00Z',
+              value: { contextId: 'conversation', revision: 1 } }, effects: fault === 'clarification-effects' ? [{ kind: 'invented' }] : [], uncertainty: [] };
+          if (fault !== 'clarification-hidden-tool') f.input.executionEvidence = unitToolEvidence({ binding: f.input.binding });
+          return { noTools: true, terminal: { ...f.input.terminal, runId: fault === 'clarification-foreign-terminal' ? 'foreign' : runId,
+            messages: [{ role: 'assistant', content: [{ type: 'text', text: JSON.stringify({ schemaVersion: 6, kind: 'domain-task', facts,
+              userResponse: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render question' } } }) }] }] }, custody: f.input.custody };
+        }
+        return f.input; },
     });
-    if (fault === 'none' || fault === 'retired-task') { const result = await promise; assert.equal(result.completion.binding.caller?.runId, 'actual-main');
-      assert.equal(result.completion.binding.inputId, 'original-input'); assert.equal(result.result.outcome.status, 'success');
+    if (fault === 'none' || fault === 'retired-task' || fault === 'clarification') { const result = await promise; assert.equal(result.completion.binding.caller?.runId, 'actual-main');
+      assert.equal(result.completion.binding.inputId, 'original-input'); assert.equal(result.result.outcome.status, clarification ? 'clarification_required' : 'success');
+      if (clarification) { assert.equal(result.effects.status, 'none'); assert.equal(result.completion.completion.outcome, 'NORMAL');
+        const rendered = renderReminderDomainResult(result.result, { language: 'he' }); assert.equal(rendered.kind, 'rendered');
+        if (rendered.kind === 'rendered') { assert.equal(rendered.text, 'מתי להזכיר לך?'); assert.deepEqual(rendered.pendingContext, result.result.pendingContext); } }
       if (fault === 'retired-task') {
         taskLive = false;
         assert.throws(assertTaskCurrent, /Task invocation retired/);
