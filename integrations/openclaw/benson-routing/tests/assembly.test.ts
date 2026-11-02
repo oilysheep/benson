@@ -10,6 +10,28 @@ import { REMINDER_SERVICE_PATH } from '../../plugins/benson-reminder-tool/src/ru
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { createCurrentRequestContext } from '../core/conversation-context.js';
+import { normalizeToolParameterSchema } from '@openclaw/ai/internal/tool-schema';
+import Value from 'typebox/value';
+import { JESSICA_TASK_ENTRY_SCHEMA } from '../../../../agents/jessica-vacuum/lib/task.js';
+import { REMINDER_TASK_ENTRY_SCHEMA } from '../../../../agents/reminder-service/lib/task.js';
+import { createTaskEnvelope, createPendingTaskEnvelope } from '../core/task-envelope.js';
+
+test('native parameter normalization preserves both Task versions and the deterministic read branches', () => {
+  for (const [schema, operation, domain] of [
+    [JESSICA_TASK_ENTRY_SCHEMA, 'status', 'jessica-vacuum'],
+    [REMINDER_TASK_ENTRY_SCHEMA, 'list', 'reminder'],
+  ] as const) {
+    const parameters = normalizeToolParameterSchema(schema, { modelProvider: 'fixture-local', modelId: 'correlation' });
+    const binding = { requesterId: 'requester', conversationId: 'conversation' };
+    const reference = domain === 'jessica-vacuum'
+      ? { schemaVersion: 1 as const, domain, binding, clarificationId: 'question' }
+      : { schemaVersion: 1 as const, domain, binding, contextId: 'context', revision: 1, currentEvidenceId: 'earlier' };
+    for (const value of [{ operation }, createTaskEnvelope('fixture'), createPendingTaskEnvelope('fixture', null),
+      createPendingTaskEnvelope('fixture', reference)]) {
+      assert.equal(Value.Check(parameters, value), true, `${domain}: ${JSON.stringify(value)}`);
+    }
+  }
+});
 
 test('emitted routing identity resource is byte-identical and loadable', () => {
   const original = readFileSync(resolve('agents/reminder-service/config/recipients.json'));

@@ -7,7 +7,7 @@ import { createSourceAdmissionController, createNativeDispatchRunAdmissionContro
 import { createCompletionAuthority, acceptAgentCompletion, validateCompletion, reconstructCompletion } from '../core/completion.js';
 import { controlReadResponse, controlResponse } from '../core/response-control.js';
 import { createNoRunDomainResult, createCompletionDomainResult } from '../core/domain-result.js';
-import { createTaskEnvelope, parseTaskEnvelope } from '../core/task-envelope.js';
+import { createTaskEnvelope, createPendingTaskEnvelope, validateTaskEnvelope, parseTaskEnvelope } from '../core/task-envelope.js';
 import { validateRenderedOutput, validateTaskResultEnvelope, createResponseEnvelope } from '../core/legacy-response.js';
 import { type Facts, type NativeReadOutcome, type NativeDispatchReadOutcome, TaskEnvelopeSchema } from '../core/contracts.js';
 import { boundedCopy, decode, JsonSchema, jsonCopy, type JsonValue } from '../core/value.js';
@@ -167,6 +167,31 @@ test('task/request contracts reject unknown or mixed versions and never upgrade 
   for (const version of [1, 3, '2']) assert.throws(() => f.controller.validateOutcome(f.admission, { ...f.outcome, schemaVersion: version }));
   const extra = { ...f.outcome, ignored: true }; assert.throws(() => f.controller.validateOutcome(f.admission, extra));
   assert.ok(Object.hasOwn(extra, 'ignored'));
+});
+
+test('TaskEnvelope v2 requires explicit pending and preserves strict v1 bytes', () => {
+  const legacy = { kind: 'benson.self-contained-request', version: 1, request: 'answer' };
+  assert.deepEqual(createTaskEnvelope('answer'), legacy);
+  assert.deepEqual(parseTaskEnvelope(JSON.stringify(legacy)), legacy);
+  const reference = { schemaVersion: 1 as const, domain: 'jessica-vacuum' as const,
+    binding: { requesterId: 'reader', conversationId: 'conversation' }, clarificationId: 'question' };
+  for (const pending of [null, reference]) {
+    const value = createPendingTaskEnvelope('answer', pending);
+    assert.deepEqual(JSON.parse(JSON.stringify(parseTaskEnvelope(JSON.stringify(value)))), { ...legacy, version: 2, pending });
+    assert(Object.isFrozen(value));
+  }
+  for (const raw of [{ ...legacy, pending: null }, { ...legacy, version: 2 },
+    { ...legacy, version: 2, pending: undefined }, { ...legacy, version: 3, pending: null },
+    { ...legacy, version: 2, pending: { ...reference, revision: 1 } },
+    { ...legacy, version: 2, pending: { ...reference, schemaVersion: 2 } }]) assert.throws(() => validateTaskEnvelope(raw));
+  let invoked = false;
+  const getter = Object.defineProperty({ ...legacy, version: 2 }, 'pending', { enumerable: true,
+    get() { invoked = true; return null; } });
+  assert.throws(() => validateTaskEnvelope(getter)); assert.equal(invoked, false);
+  assert(!Object.isFrozen(reference));
+  const large = 'x'.repeat(32_000);
+  assert.equal(parseTaskEnvelope(JSON.stringify(createTaskEnvelope(large))).request, large);
+  assert.equal(parseTaskEnvelope(JSON.stringify(createPendingTaskEnvelope(large, null))).request, large);
 });
 
 test('live admission identity and post-normalization currentness gate every disclosure', () => {

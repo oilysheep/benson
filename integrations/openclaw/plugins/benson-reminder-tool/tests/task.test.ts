@@ -4,10 +4,11 @@ import { plain } from '../../../benson-routing/core/value.js';
 import type { OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
 import { createReminderTaskToolFactory, createReminderToolFactory } from '../src/tool.js';
 import { loadIdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
-import { validateDomainResult } from '../../../benson-routing/core/domain-result.js';
+import { validateDomainResult, readDomainFactsData } from '../../../benson-routing/core/domain-result.js';
 import { createCompletionAuthority, acceptAgentCompletion } from '../../../benson-routing/core/completion.js';
-import { executeReminderCreateTask } from '../../../../../agents/reminder-service/lib/task.js';
+import { executeReminderCreateTask, bindReminderTaskPending } from '../../../../../agents/reminder-service/lib/task.js';
 import { renderReminderDomainResult } from '../../../../../agents/reminder-service/lib/presentation.js';
+import { createCurrentRequestContext } from '../../../benson-routing/core/conversation-context.js';
 import { SERVICE_OPERATIONS, normalizeReminderServiceResult } from '../../../../../agents/reminder-service/lib/results.js';
 import type { ToolName } from '../../../../../agents/reminder-service/lib/schemas.js';
 
@@ -148,12 +149,14 @@ test('unverified/backend failure becomes safe DomainResult without raw diagnosti
   assert.equal(validateDomainResult(result.details).outcome.disposition, 'failed');
   assert(!JSON.stringify(result).includes('private backend diagnostic'));
 });
-for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent', 'missing-provenance', 'foreign-input', 'cancel-before-transaction', 'foreign-completion', 'foreign-caller-key', 'foreign-caller-id', 'missing-caller-session', 'changed-caller-session', 'duplicate-completion', 'history-complete', 'history-unavailable', 'history-wrong-current', 'history-retired', 'history-retired-after-read'] as const) {
+for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent', 'missing-provenance', 'foreign-input', 'cancel-before-transaction', 'foreign-completion', 'foreign-caller-key', 'foreign-caller-id', 'missing-caller-session', 'changed-caller-session', 'duplicate-completion', 'history-complete', 'history-unavailable', 'history-wrong-current', 'history-retired', 'history-retired-after-read',
+  'pending', 'pending-possible-effects', 'pending-v1-expired', 'pending-v1-expired-current-only', 'pending-null-expired', 'pending-v1', 'pending-null', 'pending-stale', 'pending-missing-history', 'pending-revision', 'pending-rewritten-evidence'] as const) {
   test(`source-bound Reminder create entry: ${fault}`, async () => {
     const f = fixture(); let changed = false, transactions = 0;
     f.context.sessionKey = 'main-session'; f.context.sessionId = 'main-session-id';
     if (fault === 'missing-caller-session') { delete f.context.sessionKey; delete f.context.sessionId; }
-    const historical = fault.startsWith('history-');
+    const pendingCase = fault.startsWith('pending');
+    const historical = (fault.startsWith('history-') || pendingCase) && fault !== 'pending-v1-expired-current-only';
     const previous = 'Remind me to drink water';
     const text = historical ? 'On October 28 at 10:00, without a calendar event.'
       : 'Remind me to drink water on October 28 at 10:00, without a calendar event.';
@@ -161,6 +164,22 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
     const record = { reminderId: 'created-fixture', status: 'active', content: 'drink water',
       schedule: { type: 'one-shot', resolvedTime: '2026-10-28T10:00:00+02:00', timezone: 'Asia/Jerusalem' }, calendar: { requested: false } };
     const details = [{ kind: 'reminder-create', reminderId: record.reminderId, verified: true }];
+    const oldBundle = { schemaVersion: 1, contextId: 'original-conversation', revision: 1,
+      createdAt: fault.includes('-expired') ? '2026-10-26T07:00:00Z' : '2026-10-26T08:00:00Z', expiresAt: fault.includes('-expired') ? '2026-10-26T07:59:00Z' : '2026-10-26T09:00:00Z',
+      sourceConversation: { type: 'private', id: 'fixture-private' }, requesterId: 'reader',
+      currentEvidenceId: 'previous-input', evidence: [{ id: 'previous-input', text: previous }],
+      fieldEvidence: [{ field: 'content', evidenceId: 'previous-input', quote: 'drink water' }] };
+    const reference = { schemaVersion: 1 as const, domain: 'reminder' as const,
+      binding: { requesterId: 'fixture-private', conversationId: 'original-conversation' },
+      contextId: oldBundle.contextId, revision: 1, currentEvidenceId: oldBundle.currentEvidenceId };
+    const prior = validateDomainResult({ schemaVersion: 2, kind: 'benson.domain-result', executionMode: 'agentic',
+      domain: 'reminder', domainSchemaVersion: 'legacy-unversioned', operation: 'create',
+      outcome: { disposition: 'handled', status: 'clarification_required' },
+      facts: { verified: false, verificationScope: [], data: { question: 'When?' } },
+      evidence: { observations: [], gaps: [] }, warnings: [], failures: { domain: null, handling: null },
+      effects: fault === 'pending-possible-effects' ? { status: 'possible', refs: [], details: [], reconciliation: { required: true, reason: 'UNRESOLVED_CREATE' } } : { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } }, uncertainty: fault === 'pending-possible-effects' ? [{ code: 'UNRESOLVED_CREATE' }] : [],
+      pendingContext: { schemaVersion: 1, value: oldBundle, binding: reference.binding, expiresAt: oldBundle.expiresAt },
+      content: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render question' } } });
     let retained: { completion: unknown; authority: ReturnType<typeof createCompletionAuthority>; effects: { status: 'known'; refs: string[]; details: typeof details; reconciliation: { required: false; reason: null } } } | undefined;
     const create = createReminderTaskToolFactory({ identities: loadIdentityContract({ accountId: 'fixture-account', trustedRequesterIds: ['reader'],
       recipients: [{ id: 'reader', type: 'person', channel: 'whatsapp', to: 'fixture-private' }] }),
@@ -169,6 +188,10 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
         return { status: 'success', operation: 'create', transaction: { status: 'success', verified: true }, data: { record }, transport: { deliveries: [] }, warnings: [] }; } },
       jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }),
       task: {
+        ...pendingCase && fault !== 'pending-missing-history' ? { async history() {
+          return { results: [{ input: { entryId: 'persisted-previous-input' }, requestId: 'previous-input', entryId: 'prior-result', result: prior }],
+            assertCurrent() { assert(historyLive); }, assertRetainedCurrent() { assert(historyLive); } };
+        } } : {},
         ...historical ? { async originalUserTurns() {
           historyReads++;
           if (fault === 'history-unavailable') throw new Error('native originals unavailable');
@@ -190,8 +213,8 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
             content: record.content, schedule: record.schedule, calendar: record.calendar,
             ...fault === 'missing-provenance' ? {} : { provenance: { schemaVersion: 1, contextId: 'original-conversation', revision: 1,
               createdAt: '2026-10-26T08:00:00Z', expiresAt: '2026-10-26T09:00:00Z', sourceConversation: { type: 'private', id: 'fixture-private' }, requesterId: 'reader',
-              ...historical ? { revision: 2 } : {},
-              currentEvidenceId: fault === 'foreign-input' ? 'foreign' : 'original-input', evidence: [...historical ? [{ id: 'previous-input', text: previous }] : [], { id: 'original-input', text }],
+              ...historical ? { revision: fault === 'pending-revision' ? 3 : 2 } : {},
+              currentEvidenceId: fault === 'foreign-input' ? 'foreign' : 'original-input', evidence: [...historical ? [{ id: 'previous-input', text: fault === 'pending-rewritten-evidence' ? previous + ' altered' : previous }] : [], { id: 'original-input', text }],
               fieldEvidence: [{ field: 'content', evidenceId: historical ? 'previous-input' : 'original-input', quote: 'drink water' },
                 { field: 'schedule', evidenceId: 'original-input', quote: 'October 28 at 10:00' },
                 { field: 'calendar.requested', evidenceId: 'original-input', quote: 'without a calendar event' }] } } };
@@ -213,13 +236,45 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
         },
       } });
     const tool = create(f.context); assert(tool && !Array.isArray(tool));
-    const request = { kind: 'benson.self-contained-request', version: 1, request: fault === 'forged-intent' ? 'Untrusted replacement' : text };
+    const request = { kind: 'benson.self-contained-request', version: pendingCase && !fault.startsWith('pending-v1') ? 2 : 1,
+      request: fault === 'forged-intent' ? 'Untrusted replacement' : text,
+      ...pendingCase && !fault.startsWith('pending-v1') ? { pending: fault.startsWith('pending-null') ? null : {
+        ...reference, revision: fault === 'pending-stale' ? 2 : 1 } } : {} };
     const output = tool.execute('original-call', request, f.abort.signal);
-    if (fault !== 'none' && fault !== 'duplicate-completion' && fault !== 'history-complete') { await assert.rejects(output); assert.equal(transactions, ['foreign-completion', 'foreign-caller-key', 'foreign-caller-id'].includes(fault) ? 1 : 0); return; }
+    if (fault !== 'none' && fault !== 'duplicate-completion' && fault !== 'pending' && fault !== 'pending-v1-expired-current-only') { await assert.rejects(output); assert.equal(transactions, ['foreign-completion', 'foreign-caller-key', 'foreign-caller-id'].includes(fault) ? 1 : 0); return; }
     const value = validateDomainResult((await output).details); assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, 'known'); assert.equal(transactions, 1);
+    if (fault === 'pending') assert.deepEqual(JSON.parse(JSON.stringify(readDomainFactsData(value.facts.data).consumedPending)), reference);
     const rendered = renderReminderDomainResult(value, { language: 'he', timezone: 'Asia/Jerusalem', now: '2026-10-26T08:00:00Z' });
     assert.equal(rendered.kind, 'rendered');
-    if (historical) assert.equal(historyReads, 1);
+    assert.equal(historyReads, fault === 'pending' ? 1 : 0);
     if (fault === 'duplicate-completion') { await assert.rejects(tool.execute('original-call', request, f.abort.signal), /already_started/); assert.equal(transactions, 1); }
+  });
+}
+
+for (const fault of ['none', 'historical-evidence', 'foreign-binding', 'expired', 'future-created', 'fabricated-quote'] as const) {
+  test('Reminder first clarification retains current-only provenance: ' + fault, () => {
+    const request = 'Remind me to drink water';
+    const source = createCurrentRequestContext({ request,
+      binding: { conversationRef: 'conversation', channel: 'whatsapp', accountId: 'fixture-account', kind: 'direct', peerId: 'fixture-private', threadId: null, requesterId: 'fixture-private' },
+      currentTurn: () => ({ entryId: 'original', role: 'user', text: request, sender: { source: 'canonical_peer_binding', id: 'fixture-private', channel: 'whatsapp', accountId: 'fixture-account' }, inputProvenance: { kind: 'external_user' } }),
+      assertCurrent() {}, assertAuthorized() {},
+    }).projectCurrentRequest(); assert.equal(source.status, 'available');
+    const binding = bindReminderTaskPending({ kind: 'benson.self-contained-request', version: 1, request }, { results: [], assertCurrent() {} }, source,
+      { route: { requesterId: 'reader', senderId: 'fixture-private', sourceId: 'fixture-private', sourceType: 'private' }, clock: () => new Date('2026-11-02T08:00:00Z') }, () => {});
+    const expiresAt = fault === 'expired' ? '2026-11-02T07:59:00Z' : '2026-11-02T09:00:00Z';
+    const value = validateDomainResult({ schemaVersion: 2, kind: 'benson.domain-result', executionMode: 'agentic', domain: 'reminder', domainSchemaVersion: 'legacy-unversioned', operation: 'create',
+      outcome: { disposition: 'handled', status: 'clarification_required' }, facts: { verified: false, verificationScope: [], data: { question: 'מתי להזכיר לך?' } },
+      evidence: { observations: [], gaps: [] }, warnings: [], failures: { domain: null, handling: null },
+      effects: { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } }, uncertainty: [],
+      pendingContext: { schemaVersion: 1, binding: { requesterId: fault === 'foreign-binding' ? 'foreign' : 'fixture-private', conversationId: 'conversation' }, expiresAt,
+        value: { schemaVersion: 1, contextId: 'conversation', revision: fault === 'historical-evidence' ? 2 : 1,
+          createdAt: fault === 'future-created' ? '2026-11-02T08:01:00Z' : '2026-11-02T07:00:00Z', expiresAt,
+          sourceConversation: { type: 'private', id: 'fixture-private' }, requesterId: 'reader', currentEvidenceId: 'original',
+          evidence: [...fault === 'historical-evidence' ? [{ id: 'old', text: 'Old request' }] : [], { id: 'original', text: request }],
+          fieldEvidence: [{ field: 'content', evidenceId: 'original', quote: fault === 'fabricated-quote' ? 'invented' : 'drink water' }] } },
+      content: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Render question' } } });
+    if (fault === 'none') { assert.deepEqual(binding.project(value), value); const rendered = renderReminderDomainResult(value, { language: 'he' });
+      assert.equal(rendered.kind, 'rendered'); if (rendered.kind === 'rendered') assert.deepEqual(JSON.parse(JSON.stringify(rendered.pendingContext)), JSON.parse(JSON.stringify(value.pendingContext))); }
+    else assert.throws(() => binding.project(value), /reminder_pending_/);
   });
 }

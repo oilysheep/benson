@@ -55,6 +55,8 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
       // Only synthetic resources are writable, inside this disposable namespace.
       '--tmpfs', '/repo/output/typescript/agents/reminder-service/config',
       '--tmpfs', '/repo/output/typescript/agents/reminder-service/tools',
+      '--tmpfs', '/repo/output/typescript/agents/jessica-vacuum/config',
+      '--ro-bind', `${repo}/integrations/openclaw/plugins/benson-jessica-tool/openclaw.plugin.json`, '/jessica-plugin-manifest.json',
       '--ro-bind', `${repo}/integrations/openclaw/plugins/benson-reminder-tool/openclaw.plugin.json`, '/reminder-plugin-manifest.json',
       '--ro-bind', `${repo}/integrations/openclaw/benson-routing/openclaw.plugin.json`, '/routing-plugin-manifest.json',
     ] : [],

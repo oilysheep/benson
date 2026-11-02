@@ -1,9 +1,8 @@
 import { isDeepStrictEqual } from 'node:util';
-import { readFileSync } from 'node:fs';
 import { ConversationTurnSchema, type ConversationBinding, type ConversationTurn } from '../../core/conversation-context.js';
 import { MAX_ROUTING_CONTEXT_BYTES, MAX_TRANSCRIPT_HYDRATION_BYTES, MAX_TRANSCRIPT_HYDRATION_EVENTS } from '../../core/request-control.js';
 import { assertion, decode, fail, freeze, identifier, plain, synchronous } from '../../core/value.js';
-import { validateDomainResultEnvelope } from '../../core/domain-result.js';
+import { validateDomainResultEnvelope, readDomainFactsData } from '../../core/domain-result.js';
 import type { AnyDomainResult } from '../../core/contracts.js';
 import { parseTaskEnvelope } from '../../core/task-envelope.js';
 
@@ -29,6 +28,9 @@ export interface NativeOriginalTaskResults {
   readonly results: readonly Readonly<{ input: ConversationTurn; requestId: string; entryId: string;
     callEntryId: string; toolCallId: string; toolName: 'reminder_task' | 'jessica_task'; arguments: unknown; result: AnyDomainResult }>[];
   assertCurrent(): void;
+  /** Original-source read custody across own native appends and Task retirement;
+   * grants no execution and still rejects a new user input or replaced source. */
+  assertRetainedCurrent(): void;
 }
 type Readers = {
   visible(target: Target & { maxMessages: number; maxBytes: number }): Promise<unknown>;
@@ -70,24 +72,10 @@ export function retainOriginalUserWrite(message: unknown, source: {
   requireSource(Buffer.byteLength(JSON.stringify(message), 'utf8') <= MAX_TRANSCRIPT_HYDRATION_BYTES);
   return freeze({ id: message.idempotencyKey, message: structuredClone(message) });
 }
-async function supportedReaders(): Promise<Readers> {
-  // Supported SDK exports without declarations on the installed pin. Validate
-  // their shape here; never import hashed Core internals or invent typings.
-  const transcriptEntry = 'openclaw/plugin-sdk/session-transcript-runtime';
-  const sessionsEntry = 'openclaw/plugin-sdk/agent-sessions';
-  const installed: unknown = JSON.parse(readFileSync(new URL('../../package.json', import.meta.resolve(transcriptEntry)), 'utf8'));
-  requireSource(plain(installed) && installed.name === 'openclaw' && installed.version === '2026.10.4');
-  const [transcript, sessions]: unknown[] = await Promise.all([import(transcriptEntry), import(sessionsEntry)]);
-  requireSource(transcript !== null && typeof transcript === 'object' && sessions !== null && typeof sessions === 'object');
-  const visible: unknown = Reflect.get(transcript, 'readSessionTranscriptVisibleMessageDelta');
-  const raw: unknown = Reflect.get(transcript, 'readSessionTranscriptRawDelta');
-  const manager: unknown = Reflect.get(sessions, 'SessionManager');
-  requireSource(typeof visible === 'function' && typeof manager === 'function');
-  const context: unknown = Reflect.get(manager, 'readSessionContext'); requireSource(typeof context === 'function');
-  return { visible: target => Reflect.apply(visible, undefined, [target]),
-    ...typeof raw === 'function' ? { raw: (target: Parameters<NonNullable<Readers['raw']>>[0]) => Reflect.apply(raw, undefined, [target]) } : {},
-    context: (target, read) => Reflect.apply(context, manager, [target, read]) };
-}
+// The installed public synchronous reader hydrates before applying our bounds.
+// Keep native history unavailable until a supported same-snapshot bounded
+// custody API is proven. Explicit readers are the existing isolated test port;
+// production callers must never infer empty history from this rejection.
 export async function acquireOriginalUserTurns(options: {
   target: Target; binding: Readonly<ConversationBinding>; request: string; write: Write;
   assertCurrent(): unknown;
@@ -97,7 +85,8 @@ export async function acquireOriginalUserTurns(options: {
   const target = freeze({ ...options.target }), binding = freeze({ ...options.binding }), write = options.write, request = options.request;
   requireSource(target.agentId === 'main' && identifier(target.sessionId) && identifier(target.sessionKey) &&
     binding.channel === 'whatsapp' && binding.conversationRef === target.sessionKey);
-  const sdk = readers ?? await supportedReaders(); current();
+  if (!readers) fail('native_original_history_resource_bounds_unavailable');
+  const sdk = readers; current();
   const page: unknown = await sdk.visible({ ...target, maxMessages: MAX_TRANSCRIPT_HYDRATION_EVENTS - 2,
     maxBytes: MAX_TRANSCRIPT_HYDRATION_BYTES }); current();
   // One bounded active-path window, collected twice around the initial sync
@@ -235,9 +224,14 @@ export async function acquireOriginalUserTurns(options: {
           result.domain === (call.name === 'reminder_task' ? 'reminder' : 'jessica-vacuum'));
         const input = call.inputId ? authorized.get(call.inputId) : undefined;
         if (!input) continue; // Positively identified foreign source, not clearing for this requester.
-        if (result.pendingContext !== null) {
+        const consumed = readDomainFactsData(result.facts.data).consumedPending;
+        if (result.pendingContext !== null || consumed !== null) {
           requireSource(result.executionMode === 'agentic' && plain(call.args) &&
             parseTaskEnvelope(JSON.stringify(call.args)).request === input.text);
+          if (consumed !== null) {
+            const envelope = parseTaskEnvelope(JSON.stringify(call.args));
+            requireSource(envelope.version === 2 && isDeepStrictEqual(envelope.pending, consumed));
+          }
         }
         results.push({ input, requestId: call.requestId, entryId: row.entryId, callEntryId: call.entryId, toolCallId: message.toolCallId,
           toolName: call.name, arguments: call.args, result });
@@ -253,6 +247,6 @@ export async function acquireOriginalUserTurns(options: {
     }
     requireSource([...calls].every(([id, call]) => call.settled || id === currentCallId));
     const snapshot = freeze(structuredClone(results));
-    return freeze({ results: snapshot, assertCurrent() { revalidate(strict); } });
+    return freeze({ results: snapshot, assertCurrent() { revalidate(strict); }, assertRetainedCurrent() { revalidate(); } });
   } });
 }

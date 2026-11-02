@@ -1,12 +1,20 @@
 import { formatUserDatetime } from '../../../shared/benson-datetime.js';
 import type { ListResult } from './results.js';
-import { plain, freeze } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { plain, freeze, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Presentation } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
 import type { AnyDomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
 import { validateDomainResultEnvelope, readDomainFactsData } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
 /** Full-list prepared content stays domain-owned; unsupported qualifications block. */
 export function renderReminderDomainResult(raw: AnyDomainResult, options: { language: 'en' | 'he'; timezone?: string; now?: string }): Presentation {
   const value = validateDomainResultEnvelope(raw);
+  const data = readDomainFactsData(value.facts.data).value;
+  if (value.domain === 'reminder' && value.executionMode === 'agentic' && value.operation === 'create' &&
+      value.outcome.status === 'clarification_required' && value.outcome.disposition === 'handled' && value.facts.verified === false &&
+      !value.warnings.length && !value.uncertainty.length && !value.evidence.gaps.length &&
+      value.failures.domain === null && value.failures.handling === null && value.effects.status === 'none' &&
+      value.pendingContext !== null && plain(data) && Object.keys(data).join(',') === 'question' && text(data.question)) {
+    return freeze({ kind: 'rendered', text: data.question, pendingContext: boundedCopy(value.pendingContext) });
+  }
   if (value.domain === 'reminder' && value.executionMode === 'agentic' && value.outcome.status === 'unknown' &&
     value.outcome.disposition === 'unresolved' && (value.uncertainty.length > 0 || value.evidence.gaps.length > 0) && !value.warnings.length && value.pendingContext === null) {
     return rendered(options.language === 'he'

@@ -17,6 +17,7 @@ export const DOMAIN_RESULT_SCHEMA_VERSION = 2;
 export const DOMAIN_RESULT_V3_SCHEMA_VERSION = 3;
 export const TASK_ENVELOPE_KIND = 'benson.self-contained-request';
 export const TASK_ENVELOPE_VERSION = 1;
+export const TASK_ENVELOPE_V2_VERSION = 2;
 export const DomainSchema = Type.Union([Type.Literal('jessica-vacuum'), Type.Literal('reminder')]);
 export type Domain = Static<typeof DomainSchema>;
 export const DOMAIN_VERSIONS = Object.freeze({ 'jessica-vacuum': '1', reminder: 'legacy-unversioned' });
@@ -45,8 +46,11 @@ export const COMPLETION_STATUSES = Object.freeze([
 ] as const);
 export const StatusSchema = Type.Enum(COMPLETION_STATUSES);
 export const VerifiedSchema = Type.Union([Type.Boolean(), Type.Literal('unknown'), Type.Literal('not_applicable')]);
-export const TaskEnvelopeSchema = object({ kind: Type.Literal(TASK_ENVELOPE_KIND),
+export const TaskEnvelopeV1Schema = object({ kind: Type.Literal(TASK_ENVELOPE_KIND),
   version: Type.Literal(1), request: Type.String() });
+export const TaskEnvelopeV2Schema = object({ kind: Type.Literal(TASK_ENVELOPE_KIND),
+  version: Type.Literal(2), request: Type.String(), pending: nullable(ConsumedPendingSchema) });
+export const TaskEnvelopeSchema = Type.Union([TaskEnvelopeV1Schema, TaskEnvelopeV2Schema]);
 export type TaskEnvelope = Static<typeof TaskEnvelopeSchema>;
 const SourceSchema = object({ type: Type.Enum(['user', 'ha', 'automation']), ref: Id, inputId: Id });
 export const ScopeSchema = Type.Enum(['read', 'reconcile', 'notify', 'action']);

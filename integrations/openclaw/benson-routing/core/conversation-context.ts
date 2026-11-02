@@ -3,7 +3,8 @@ import { isDeepStrictEqual } from 'node:util';
 import { object, nullable, IdentifierSchema as Id, ContextJsonSchema, decode, exact, freeze,
   identifier, plain, assertion, synchronous, boundedCopy } from './value.js';
 import { pending as validatePending, type Pending } from './value.js';
-import { ConsumedPendingSchema, type ConsumedPending, type AnyDomainResult, type Domain } from './contracts.js';
+import { ConsumedPendingSchema, type ConsumedPending, type AnyDomainResult, type Domain, type TaskEnvelope } from './contracts.js';
+import { validateTaskEnvelope } from './task-envelope.js';
 import { readDomainFactsData, validateDomainResultEnvelope } from './domain-result.js';
 import { ROUTING_PREVIOUS_MESSAGES, MAX_ROUTING_CONTEXT_BYTES, MAX_ROUTING_WORKFLOW_BYTES,
   MAX_ROUTING_REFERENCES, ROUTING_TRANSCRIPT_TIERS } from './request-control.js';
@@ -44,7 +45,7 @@ export type ConversationTurn = Static<typeof ConversationTurnSchema>;
  * history. This transient projection is neither a store nor execution authority.
  * Domain owners validate their pending values and every replacement transition. */
 export function reconstructDomainPending(history: {
-  results: readonly { input: Pick<ConversationTurn, 'entryId'>; entryId: string; result: AnyDomainResult }[];
+  results: readonly { input: Pick<ConversationTurn, 'entryId'>; requestId: string; entryId: string; result: AnyDomainResult }[];
   assertCurrent(): unknown;
 }, options: {
   domain: Domain; binding: Pending['binding']; currentInputId: string;
@@ -70,17 +71,24 @@ export function reconstructDomainPending(history: {
   const active = new Map<string, Entry>(), closed = new Set<string>(), entries = new Set<string>();
   let completedCurrent = false;
   for (const row of history.results) {
-    if (!identifier(row.entryId) || !identifier(row.input.entryId) || entries.has(row.entryId)) throw new TypeError('pending_history_duplicate');
+    if (!identifier(row.entryId) || !identifier(row.input.entryId) || !identifier(row.requestId) || entries.has(row.entryId)) throw new TypeError('pending_history_duplicate');
     entries.add(row.entryId);
     const result = validateDomainResultEnvelope(row.result);
     if (result.domain !== domain) continue;
-    if (row.input.entryId === currentInputId && result.executionMode === 'agentic') completedCurrent = true;
+    if (row.requestId === currentInputId && result.executionMode === 'agentic') completedCurrent = true;
+    // An unresolved attempt cannot become a fresh authorization after reload.
+    // This projection has no reconciliation authority: reject that history
+    // before selecting, replacing or consuming any pending context.
+    if ((result.pendingContext !== null || active.size > 0) &&
+        (result.failures.handling !== null || result.evidence.gaps.length || result.uncertainty.length ||
+         result.effects.status === 'possible' || result.effects.reconciliation.required ||
+         result.pendingContext !== null && result.effects.status !== 'none')) throw new TypeError('pending_history_unresolved');
     const consumed = readDomainFactsData(result.facts.data).consumedPending;
     let previous: Entry | undefined;
     if (consumed !== null) {
       const id = key(consumed); previous = active.get(id);
       if (!previous || closed.has(id) || !same(previous.reference, consumed)) throw new TypeError('pending_consumption_unmatched');
-      if (previous.inputId === row.input.entryId) throw new TypeError('pending_consumption_same_input');
+      if (previous.inputId === row.requestId) throw new TypeError('pending_consumption_same_input');
       active.delete(id); closed.add(id);
     }
     const pending = validatePending(result.pendingContext);
@@ -88,7 +96,7 @@ export function reconstructDomainPending(history: {
       const ref = structuredClone(reference(pending, result)), id = key(ref);
       if (previous) assertion(replacement(previous.pending, result), 'pending_replacement_async');
       if (closed.has(id) || active.has(id)) throw new TypeError('pending_identity_conflict');
-      active.set(id, freeze({ pending, reference: ref, result, inputId: row.input.entryId }));
+      active.set(id, freeze({ pending, reference: ref, result, inputId: row.requestId }));
     }
   }
   assertion(history.assertCurrent(), 'pending_history_async'); current();
@@ -96,14 +104,28 @@ export function reconstructDomainPending(history: {
   // retained original-source guard is used; own native appends are permitted.
   const snapshot = freeze([...active.values()].map(item => structuredClone(item)));
   const assertFreshInput = () => { current(); if (completedCurrent) throw new TypeError('pending_input_already_completed'); };
+  const select = (reference: ConsumedPending): Readonly<Entry> => {
+    assertFreshInput(); const id = key(reference), matches = snapshot.filter(item => key(item.reference) === id);
+    if (matches.length !== 1 || !same(matches[0]!.reference, reference) ||
+        matches[0]!.inputId === currentInputId || Date.parse(matches[0]!.pending.expiresAt) <= now()) throw new TypeError('pending_selection_unavailable');
+    current(); return matches[0]!;
+  };
   return Object.freeze({
     pending: freeze(snapshot.filter(item => Date.parse(item.pending.expiresAt) > now())),
     assertFreshInput,
-    select(reference: ConsumedPending): Readonly<Entry> {
-      assertFreshInput(); const id = key(reference), matches = snapshot.filter(item => key(item.reference) === id);
-      if (matches.length !== 1 || !same(matches[0]!.reference, reference) ||
-          Date.parse(matches[0]!.pending.expiresAt) <= now()) throw new TypeError('pending_selection_unavailable');
-      current(); return matches[0]!;
+    select,
+    bindTask(raw: TaskEnvelope) {
+      const task = validateTaskEnvelope(raw);
+      assertFreshInput();
+      const reference = task.version === 2 ? task.pending : null;
+      // Current-only never guesses that a short answer belongs to an outstanding
+      // question. Explicit selection can address any exactly identified entry.
+      if (reference === null && snapshot.some(item => Date.parse(item.pending.expiresAt) > now())) throw new TypeError('pending_selection_required');
+      const selected = reference === null ? null : select(reference);
+      return Object.freeze({ selected, assertCurrent() {
+        assertFreshInput();
+        if (selected) select(selected.reference);
+      } });
     },
   });
 }

@@ -115,6 +115,15 @@ owned by that domain. For an explicit current status/full list, the structured
 `{"operation":"status"}` / `{"operation":"list"}` selectors retain their
 zero-domain-Run path. For other intent, pass exactly
 `{"kind":"benson.self-contained-request","version":1,"request":"<verbatim current user text>"}`.
+For a pending continuation, use version 2 with the same exact `kind` and
+current `request`, plus required `pending` containing the exact domain
+`ConsumedPending` reference from the original result: domain/binding and
+Jessica clarificationId, or Reminder contextId/revision/currentEvidenceId,
+with schemaVersion 1. This is a selection proposal; only the domain host can
+validate it against authorized original history before effects. Version 1
+is current-only. Version 2 `pending:null` selects nothing. Never guess a
+latest/unique pending or select an ambiguous reference; ask for clarification
+when the exact selection is unavailable.
 Do not summarize, concatenate history into current text, or add tool, identity,
 permission or execution fields. The host/domain owns context acquisition,
 interpretation, any authorized child Run, execution and Completion validation.
@@ -185,8 +194,9 @@ guess. Preserve its Reminder provenance bundle byte-for-
 byte except for additions returned by Reminder Service; never synthesize a
 combined transcript. Render the question as the ordinary reply on the current
 external user turn. Do not invoke `ask_user` for Reminder clarification or from
-an internal child-completion run. A success or terminal failure clears that
-semantic pending context.
+an internal child-completion run. Only the host-validated exact
+`consumedPending` reference closes that pending; unrelated pending remain.
+Null or legacy results never imply clearing.
 
 Deterministic scheduled delivery is performed by the native Automation job.
 Main never sends or re-dispatches the scheduled payload.
