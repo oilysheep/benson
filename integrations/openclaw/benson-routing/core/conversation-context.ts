@@ -1,7 +1,10 @@
 import Type, { type Static } from 'typebox';
 import { isDeepStrictEqual } from 'node:util';
 import { object, nullable, IdentifierSchema as Id, ContextJsonSchema, decode, exact, freeze,
-  identifier, plain, assertion, synchronous } from './value.js';
+  identifier, plain, assertion, synchronous, boundedCopy } from './value.js';
+import { pending as validatePending, type Pending } from './value.js';
+import { ConsumedPendingSchema, type ConsumedPending, type AnyDomainResult, type Domain } from './contracts.js';
+import { readDomainFactsData, validateDomainResultEnvelope } from './domain-result.js';
 import { ROUTING_PREVIOUS_MESSAGES, MAX_ROUTING_CONTEXT_BYTES, MAX_ROUTING_WORKFLOW_BYTES,
   MAX_ROUTING_REFERENCES, ROUTING_TRANSCRIPT_TIERS } from './request-control.js';
 
@@ -36,6 +39,74 @@ const SnapshotSchema = Type.Union([
 export type ConversationBinding = Static<typeof ConversationBindingSchema>;
 export type ConversationCutoff = Static<typeof ConversationCutoffSchema>;
 export type ConversationTurn = Static<typeof ConversationTurnSchema>;
+
+/** Reconstruct semantic context from the existing complete, authorized Task
+ * history. This transient projection is neither a store nor execution authority.
+ * Domain owners validate their pending values and every replacement transition. */
+export function reconstructDomainPending(history: {
+  results: readonly { input: Pick<ConversationTurn, 'entryId'>; entryId: string; result: AnyDomainResult }[];
+  assertCurrent(): unknown;
+}, options: {
+  domain: Domain; binding: Pending['binding']; currentInputId: string;
+  reference(pending: Pending, result: AnyDomainResult): ConsumedPending;
+  replacement(previous: Pending, result: AnyDomainResult): unknown;
+  clock(): Date; assertCurrent(): unknown;
+}) {
+  const domain = options.domain, binding = structuredClone(options.binding), currentInputId = options.currentInputId;
+  if (!identifier(currentInputId) || !identifier(binding.requesterId) || !identifier(binding.conversationId)) throw new TypeError('pending_binding_invalid');
+  const assertSource = options.assertCurrent.bind(options), clock = options.clock.bind(options);
+  const reference = options.reference.bind(options), replacement = options.replacement.bind(options);
+  const same = (left: unknown, right: unknown) => isDeepStrictEqual(boundedCopy(left), boundedCopy(right));
+  const current = () => assertion(assertSource(), 'pending_source_async');
+  const now = () => { const value = clock().getTime(); if (!Number.isFinite(value)) throw new TypeError('pending_clock_invalid'); return value; };
+  const key = (raw: ConsumedPending) => {
+    const ref = decode(ConsumedPendingSchema, raw, 'consumed_pending_shape');
+    if (ref.domain !== domain || !same(ref.binding, binding)) throw new TypeError('pending_binding_mismatch');
+    return JSON.stringify([ref.domain, ref.binding.requesterId, ref.binding.conversationId,
+      ...ref.domain === 'reminder' ? [ref.contextId, ref.revision, ref.currentEvidenceId] : [ref.clarificationId]]);
+  };
+  current(); assertion(history.assertCurrent(), 'pending_history_async'); now();
+  type Entry = { pending: Pending; reference: ConsumedPending; result: AnyDomainResult; inputId: string };
+  const active = new Map<string, Entry>(), closed = new Set<string>(), entries = new Set<string>();
+  let completedCurrent = false;
+  for (const row of history.results) {
+    if (!identifier(row.entryId) || !identifier(row.input.entryId) || entries.has(row.entryId)) throw new TypeError('pending_history_duplicate');
+    entries.add(row.entryId);
+    const result = validateDomainResultEnvelope(row.result);
+    if (result.domain !== domain) continue;
+    if (row.input.entryId === currentInputId && result.executionMode === 'agentic') completedCurrent = true;
+    const consumed = readDomainFactsData(result.facts.data).consumedPending;
+    let previous: Entry | undefined;
+    if (consumed !== null) {
+      const id = key(consumed); previous = active.get(id);
+      if (!previous || closed.has(id) || !same(previous.reference, consumed)) throw new TypeError('pending_consumption_unmatched');
+      if (previous.inputId === row.input.entryId) throw new TypeError('pending_consumption_same_input');
+      active.delete(id); closed.add(id);
+    }
+    const pending = validatePending(result.pendingContext);
+    if (pending !== null) {
+      const ref = structuredClone(reference(pending, result)), id = key(ref);
+      if (previous) assertion(replacement(previous.pending, result), 'pending_replacement_async');
+      if (closed.has(id) || active.has(id)) throw new TypeError('pending_identity_conflict');
+      active.set(id, freeze({ pending, reference: ref, result, inputId: row.input.entryId }));
+    }
+  }
+  assertion(history.assertCurrent(), 'pending_history_async'); current();
+  // Freeze independently of the caller's snapshot. After acquisition only the
+  // retained original-source guard is used; own native appends are permitted.
+  const snapshot = freeze([...active.values()].map(item => structuredClone(item)));
+  const assertFreshInput = () => { current(); if (completedCurrent) throw new TypeError('pending_input_already_completed'); };
+  return Object.freeze({
+    pending: freeze(snapshot.filter(item => Date.parse(item.pending.expiresAt) > now())),
+    assertFreshInput,
+    select(reference: ConsumedPending): Readonly<Entry> {
+      assertFreshInput(); const id = key(reference), matches = snapshot.filter(item => key(item.reference) === id);
+      if (matches.length !== 1 || !same(matches[0]!.reference, reference) ||
+          Date.parse(matches[0]!.pending.expiresAt) <= now()) throw new TypeError('pending_selection_unavailable');
+      current(); return matches[0]!;
+    },
+  });
+}
 type Workflow = Static<typeof WorkflowSchema>;
 type Tier = typeof ROUTING_TRANSCRIPT_TIERS[number];
 /** Adapter-private custody normalizes exact authorized external conversation turns.

@@ -38,16 +38,19 @@ function fixture() {
 for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller', 'missing-caller', 'changed-source',
   'changed-caller', 'cancelled', 'retired-after-effect', 'changed-at-serialization', 'duplicate'] as const) {
   test(`Main intent entry retains original Jessica mutation custody: ${fault}`, async () => {
-    const f = domainFixture(); let changed = false, effects = 0;
+    const f = domainFixture(); let changed = false, effects = 0, taskLive = true;
+    let retainedCompletion: (() => void) | undefined;
     const text = 'Clean the living room';
     const context: OpenClawPluginToolContext<2> = { agentId: 'main', sessionKey: 'actual-main', sessionId: 'actual-main-id',
       requesterSenderId: 'fixture-private', deliveryContext: { channel: 'whatsapp', accountId: 'fixture-account', to: 'fixture-private' },
-      assertInvocationCurrent() { f.authority.assertCurrent(); } };
+      assertInvocationCurrent() { assert(taskLive, 'Task invocation retired'); f.authority.assertCurrent(); } };
     if (fault === 'missing-caller') delete context.sessionId;
     const create = createJessicaTaskToolFactory({ roster: { accountId: 'fixture-account', approvedIds: [...new Set(loadPolicy(f.policy).rules.map(rule => rule.subject))],
       subjectForRoute: route => route === 'fixture-private' ? 'oren' : null }, policy: loadPolicy(f.policy),
       read: async () => { throw new Error('Intent cannot use the status path'); },
-      jsonResult(value) { if (fault === 'changed-at-serialization') changed = true;
+      jsonResult(value, callId, assertCompletion) {
+        assert.equal(callId, 'original-call'); assert.equal(typeof assertCompletion, 'function'); retainedCompletion = assertCompletion;
+        if (fault === 'changed-at-serialization') changed = true;
         return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; },
       task: {
         source: () => ({ request: text,
@@ -70,7 +73,9 @@ for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller'
               f.evidence.taskStatus = { observedAt: at, sourceUpdatedAt: at, state: 'room_cleaning' };
               if (fault === 'retired-after-effect') f.retire();
               return { accepted: true };
-            } }, jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }) });
+            } }, jsonResult: (value, verify, callId) => {
+              assert.equal(callId, 'actual-child-call'); assert.equal(typeof verify, 'function');
+              return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; } });
           const raw = rawFactory({ agentId: 'jessica-vacuum', sessionKey: 'agent:jessica-vacuum:subagent:actual',
             assertInvocationCurrent: work.execution.authority.assertCurrent }); assert(raw && !Array.isArray(raw));
           const value = normalizeLegacyTaskResult((await raw.execute('actual-child-call', f.request)).details,
@@ -86,7 +91,7 @@ for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller'
               sessionId: fault === 'foreign-caller' ? 'foreign' : 'actual-main-id' }, completionTarget: 'CALLER', authorizationId: 'original-input',
             parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } };
           const authority = createCompletionAuthority({ schemaVersion: 6, kind: 'domain-task', binding, knownFacts: facts,
-            results: [], coverage: 'complete', gaps: [], origin: 'agent' }, { assertCurrent: work.execution.authority.assertCurrent });
+            results: [], coverage: 'complete', gaps: [], origin: 'agent' }, { assertCurrent: f.authority.assertCurrent });
           const completion = acceptAgentCompletion({ schemaVersion: 6, kind: 'domain-task', facts,
             userResponse: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Use verified domain facts' } } }, authority);
           return { completion, authority, effects: { status: 'known', refs: ['isolated-dispatch'], details, reconciliation: { required: false, reason: null } } };
@@ -99,6 +104,9 @@ for (const fault of ['none', 'forged-intent', 'foreign-source', 'foreign-caller'
       const result = validateDomainResult((await output).details); assert.equal(result.executionMode, 'agentic');
       assert.equal(result.facts.verified, true); assert.equal(result.effects.status, 'known'); assert.equal(effects, 1);
       if (fault === 'duplicate') { await assert.rejects(tool.execute('retry', request), /already_started/); assert.equal(effects, 1); }
+      assert(retainedCompletion); taskLive = false; retainedCompletion();
+      await assert.rejects(tool.execute('after-retirement', request), /Task invocation retired/);
+      f.retire(); assert.throws(retainedCompletion);
     } else { await assert.rejects(output); assert.equal(effects, ['foreign-caller', 'retired-after-effect', 'changed-at-serialization'].includes(fault) ? 1 : 0); }
   });
 }
@@ -141,6 +149,7 @@ for (const mode of ['success', 'foreign-agent', 'foreign-route', 'forged-input',
   'missing-route', 'source-without-route', 'retired-source', 'cancelled-source', 'async-native-authority'] as const) {
   test(`domain raw read adapter preserves its existing boundary: ${mode}`, async () => {
     const f = domainFixture(); let live = true, reads = 0;
+    let retainedCompletion: ((args: unknown, value: unknown) => void) | undefined;
     const sourceAbort = new AbortController();
     if (mode === 'cancelled-source') sourceAbort.abort();
     const policy = loadPolicy(f.policy);
@@ -159,7 +168,11 @@ for (const mode of ['success', 'foreign-agent', 'foreign-route', 'forged-input',
             : { kind: 'status', observedAt: f.clock().toISOString(), sourceUpdatedAt: null, freshness: 'fresh', state: 'docked', batteryLevel: 90, activeSegments: [], currentSegment: null },
           warnings: [], error: null, pendingContext: null }, null, f.clock());
       },
-      jsonResult(value) { if (mode === 'retired-at-serialization') live = false; return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; },
+      jsonResult(value, callId, assertCompletion) {
+        assert.equal(callId, 'raw-read'); assert.equal(typeof assertCompletion, 'function'); retainedCompletion = assertCompletion;
+        assertCompletion({ operation: 'status' }, value);
+        if (mode === 'retired-at-serialization') live = false;
+        return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; },
     });
     const ctx: OpenClawPluginToolContext<2> = { agentId: mode === 'foreign-agent' ? 'main' : 'jessica-vacuum', requesterSenderId: 'fixture-private',
       deliveryContext: { channel: 'whatsapp', accountId: mode === 'foreign-route' ? 'foreign' : 'fixture-account', to: 'fixture-private' },
@@ -175,5 +188,13 @@ for (const mode of ['success', 'foreign-agent', 'foreign-route', 'forged-input',
     if (mode !== 'success' && mode !== 'source-without-route') { await assert.rejects(output); assert.equal(reads, ['retired-after-read', 'retired-at-serialization', 'foreign-result'].includes(mode) ? 1 : 0); return; }
     const result = validateResult((await output).details, null, f.clock());
     assert.equal(result.schemaVersion, '1'); assert.equal(result.operation, 'status'); assert.equal(result.verified, true); assert.equal(reads, 1);
+    assert(retainedCompletion); retainedCompletion(request, result);
+    assert.throws(() => retainedCompletion!({ operation: 'rooms' }, result), /jessica_read_evidence_mismatch/);
+    assert.throws(() => retainedCompletion!(request, { ...result, verified: false }), /jessica_read_evidence_mismatch/);
+    live = false;
+    if (mode === 'source-without-route') {
+      retainedCompletion(request, result); sourceAbort.abort(); assert.throws(() => retainedCompletion!(request, result));
+    } else assert.throws(() => retainedCompletion!(request, result));
+    assert.equal(reads, 1);
   });
 }

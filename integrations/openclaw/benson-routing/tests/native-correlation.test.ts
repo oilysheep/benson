@@ -25,3 +25,9 @@ test('isolated Completion v6 blocks source cancellation across await before any 
   assert.equal(raw.completion, 'PASS'); assert.equal(raw.backendReads, 0); assert.deepEqual(raw.sink, []);
   console.log(JSON.stringify(raw));
 });
+
+test('isolated multi-tool Completion consumes every authoritative native receipt', { timeout: 180_000 }, () => {
+  const raw = runIsolatedFixture('native-correlation', false, 'multi');
+  assert(raw && typeof raw === 'object' && 'completion' in raw && 'backendReads' in raw);
+  assert.equal(raw.completion, 'PASS'); assert.equal(raw.backendReads, 3); console.log(JSON.stringify(raw));
+});

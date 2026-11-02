@@ -4,6 +4,14 @@ import { runIsolatedFixture } from './fixtures/native-isolation.js';
 import { plain } from '../core/value.js';
 import { validateDomainResultEnvelope } from '../core/domain-result.js';
 
+test('isolated separately loaded Reminder and Response entries retain native original custody', { timeout: 300_000 }, () => {
+  const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'reminder-product');
+  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.reminderProduct, true);
+  assert.equal(result.transactionCount, 2); assert.equal(result.providerRequests, 6);
+  assert.deepEqual(result.isolation, { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false });
+  console.log(JSON.stringify(result));
+});
+
 test('pinned WhatsApp patch enforces the Controller before native in-memory delivery', { timeout: 180_000 }, () => {
   const result = runIsolatedFixture('whatsapp-response-delivery');
   assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.whatsappPlugin, '2026.10.4');
@@ -34,6 +42,18 @@ test('native npm installation establishes current WhatsApp authority and native 
   assert.equal(result.nativeInstall.version, '2026.10.4');
   assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 25);
   assert.equal(result.providerRequests, 30); assert.deepEqual(result.fallbackModels, ['correlation', 'secondary']);
+  assert(plain(result.supportedTranscriptProbe));
+  const { rawShapes, taskResultCounts, ...transcriptCounts } = result.supportedTranscriptProbe;
+  assert(Array.isArray(rawShapes) && rawShapes.length > 0);
+  assert(Array.isArray(taskResultCounts) && taskResultCounts.length === 6 &&
+    taskResultCounts.every(count => Number.isSafeInteger(count) && count >= 0) && taskResultCounts.some(count => count > 0));
+  assert.deepEqual(transcriptCounts, { writes: 23, reads: 6, persistedMatches: 6,
+    resolverScopeMatches: 23, synchronousVersionMatches: 6, originalTextMatches: 23, originalSenderMatches: 23,
+    originalProvenanceMatches: 0, originalProvenanceAbsent: 23, synchronousPayloadMatches: 6,
+    acquiredOriginalContexts: 6, settledOriginalContexts: 6,
+    rawPages: 6, rawVisibleMatches: 6, rawCursorContinuations: 6,
+    acquiredTaskHistories: 6,
+    missing: 0, promptAdmissionIds: 0, errors: [] });
   const business = result.cases.find((item: unknown) => plain(item) && item.name === 'main-domain-read');
   assert(plain(business)); assert(plain(business.business)); assert.equal(business.business.reads, 1);
   assert.equal(business.business.expiredInvocationBlocked, true);

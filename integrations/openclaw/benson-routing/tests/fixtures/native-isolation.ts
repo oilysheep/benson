@@ -5,14 +5,17 @@ import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 
 /** Fail closed: both proof fixtures run only inside disposable Linux namespaces. */
-export function runIsolatedFixture(target: 'native-correlation' | 'main-interception' | 'whatsapp-response-delivery', codeModeOnly = false, completionV6Only: boolean | 'cancel' = false, mainHookSurfaceOnly = false, supportedNativeOnly = false, whatsappMonitorOnly: boolean | 'installed' = false): unknown {
+export function runIsolatedFixture(target: 'native-correlation' | 'main-interception' | 'whatsapp-response-delivery' | 'tool-execution-receipts', codeModeOnly = false, completionV6Only: boolean | 'cancel' | 'multi' = false, mainHookSurfaceOnly = false, supportedNativeOnly = false, whatsappMonitorOnly: boolean | 'installed' | 'reminder-product' = false): unknown {
+  const reminderProduct = whatsappMonitorOnly === 'reminder-product';
+  const installed = whatsappMonitorOnly === 'installed' || reminderProduct;
   if (whatsappMonitorOnly && target !== 'whatsapp-response-delivery') throw new TypeError('Monitor proof requires its WhatsApp fixture');
   if (codeModeOnly && target !== 'main-interception') throw new TypeError('Code Mode requires the Main fixture');
   if (completionV6Only && (target !== 'native-correlation' || codeModeOnly)) throw new TypeError('Completion v6 requires its isolated correlation fixture');
   if (mainHookSurfaceOnly && (target !== 'main-interception' || codeModeOnly || completionV6Only)) throw new TypeError('Main hook surface requires its isolated Main fixture');
   if (supportedNativeOnly && (target !== 'main-interception' || codeModeOnly || completionV6Only || mainHookSurfaceOnly)) throw new TypeError('Supported native proof requires its isolated Main profile');
+  const receiptPatch = target === 'tool-execution-receipts' || !!completionV6Only || target === 'whatsapp-response-delivery';
   const repo = realpathSync(process.cwd());
-  const npmCache = whatsappMonitorOnly === 'installed' ? realpathSync(process.env.BENSON_WHATSAPP_NPM_CACHE ??
+  const npmCache = installed ? realpathSync(process.env.BENSON_WHATSAPP_NPM_CACHE ??
     join(repo, '.checkpoints/ts03-whatsapp-installer-20261031/npm-cache')) : undefined;
   let whatsappDirectory: string | undefined;
   if (target === 'whatsapp-response-delivery') {
@@ -46,9 +49,17 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
     '--ro-bind', `${repo}/node_modules`, '/repo/node_modules',
     // Stock package lifecycle may write only to an invisible, disposable SDK overlay.
     '--overlay-src', `${repo}/node_modules/openclaw`, '--tmp-overlay', '/repo/node_modules/openclaw',
+    ...receiptPatch ? ['--ro-bind', `${repo}/integrations/openclaw/patches/tool-execution-receipts`, '/receipt-patch'] : [],
     '--ro-bind', `${repo}/output/typescript`, '/repo/output/typescript',
+    ...reminderProduct ? [
+      // Only synthetic resources are writable, inside this disposable namespace.
+      '--tmpfs', '/repo/output/typescript/agents/reminder-service/config',
+      '--tmpfs', '/repo/output/typescript/agents/reminder-service/tools',
+      '--ro-bind', `${repo}/integrations/openclaw/plugins/benson-reminder-tool/openclaw.plugin.json`, '/reminder-plugin-manifest.json',
+      '--ro-bind', `${repo}/integrations/openclaw/benson-routing/openclaw.plugin.json`, '/routing-plugin-manifest.json',
+    ] : [],
     '--ro-bind', `${repo}/agents/jessica-vacuum/config/registry.v1.json`, '/repo/agents/jessica-vacuum/config/registry.v1.json',
-    ...whatsappMonitorOnly === 'installed' ? [
+    ...installed ? [
       ...['config/policy.v1.json', 'tests/fixtures/map-stage2-live.json'].flatMap(file => [
         '--ro-bind', join(repo, 'agents/jessica-vacuum', file), `/repo/agents/jessica-vacuum/${file}`,
       ]),
@@ -69,16 +80,19 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
     '--setenv', 'OPENCLAW_CONFIG_PATH', '/tmp/config.json',
     '--setenv', 'BENSON_NATIVE_CORRELATION_ISOLATED', '1', '--chdir', '/repo',
     ...codeModeOnly ? ['--setenv', 'BENSON_NATIVE_CODE_MODE_ONLY', '1'] : [],
-    ...completionV6Only ? ['--setenv', 'BENSON_NATIVE_COMPLETION_V6_ONLY', completionV6Only === 'cancel' ? 'cancel' : '1'] : [],
+    ...completionV6Only ? ['--setenv', 'BENSON_NATIVE_COMPLETION_V6_ONLY', typeof completionV6Only === 'string' ? completionV6Only : '1'] : [],
     ...mainHookSurfaceOnly ? ['--setenv', 'BENSON_NATIVE_MAIN_HOOK_SURFACE_ONLY', '1'] : [],
     ...supportedNativeOnly ? ['--setenv', 'BENSON_NATIVE_SUPPORTED_RESPONSE_ONLY', '1'] : [],
     ...whatsappMonitorOnly ? ['--setenv', 'BENSON_NATIVE_WHATSAPP_MONITOR_ONLY', '1'] : [],
-    ...whatsappMonitorOnly === 'installed' ? ['--setenv', 'BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY', '1'] : [],
-    '/usr/bin/node', `/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/${target}.js`, '--worker',
+    ...installed ? ['--setenv', 'BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY', '1'] : [],
+    ...reminderProduct ? ['--setenv', 'BENSON_NATIVE_REMINDER_PRODUCT_ONLY', '1'] : [],
+    ...receiptPatch ? ['/usr/bin/bash', '--noprofile', '--norc', '-c',
+      `node /receipt-patch/manage.mjs apply /repo/node_modules/openclaw >/tmp/receipt-patch-apply.json && node /receipt-patch/manage.mjs verify /repo/node_modules/openclaw >>/tmp/receipt-patch-apply.json && exec node /repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/${target}.js --worker`] :
+      ['/usr/bin/node', `/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/${target}.js`, '--worker'],
   ], { encoding: 'utf8', stdio: ['ignore', 'pipe', 'inherit'],
     // Installed profile adds bounded install (60s), inspection and config (30s each) before
     // the unchanged gateway proof budget. Leave time for its failure diagnostics.
-    timeout: whatsappMonitorOnly === 'installed' ? 290_000 : 170_000, maxBuffer: 1024 * 1024 });
+    timeout: installed ? 290_000 : 170_000, maxBuffer: 1024 * 1024 });
   return JSON.parse(output.trim());
   } finally { if (whatsappDirectory) rmSync(whatsappDirectory, { recursive: true }); }
 }

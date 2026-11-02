@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { createCurrentRequestContext, createRoutingContextController, type ConversationEvidence, type ConversationTurn } from '../core/conversation-context.js';
+import { createCurrentRequestContext, createRoutingContextController, reconstructDomainPending, type ConversationEvidence, type ConversationTurn } from '../core/conversation-context.js';
+import { validateDomainResultEnvelope, withDomainPending, readDomainFactsData } from '../core/domain-result.js';
+import type { AnyDomainResult, ConsumedPending } from '../core/contracts.js';
+import type { Pending } from '../core/value.js';
 import { ROUTING_TRANSCRIPT_TIERS, MAX_ROUTING_CONTEXT_BYTES } from '../core/request-control.js';
 const binding = { conversationRef: 'conversation', channel: 'fixture-channel', accountId: 'account', kind: 'group' as const,
   peerId: 'group', threadId: null, requesterId: 'reader' };
@@ -196,4 +199,151 @@ test('group attribution is not permission and malformed sender/channel/account p
     const f = fixture(); f.evidence.currentTurn = () => ({ ...f.state.current, sender });
     assert.equal((await f.controller.projectRoutingContext()).status, 'unavailable');
   }
+});
+
+const pendingBinding = { requesterId: 'reader', conversationId: 'conversation' };
+const pendingTime = new Date('2026-11-02T12:00:00Z');
+function domainPending(id: string, revision = 1): Pending {
+  return { schemaVersion: 1, binding: { ...pendingBinding }, expiresAt: '2026-11-02T12:20:00Z',
+    value: { contextId: 'conversation', revision, currentEvidenceId: id } };
+}
+function pendingReference(pending: Pending): ConsumedPending {
+  return { schemaVersion: 1, domain: 'reminder', binding: { ...pending.binding },
+    contextId: String(pending.value.contextId), revision: Number(pending.value.revision), currentEvidenceId: String(pending.value.currentEvidenceId) };
+}
+function pendingResult(pending: Pending | null, consumed: ConsumedPending | null = null, status = pending ? 'clarification_required' : 'success'): AnyDomainResult {
+  const value = validateDomainResultEnvelope({ schemaVersion: 3, kind: 'benson.domain-result', executionMode: 'agentic',
+    domain: 'reminder', domainSchemaVersion: 'legacy-unversioned', operation: 'create',
+    outcome: { disposition: status === 'failure' ? 'failed' : 'handled', status },
+    facts: { verified: status === 'success', verificationScope: status === 'success' ? ['transaction'] : [], data: { question: 'When?' } },
+    evidence: { observations: [], gaps: [] }, warnings: [], failures: { domain: status === 'failure' ? { code: 'DENIED' } : null, handling: null },
+    effects: { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } }, uncertainty: [],
+    pendingContext: pending, content: { state: 'unavailable', reason: { code: 'PRESENTATION_REQUIRED', detail: 'Use domain renderer' } } });
+  return withDomainPending(value, consumed);
+}
+function pendingHistory(rows: { input: { entryId: string }; entryId: string; result: AnyDomainResult }[], inputId = 'fresh') {
+  const state = { live: true, historyLive: true, clock: new Date(pendingTime) };
+  const view = reconstructDomainPending({ results: rows, assertCurrent() { assert(state.historyLive); } }, {
+    domain: 'reminder', binding: { ...pendingBinding }, currentInputId: inputId,
+    reference: pendingReference,
+    replacement(previous, result) { assert(result.pendingContext); assert.equal(Number(result.pendingContext.value.revision), Number(previous.value.revision) + 1); },
+    clock: () => state.clock, assertCurrent() { assert(state.live); },
+  });
+  return { state, view };
+}
+const pendingRow = (entryId: string, inputId: string, result: AnyDomainResult) => ({ entryId, input: { entryId: inputId }, result });
+
+test('versioned domain facts preserve legacy data and reject unknown or incomplete metadata', () => {
+  const value = pendingResult(null);
+  assert.equal(readDomainFactsData(value.facts.data).version, 1);
+  assert.deepEqual(readDomainFactsData(value.facts.data).value, readDomainFactsData({ question: 'When?' }).value);
+  assert.equal(readDomainFactsData({ question: 'When?' }).consumedPending, null);
+  for (const data of [
+    { kind: 'benson.domain-facts', schemaVersion: 2, value: null, consumedPending: null },
+    { kind: 'benson.domain-facts', schemaVersion: 1, value: null },
+    { kind: 'benson.domain-facts.future', schemaVersion: 1, value: null, consumedPending: null },
+    { kind: 'benson.domain-facts', schemaVersion: 1, value: null, consumedPending: { schemaVersion: 2 } },
+  ]) assert.throws(() => validateDomainResultEnvelope({ ...value, facts: { ...value.facts, data } }), /domain_facts/);
+  let invoked = false;
+  const getter = Object.defineProperty({}, 'kind', { enumerable: true, get() { invoked = true; return 'benson.domain-facts'; } });
+  assert.throws(() => readDomainFactsData(getter), /json_object_invalid/);
+  assert.equal(invoked, false);
+});
+
+test('exact consumed pending preserves unrelated requests and reconstructs identically after reload', () => {
+  const pending = Array.from({ length: 5 }, (_, index) => domainPending('original-' + index));
+  const rows = pending.map((item, index) => pendingRow('question-' + index, 'input-' + index, pendingResult(item)));
+  rows.push(pendingRow('terminal', 'answer', pendingResult(null, pendingReference(pending[2]!))));
+  const first = pendingHistory(rows).view;
+  const recovered = pendingHistory(JSON.parse(JSON.stringify(rows))).view;
+  assert.deepEqual(recovered.pending, first.pending); assert.equal(first.pending.length, 4);
+  assert(!first.pending.some(item => item.reference.domain === 'reminder' && item.reference.currentEvidenceId === 'original-2'));
+  assert.throws(() => first.select(pendingReference(pending[2]!)), /unavailable/);
+  assert.equal(first.select(pendingReference(pending[4]!)).pending.value.currentEvidenceId, 'original-4');
+});
+
+test('legacy or unreferenced null never clears pending; exact terminal domain failure does', () => {
+  const pending = domainPending('original'); const original = pendingRow('q', 'old', pendingResult(pending));
+  const plainResult = pendingResult(null), data = readDomainFactsData(plainResult.facts.data).value;
+  const legacy = validateDomainResultEnvelope({ ...plainResult, facts: { ...plainResult.facts, data } });
+  assert.equal(pendingHistory([original, pendingRow('legacy', 'answer', legacy)]).view.pending.length, 1);
+  assert.equal(pendingHistory([original, pendingRow('null', 'answer', plainResult)]).view.pending.length, 1);
+  assert.equal(pendingHistory([original, pendingRow('failure', 'answer', pendingResult(null, pendingReference(pending), 'failure'))]).view.pending.length, 0);
+});
+
+test('clarification follow-up consumes exact prior revision and retains the next question', () => {
+  const old = domainPending('question', 1), next = domainPending('answer', 2);
+  const rows = [pendingRow('q1', 'question', pendingResult(old)), pendingRow('q2', 'answer', pendingResult(next, pendingReference(old)))];
+  const { view } = pendingHistory(rows);
+  assert.equal(view.pending.length, 1); assert.equal(view.select(pendingReference(next)).pending.value.revision, 2);
+  assert.throws(() => view.select(pendingReference(old)), /unavailable/);
+  const invalid = domainPending('answer', 4);
+  assert.throws(() => pendingHistory([rows[0]!, pendingRow('q2', 'answer', pendingResult(invalid, pendingReference(old)))]));
+});
+
+test('pending consumption rejects foreign, missing, stale, conflicting, duplicate and same-input references', () => {
+  const pending = domainPending('old'), ref = pendingReference(pending), q = pendingRow('q', 'old-input', pendingResult(pending));
+  for (const changed of [
+    { ...ref, binding: { ...ref.binding, requesterId: 'foreign' } },
+    { ...ref, binding: { ...ref.binding, conversationId: 'other' } },
+    { ...ref, currentEvidenceId: 'missing' }, { ...ref, revision: 2 },
+  ]) assert.throws(() => pendingHistory([q, pendingRow('r', 'answer', pendingResult(null, changed))]), /pending_/);
+  const resolved = pendingRow('r', 'answer', pendingResult(null, ref));
+  assert.throws(() => pendingHistory([q, resolved, pendingRow('again', 'later', pendingResult(null, ref))]), /unmatched/);
+  assert.throws(() => pendingHistory([q, pendingRow('r', 'old-input', pendingResult(null, ref))]), /same_input/);
+  assert.throws(() => pendingHistory([q, q]), /duplicate/);
+  assert.throws(() => pendingHistory([q, pendingRow('collision', 'another', pendingResult(pending))]), /identity_conflict/);
+  const { view, state } = pendingHistory([q]); state.clock = new Date(pending.expiresAt);
+  assert.throws(() => view.select(ref), /unavailable/);
+  assert.equal(pendingHistory([q]).view.pending.length, 1);
+});
+
+test('completed-input replay and cancellation reject without creating execution authority', () => {
+  const pending = domainPending('old'), row = pendingRow('q', 'old-input', pendingResult(pending));
+  const { view, state } = pendingHistory([row], 'old-input');
+  assert.throws(() => view.assertFreshInput(), /already_completed/);
+  assert.throws(() => view.select(pendingReference(pending)), /already_completed/);
+  const fresh = pendingHistory([row]); fresh.state.historyLive = false;
+  assert.doesNotThrow(() => fresh.view.select(pendingReference(pending)), 'own append may retire acquisition, not retained original-source custody');
+  state.live = false;
+  assert.throws(() => view.select(pendingReference(pending)));
+  assert.throws(() => view.assertFreshInput());
+  assert.equal('execute' in view, false);
+});
+
+test('Jessica identities survive reload and exact replacement without an invented revision', () => {
+  const pending = (id: string): Pending => ({ schemaVersion: 1, binding: { ...pendingBinding },
+    expiresAt: '2026-11-02T12:20:00Z', value: { version: '1', clarificationId: id, expiresAt: '2026-11-02T12:20:00Z' } });
+  const reference = (value: Pending): ConsumedPending => ({ schemaVersion: 1, domain: 'jessica-vacuum',
+    binding: value.binding, clarificationId: String(value.value.clarificationId) });
+  const result = (value: Pending | null, consumed: ConsumedPending | null = null) => {
+    const original = pendingResult(value), facts = readDomainFactsData(original.facts.data).value;
+    return withDomainPending(validateDomainResultEnvelope({ ...original, domain: 'jessica-vacuum', domainSchemaVersion: '1',
+      operation: 'clean', facts: { ...original.facts, data: facts } }), consumed);
+  };
+  const first = pending('first'), second = pending('second'), next = pending('next');
+  const rows = [pendingRow('q1', 'input-1', result(first)), pendingRow('q2', 'input-2', result(second)),
+    pendingRow('q3', 'answer', result(next, reference(second)))];
+  const acquire = (history: typeof rows) => reconstructDomainPending({ results: history, assertCurrent() {} }, {
+    domain: 'jessica-vacuum', binding: pendingBinding, currentInputId: 'later', reference,
+    replacement(previous, value) { assert.notEqual(value.pendingContext?.value.clarificationId, previous.value.clarificationId); },
+    clock: () => pendingTime, assertCurrent() {},
+  });
+  const view = acquire(JSON.parse(JSON.stringify(rows)));
+  assert.deepEqual(view.pending.map(item => item.reference), [reference(first), reference(next)]);
+  assert.throws(() => view.select(reference(second)), /unavailable/);
+  assert.throws(() => acquire([...rows, pendingRow('reuse', 'later', result(second, reference(next)))]), /identity_conflict/);
+  assert.throws(() => acquire([...rows, pendingRow('foreign', 'later', result(null, pendingReference(domainPending('foreign'))))]), /pending_consumption|pending_binding/);
+});
+
+test('failed reporting, unresolved effects and missing evidence never carry consumption', () => {
+  const reference = pendingReference(domainPending('old')), original = pendingResult(null);
+  const data = readDomainFactsData(original.facts.data).value;
+  const legacy = validateDomainResultEnvelope({ ...original, facts: { ...original.facts, data } });
+  for (const changed of [
+    { failures: { domain: null, handling: { code: 'REPORT_INVALID', message: 'Not verified', retryable: false } } },
+    { evidence: { observations: [], gaps: [{ code: 'RUN_UNSEALED', path: 'run', detail: 'Missing seal' }] } },
+    { effects: { status: 'possible', refs: [], details: [], reconciliation: { required: true, reason: 'CHECK_STATE' } } },
+    { uncertainty: [{ code: 'UNRESOLVED' }] },
+  ]) assert.throws(() => withDomainPending({ ...legacy, ...changed } as AnyDomainResult, reference));
 });

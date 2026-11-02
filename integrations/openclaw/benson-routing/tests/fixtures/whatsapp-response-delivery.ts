@@ -1,7 +1,10 @@
+import { readToolExecutionEvidence } from '../../core/tool-execution-evidence.js';
+import { observeOpenClawToolExecution } from '../../adapters/openclaw/tool-execution-evidence.js';
+import { acquireOriginalUserTurns, retainOriginalUserWrite } from '../../adapters/openclaw/conversation.js';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { EventEmitter } from 'node:events';
-import { AsyncResource } from 'node:async_hooks';
+import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
@@ -26,7 +29,7 @@ import { createReminderTaskToolFactory, createReminderToolFactory } from '../../
 import { loadIdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
 import { renderReminderDomainResult } from '../../../../../agents/reminder-service/lib/presentation.js';
 import { plain, boundedCopy } from '../../core/value.js';
-import { isolated, worker, writeReport, registerCompletionV6Proof, REMINDER_CREATE_TEXT, JESSICA_MUTATION_TEXT, REMINDER_DELETE_TEXT } from './native-correlation.js';
+import { isolated, worker, writeReport, registerCompletionV6Proof, REMINDER_CREATE_TEXT, PRODUCT_REMINDER_CREATE_TEXT, JESSICA_MUTATION_TEXT, REMINDER_DELETE_TEXT } from './native-correlation.js';
 import type { Binding6 } from '../../core/completion-contracts.js';
 import { validateCompletion } from '../../core/completion.js';
 import type { CurrentRequestEvidence, CurrentRequestProjection } from '../../core/conversation-context.js';
@@ -45,6 +48,7 @@ type NativeModule = {
 // The monitor, stock listener, identity/ingress and delivery code stay original.
 const monitorOnly = process.env.BENSON_NATIVE_WHATSAPP_MONITOR_ONLY === '1';
 const installerOnly = process.env.BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY === '1';
+const reminderProductOnly = process.env.BENSON_NATIVE_REMINDER_PRODUCT_ONLY === '1';
 const transportSlot = '__bensonIsolatedWhatsAppSocketFactory';
 const transportGlobal = globalThis as unknown as Record<string, unknown>;
 if (monitorOnly && transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled !== true) {
@@ -78,6 +82,18 @@ type BusinessProof = {
   completion?: { binding: Binding6; backendReads: number; negativeEvidenceCases: number };
   createActive: boolean; mutationActive: boolean; reminderOperation: 'create' | 'delete'; createSource?: CurrentRequestEvidence;
 };
+
+// Read-only installed-API inventory. Observation is deliberately not exposed
+// as domain authority: final-effect custody still needs separate acceptance.
+const supportedTranscriptProbe = { writes: 0, reads: 0, persistedMatches: 0,
+  resolverScopeMatches: 0, synchronousVersionMatches: 0,
+  originalTextMatches: 0, originalSenderMatches: 0, originalProvenanceMatches: 0, originalProvenanceAbsent: 0,
+  synchronousPayloadMatches: 0, acquiredOriginalContexts: 0, settledOriginalContexts: 0,
+  rawPages: 0, rawVisibleMatches: 0, rawCursorContinuations: 0,
+  rawShapes: [] as string[],
+  acquiredTaskHistories: 0, taskResultCounts: [] as number[],
+  missing: 0, promptAdmissionIds: 0, errors: [] as string[] };
+const supportedWriteScope = new AsyncLocalStorage<Readonly<{ requestId: string; text: unknown; senderId: unknown; accountId: unknown }>>();
 
 // Fixture consumer of the approved additive contract, not a business grant.
 function readNativeHandoff(raw: unknown, expected: Record<string, unknown>) {
@@ -115,6 +131,8 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
   const cases: unknown[] = [];
   // Native durable ingress retains failed admissions. Independent account scopes
   // prevent one negative case's recovery row becoming another case's input.
+  // Two successful Main cases reuse one account to prove authorized prior Task
+  // custody across native monitor replacement, without reusing failed ingress.
   for (const [index, name] of ['success-and-duplicate', 'rejection', 'missing-binding', 'foreign-account',
     'disallowed-sender', 'retired-binding', 'model-fallback', 'cancel-after-resolution',
     ...installerOnly ? ['main-domain-read', 'direct-read', 'direct-read-failure', 'direct-denied', 'direct-revoked-read', 'direct-cancel-read',
@@ -135,7 +153,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     const directAgentic = name.startsWith('direct-agentic-');
     business.directCase = directAgentic ? name : '';
     const directRead = name.startsWith('direct-') && !directAgentic;
-    const accountId = `fixture-${index}`;
+    const accountId = name === 'main-domain-agentic' ? 'fixture-8' : `fixture-${index}`;
     const authDir = `/tmp/empty-fixture-auth/${accountId}`;
     const requestId = `native-monitor-${name}`;
     const key = { channelId: 'whatsapp', accountId, capability: 'benson.response-controller.v1' };
@@ -455,8 +473,10 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
                 requestDecision = { requestId: projected.trusted.requestId, calls, classification: outcome, routing, nativeDecision };
                 phases.push('decision-settled');
               }
+              const originalSource = Object.freeze({ requestId, text: handoff.ctx.RawBody,
+                senderId: handoff.ctx.SenderId, accountId: handoff.ctx.AccountId });
               return await delivery.resolveNativeCandidate({ resolve: async () => {
-                const candidate = await resolve();
+                const candidate = await supportedWriteScope.run(originalSource, resolve);
                 phases.push('native-candidate');
                 if (name === 'retired-binding') lease?.dispose();
                 if (name === 'cancel-after-resolution') abort.abort();
@@ -571,20 +591,277 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     assert.notEqual(registration.captureReadAuthority()?.(), true, 'Retired entry must not mint live authority');
   }
   writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.4', monitorAssembly: true,
-    cases, trustedReadOwner: installerOnly ? true : readAuthority?.() === true,
+    cases, supportedTranscriptProbe, trustedReadOwner: installerOnly ? true : readAuthority?.() === true,
     ...installerOnly ? { nativeInstall, authorityRetired: readAuthority?.() === false } : {},
     limits: 'Stock native plugin registration/monitor/listener with isolated socket only. No real server authentication or production authority.' });
+}
+
+/** Actual separately loaded product entries; only the socket and transaction
+ * backend are synthetic. No fixture Response binding or Task registration. */
+function registerReminderProductObservations(api: OpenClawPluginApi) {
+  const failed = Promise.withResolvers<never>(); void failed.promise.catch(() => {});
+  const calls: { name: string; callId: string; runId: string; sessionKey: string }[] = [];
+  const results: ReturnType<typeof validateDomainResultEnvelope>[] = [];
+  const children: { sessionKey: string; success: boolean }[] = [];
+  api.on('before_tool_call', (event, ctx) => {
+    if (event.toolName !== 'reminder_task' && !event.toolName.startsWith('benson_reminder_')) return;
+    assert(ctx.toolCallId && ctx.runId && ctx.sessionKey);
+    calls.push({ name: event.toolName, callId: ctx.toolCallId, runId: ctx.runId, sessionKey: ctx.sessionKey });
+  });
+  api.on('after_tool_call', event => {
+    if (event.toolName === 'reminder_task' && event.error !== undefined)
+      failed.reject(new Error('Product Task returned a native error'));
+    // Native hooks expose sanitized payloads. Read originals only from the
+    // existing authoritative receipt provider after complete Run settlement.
+  });
+  api.on('agent_end', (event, ctx) => {
+    if (ctx.agentId === 'reminder-service') { assert(ctx.sessionKey); children.push({ sessionKey: ctx.sessionKey, success: event.success }); }
+  });
+  return { calls, results, children, failed: failed.promise };
+}
+async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType<typeof registerReminderProductObservations>) {
+  isolated();
+  const registryUrl = '/repo/node_modules/openclaw/dist/registry-loaded-BugfxX6l.mjs';
+  const registry = await import(registryUrl) as {
+    r(id: string): { plugin: { config: { resolveAccount(cfg: unknown, id: string): unknown };
+      gateway: { startAccount(ctx: unknown): Promise<unknown> } };
+      resolveChannelRuntime(): OpenClawPluginApi['runtime']['channel']; captureReadAuthority(): (() => boolean) | undefined } | undefined;
+  };
+  const registration = registry.r('whatsapp'); assert(registration);
+  assert.equal(registration.captureReadAuthority()?.(), true);
+  const channel = registration.resolveChannelRuntime(), accountId = 'fixture-0';
+  const responseKey = { channelId: 'whatsapp', accountId, capability: 'benson.response-controller.v1' };
+  const productBinding = channel.runtimeContexts.get(responseKey); assert(productBinding, 'Actual Response entry must own the binding');
+  const { calls, results, children } = observed;
+  const receipts = await observeOpenClawToolExecution('agent:main:main', () => {
+    assert.equal(api.lifecycle.signal?.aborted, false);
+  }, new URL('file:///receipt-patch/manifest.json'));
+  const abort = new AbortController(), connected = Promise.withResolvers<void>();
+  let accepted = Promise.withResolvers<void>(), emitSocket: ((event: string, payload: unknown) => void) | undefined;
+  const sends: { jid: string; text: string }[] = [], errors: string[] = [];
+  const ev = new EventEmitter(), ws = Object.assign(new EventEmitter(), { isClosed: false, isClosing: false,
+    close() { ws.isClosed = true; ws.emit('close'); } });
+  ev.on('newListener', event => { if (event === 'connection.update') queueMicrotask(() => ev.emit('connection.update', { connection: 'open' })); });
+  transportGlobal[transportSlot] = () => {
+    assert.equal(emitSocket, undefined, 'No reconnect');
+    emitSocket = AsyncResource.bind((event: string, payload: unknown) => { ev.emit(event, payload); });
+    return { ev, ws, user: { id: '15550000002:1@s.whatsapp.net', name: 'Fixture self' },
+      async sendPresenceUpdate() {}, async readMessages() {}, async groupFetchAllParticipating() { return {}; },
+      async sendMessage(jid: string, content: { text?: string }) {
+        assert.equal(jid, '15550000001@s.whatsapp.net'); assert.equal(typeof content.text, 'string');
+        sends.push({ jid, text: content.text! }); accepted.resolve();
+        return { key: { id: `product-receipt-${sends.length}`, remoteJid: jid, fromMe: true }, message: { conversation: content.text } };
+      }, end() { ws.close(); } };
+  };
+  const monitor = registration.plugin.gateway.startAccount({ cfg: api.config,
+    account: registration.plugin.config.resolveAccount(api.config, accountId), accountId, channelRuntime: channel, abortSignal: abort.signal,
+    runtime: { log() {}, error(value: unknown) { errors.push(String(value)); }, exit() { throw new Error('Unexpected monitor exit'); } },
+    getStatus: () => ({ accountId }), setStatus(status: Record<string, unknown>) { if (status.connected) connected.resolve(); } });
+  let timer: NodeJS.Timeout;
+  const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(
+    `Reminder product deadline: ${JSON.stringify({ calls, results, children, sends, errors })}`)), 90_000); });
+  const cases: unknown[] = [];
+  try {
+    await Promise.race([deadline, connected.promise, monitor.then(() => { throw new Error('Monitor stopped before connection'); })]);
+    for (const [index, text] of ['G3_MAIN_READ_REMINDER', PRODUCT_REMINDER_CREATE_TEXT].entries()) {
+      accepted = Promise.withResolvers<void>(); assert(emitSocket);
+      emitSocket('messages.upsert', { type: 'notify', messages: [{ key: { remoteJid: '15550000001@s.whatsapp.net', id: `product-reminder-${index}`, fromMe: false },
+        message: { conversation: text }, messageTimestamp: Math.floor(Date.now()/1000), pushName: 'Fixture sender' }] });
+      await Promise.race([deadline, observed.failed, accepted.promise, monitor.then(() => { throw new Error('Monitor stopped before delivery'); })]);
+      const mainCalls = calls.filter(call => call.name === 'reminder_task');
+      assert.equal(mainCalls.length, index + 1); const mainCall = mainCalls[index]!;
+      await Promise.race([deadline, observed.failed, receipts.waitForSettlement(mainCall.runId, abort.signal)]);
+      const coverage = readToolExecutionEvidence(receipts.evidence(mainCall.runId), receipts.inspectIdentity(mainCall.runId));
+      assert.equal(coverage.identity.agentId, 'main'); assert.equal(coverage.receipts.length, 1);
+      const receipt = coverage.receipts[0]!;
+      assert.equal(receipt.callId, mainCall.callId); assert.equal(receipt.name, 'reminder_task');
+      assert.equal(receipt.executionStarted, true); assert.equal(receipt.originalIsError, false); assert.equal(receipt.isError, false);
+      assert(plain(receipt.originalResult)); assert(Array.isArray(receipt.originalResult.content));
+      const value = validateDomainResultEnvelope(receipt.originalResult.details);
+      assert.equal(receipt.originalResult.content.length, 1); const carrier = receipt.originalResult.content[0];
+      assert(plain(carrier)); assert.equal(carrier.type, 'text'); assert(typeof carrier.text === 'string');
+      assert.deepEqual(validateDomainResultEnvelope(JSON.parse(carrier.text)), value);
+      results.push(value);
+      assert.equal(value.domain, 'reminder'); assert.equal(value.facts.verified, true); assert.equal(value.outcome.status, 'success');
+      assert.equal(value.executionMode, index ? 'agentic' : 'deterministic'); assert.equal(value.effects.status, index ? 'known' : 'none');
+      assert.equal(children.length, index); assert.equal(calls.length, index ? 3 : 1);
+      if (index) { assert.equal(value.schemaVersion, 3); assert.deepEqual(value.effects.refs, ['isolated-created']); assert(sends[index]!.text.includes('drink water')); }
+      cases.push({ name: index ? 'product-create' : 'product-list', result: value, send: sends[index], childRuns: children.length });
+    }
+    assert.deepEqual(calls.map(call => call.name), ['reminder_task', 'reminder_task', 'benson_reminder_create']);
+    assert.notEqual(calls[1]!.runId, calls[2]!.runId); assert.equal(children[0]!.success, true);
+    const transactions = readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
+    assert.equal(transactions.length, 2); assert.equal(transactions[0]![0], 'list-reminders'); assert.equal(transactions[1]![0], 'create-intent');
+    const created = JSON.parse(transactions[1]![2]!) as Record<string, unknown>;
+    assert.equal(created.requesterId, 'reader'); assert.equal(created.content, 'drink water'); assert(plain(created.provenance));
+    assert.equal(created.provenance.currentEvidenceId, 'product-reminder-1');
+    assert.deepEqual(created.provenance.evidence, [{ id: 'product-reminder-1', text: PRODUCT_REMINDER_CREATE_TEXT }]);
+    const connection = channel.runtimeContexts.get({ ...responseKey, capability: 'connection-controller' }) as { getActiveListener(): { close(): Promise<void> } };
+    assert(connection); await Promise.race([deadline, connection.getActiveListener().close()]);
+    assert.equal(channel.runtimeContexts.get(responseKey), productBinding, 'Product binding lifetime belongs to its plugin');
+    assert.equal(sends.length, 2); assert.deepEqual(errors, []);
+    writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.4', reminderProduct: true, cases, calls, children,
+      transactionCount: transactions.length, limits: 'Actual product entries/native lifecycle; synthetic socket and transaction backend only. No pending/recovery or production proof.' });
+  } finally {
+    receipts.dispose(); clearTimeout(timer!); abort.abort(); try { await monitor; } finally { delete transportGlobal[transportSlot]; }
+    assert.equal(ws.isClosed, true); assert.equal(ev.listenerCount('messages.upsert'), 0);
+  }
 }
 
 export default {
   id: 'benson-jessica-tool',
   register(api: OpenClawPluginApi) {
     isolated();
+    if (reminderProductOnly) {
+      const observed = registerReminderProductObservations(api);
+      api.on('gateway_start', async () => {
+        try { await reminderProductProof(api, observed); }
+        catch (error) { writeReport({ probe: 'FAIL', error: String(error), stack: error instanceof Error ? error.stack : null,
+          calls: observed.calls, results: observed.results, children: observed.children,
+          transactionCount: existsSync('/tmp/reminder-transactions.jsonl') ? readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').length : 0 }); }
+      });
+      return;
+    }
     const business: BusinessProof = { clock: new Date(), reads: 0, guards: [], results: [], calls: [], agenticActive: false, reminderActive: false,
       directCase: '', directRuns: new Map(), createActive: false, mutationActive: false, reminderOperation: 'create' };
     if (installerOnly) {
+      const acquiredContexts = new Map<string, Awaited<ReturnType<typeof acquireOriginalUserTurns>>[]>();
+      const originalWrites = new Map<string, { id: string; messageId: string; original: unknown;
+        write: ReturnType<typeof retainOriginalUserWrite>; senderId: string; accountId: string; request: string }>();
+      api.on('before_message_write', (event, context) => {
+        if (context.agentId !== 'main' || !context.sessionKey) return;
+        const message: unknown = event.message;
+        if (!plain(message) || message.role !== 'user') return;
+        const meta = message.__openclaw;
+        if (!plain(meta) || !plain(meta.transport) || meta.transport.channel !== 'whatsapp') return;
+        assert.equal(typeof message.idempotencyKey, 'string');
+        assert.equal(typeof meta.transport.messageId, 'string');
+        const original = structuredClone({ content: message.content, provenance: message.provenance, metadata: meta });
+        supportedTranscriptProbe.writes++;
+        const source = supportedWriteScope.getStore();
+        assert(source && typeof source.text === 'string' && typeof source.senderId === 'string' && typeof source.accountId === 'string');
+        const write = retainOriginalUserWrite(message, { requestId: source.requestId, request: source.text,
+          senderId: source.senderId, accountId: source.accountId });
+        originalWrites.set(context.sessionKey, { id: String(message.idempotencyKey), messageId: String(meta.transport.messageId), original,
+          write, senderId: source.senderId, accountId: source.accountId, request: source.text });
+        if (source?.requestId === meta.transport.messageId) supportedTranscriptProbe.resolverScopeMatches++;
+        const text = typeof message.content === 'string' ? message.content :
+          Array.isArray(message.content) && message.content.length === 1 && plain(message.content[0]) &&
+          message.content[0].type === 'text' ? message.content[0].text : undefined;
+        if (typeof text === 'string' && text === source?.text) supportedTranscriptProbe.originalTextMatches++;
+        if (plain(meta.senderIdentity) && meta.senderId === source?.senderId && meta.senderIdentity.id === source?.senderId &&
+          meta.senderIdentity.type === 'observation' && meta.senderIdentity.pluginId === 'whatsapp' &&
+          meta.senderIdentity.accountId === source?.accountId) supportedTranscriptProbe.originalSenderMatches++;
+        if (plain(message.provenance) && message.provenance.kind === 'external_user') supportedTranscriptProbe.originalProvenanceMatches++;
+        if (!Object.hasOwn(message, 'provenance')) supportedTranscriptProbe.originalProvenanceAbsent++;
+      });
+      api.on('before_prompt_build', event => { if (event.currentUserMessageId) supportedTranscriptProbe.promptAdmissionIds++; });
+      api.on('before_tool_call', async (_event, context) => {
+        if (context.agentId !== 'main' || !context.sessionKey || !context.sessionId) return;
+        supportedTranscriptProbe.reads++;
+        try {
+          const name = 'openclaw/plugin-sdk/session-transcript-runtime';
+          const sdk: unknown = await import(name);
+          assert(plain(sdk) || (sdk !== null && typeof sdk === 'object'));
+          const read: unknown = Reflect.get(sdk, 'readSessionTranscriptVisibleMessageDelta');
+          assert.equal(typeof read, 'function');
+          const page: unknown = await Reflect.apply(read as (...args: unknown[]) => unknown, undefined,
+            [{ agentId: 'main', sessionKey: context.sessionKey, sessionId: context.sessionId, maxMessages: 1000, maxBytes: 1000000 }]);
+          assert(plain(page) && page.kind === 'page' && Array.isArray(page.entries));
+          const readRaw: unknown = Reflect.get(sdk, 'readSessionTranscriptRawDelta');
+          assert.equal(typeof readRaw, 'function');
+          const rawTarget = { agentId: 'main', sessionKey: context.sessionKey, sessionId: context.sessionId,
+            maxEvents: 1024, maxBytes: 1048576 };
+          const raw: unknown = await Reflect.apply(readRaw as (...args: unknown[]) => unknown, undefined, [rawTarget]);
+          assert(plain(raw) && raw.kind === 'page' && raw.hasMore === false && Array.isArray(raw.events));
+          assert(raw.events.length <= rawTarget.maxEvents && Number.isSafeInteger(raw.serializedBytes) &&
+            Number(raw.serializedBytes) <= rawTarget.maxBytes && typeof raw.cursor === 'string');
+          let previousSeq = -1;
+          for (const item of raw.events) {
+            assert(plain(item) && Number.isSafeInteger(item.seq) && Number(item.seq) > previousSeq && plain(item.event));
+            previousSeq = Number(item.seq);
+            const event = item.event, message = event.message;
+            // Only structural names enter the diagnostic output, never source
+            // payloads, cursor contents or persisted tool arguments/results.
+            const shape = JSON.stringify({ type: event.type, keys: Object.keys(event).sort(),
+              ...plain(message) ? { role: message.role, keysMessage: Object.keys(message).sort(),
+                blocks: Array.isArray(message.content) ? message.content.map((part: unknown) => plain(part) ? part.type : typeof part) : typeof message.content } : {} });
+            if (!supportedTranscriptProbe.rawShapes.includes(shape)) supportedTranscriptProbe.rawShapes.push(shape);
+          }
+          supportedTranscriptProbe.rawPages++;
+          for (const entry of page.entries) {
+            assert(plain(entry) && plain(entry.message));
+            const matching: unknown[] = raw.events.filter((item: unknown) => plain(item) && plain(item.event) && item.event.type === 'message' && item.event.id === entry.entryId);
+            assert.equal(matching.length, 1);
+            const original = matching[0]; assert(plain(original) && plain(original.event));
+            assert.deepEqual(original.event.message, entry.message);
+          }
+          supportedTranscriptProbe.rawVisibleMatches++;
+          const continued: unknown = await Reflect.apply(readRaw as (...args: unknown[]) => unknown, undefined,
+            [{ ...rawTarget, cursor: raw.cursor }]);
+          assert(plain(continued) && continued.kind === 'page' && continued.hasMore === false &&
+            Array.isArray(continued.events) && continued.events.length === 0 && continued.cursor === raw.cursor);
+          supportedTranscriptProbe.rawCursorContinuations++;
+          const write = originalWrites.get(context.sessionKey);
+          const matches = page.entries.filter((entry: unknown) => plain(entry) && plain(entry.message) && entry.message.idempotencyKey === write?.id);
+          if (!write || matches.length !== 1) { supportedTranscriptProbe.missing++; return; }
+          const matched: unknown = matches[0]; assert(plain(matched) && plain(matched.message));
+          const meta = matched.message.__openclaw; assert(plain(meta) && plain(meta.transport));
+          assert.equal(meta.transport.messageId, write.messageId);
+          assert.deepEqual({ content: matched.message.content, provenance: matched.message.provenance, metadata: meta }, write.original);
+          supportedTranscriptProbe.persistedMatches++;
+          const sessionsName = 'openclaw/plugin-sdk/agent-sessions';
+          const sessions: unknown = await import(sessionsName);
+          assert(sessions !== null && typeof sessions === 'object');
+          const manager: unknown = Reflect.get(sessions, 'SessionManager');
+          assert.equal(typeof manager, 'function');
+          const readContext: unknown = Reflect.get(manager as object, 'readSessionContext');
+          assert.equal(typeof readContext, 'function');
+          const seen: unknown = Reflect.apply(readContext as (...args: unknown[]) => unknown, manager,
+            [{ agentId: 'main', sessionKey: context.sessionKey, sessionId: context.sessionId },
+              (messages: Iterable<unknown>, header: unknown, version: unknown) => {
+                assert(plain(header)); assert.equal(header.id, context.sessionId);
+                assert(plain(version)); assert.equal(typeof version.generation, 'string');
+                let count = 0, bytes = 0, matched = false;
+                for (const message of messages) {
+                  assert(++count <= 1000); bytes += Buffer.byteLength(JSON.stringify(message)); assert(bytes <= 1000000);
+                  if (plain(message) && message.idempotencyKey === write.id) {
+                    assert.deepEqual({ content: message.content, provenance: message.provenance, metadata: message.__openclaw }, write.original);
+                    supportedTranscriptProbe.synchronousPayloadMatches++; matched = true; break;
+                  }
+                }
+                assert(matched); return true;
+              }]);
+          assert.equal(seen, true); supportedTranscriptProbe.synchronousVersionMatches++;
+          const resolver = supportedWriteScope.getStore(); assert(resolver);
+          const acquired = await acquireOriginalUserTurns({ target: { agentId: 'main', sessionKey: context.sessionKey, sessionId: context.sessionId },
+            binding: { conversationRef: context.sessionKey, channel: 'whatsapp', accountId: write.accountId,
+              kind: 'direct', peerId: write.senderId, threadId: null, requesterId: write.senderId },
+            request: write.request, write: write.write,
+            assertCurrent() { assert.equal(supportedWriteScope.getStore(), resolver); assert(api.lifecycle.signal); api.lifecycle.signal.throwIfAborted(); } });
+          assert.equal(acquired.turns.at(-1)?.entryId, matched.entryId);
+          assert.equal(acquired.turns.at(-1)?.text, write.request);
+          assert.equal(acquired.turns.at(-1)?.inputProvenance, null);
+          acquired.assertCurrent(); supportedTranscriptProbe.acquiredOriginalContexts++;
+          assert(context.toolCallId);
+          const taskHistory = await acquired.acquireTaskResults(context.toolCallId);
+          taskHistory.assertCurrent(); supportedTranscriptProbe.acquiredTaskHistories++;
+          supportedTranscriptProbe.taskResultCounts.push(taskHistory.results.length);
+          assert(context.runId);
+          const retained = acquiredContexts.get(context.runId) ?? [];
+          retained.push(acquired); acquiredContexts.set(context.runId, retained);
+        } catch (error) { supportedTranscriptProbe.errors.push(error instanceof Error ? error.stack ?? String(error) : String(error)); }
+      });
+      api.on('agent_end', (_event, context) => {
+        if (context.agentId !== 'main' || !context.runId) return;
+        for (const acquired of acquiredContexts.get(context.runId) ?? []) {
+          try { acquired.assertCurrent(); supportedTranscriptProbe.settledOriginalContexts++; }
+          catch (error) { supportedTranscriptProbe.errors.push(error instanceof Error ? error.stack ?? String(error) : String(error)); }
+        }
+        acquiredContexts.delete(context.runId);
+      });
       const agenticCreate = registerCompletionV6Proof(api, { resultVersion: 3,
-        active: () => business.agenticActive, accountId: 'fixture-18', route: '+15550000001',
+        active: () => business.agenticActive, accountId: 'fixture-8', route: '+15550000001',
         parentSessionKey: 'agent:main:main', requestId: 'native-monitor-main-domain-agentic',
         assertCurrent() { assert(business.agenticActive && business.agenticCurrent); business.agenticCurrent(); },
         onCompletion({ guard, ...proof }) {
@@ -654,6 +931,7 @@ export default {
       const reminderId = operation === 'create' ? 'isolated-created' : 'isolated-existing';
       const createIdentities = loadIdentityContract({ accountId, trustedRequesterIds: ['reader'],
         recipients: [{ id: 'reader', type: 'person', channel: 'whatsapp', to: '+15550000001' }] });
+      let verifyTransaction: ((args: unknown, value: unknown) => void) | undefined;
       let createWork: { callId: string; source: CurrentRequestProjection; deps: Dependencies } | undefined;
       let createChild: { runId: string; callId: string; sessionId: string; sessionKey: string; guard: () => void;
         value: unknown } | undefined;
@@ -680,8 +958,8 @@ export default {
           if (request.operation === 'create-intent') { assert(!('items' in request.input)); assert.equal(request.input.provenance?.currentEvidenceId, createWork.source.context.current.entryId); }
           else { assert(request.operation === 'delete-reminder'); assert.equal(request.reminderId, reminderId); }
           business.reads++;
-          return { status: 'success', operation, transaction: { status: 'success', verified: true },
-            data: { reminderIds: [reminderId], ...(operation === 'delete' ? { padding: ['א'.repeat(10000), 'x'.repeat(10000)] } : {}),
+          return { status: 'success', operation, reminderId, transaction: { status: 'success', verified: true },
+            data: { ...(operation === 'delete' ? { padding: ['א'.repeat(10000), 'x'.repeat(10000)] } : {}),
               record: { reminderId, status: operation === 'create' ? 'active' : 'deleted',
               content: request.operation === 'create-intent' && !('items' in request.input) ? request.input.content : 'existing reminder',
               ...(request.operation === 'create-intent' && !('items' in request.input) ? { schedule: request.input.schedule, calendar: request.input.calendar } : {}) } }, transport: { deliveries: [] }, warnings: [] };
@@ -702,7 +980,8 @@ export default {
                   { field: 'content', evidenceId: inputId, quote: 'drink water' }, { field: 'schedule', evidenceId: inputId, quote: 'November 2 at 10:00' },
                   { field: 'calendar.requested', evidenceId: inputId, quote: 'without a calendar event' }] } };
             writeFileSync(`/tmp/reminder-${operation}-input.json`, JSON.stringify(operation === 'create' ? { input } : { requesterId: work.deps.route.requesterId, reminderId }), { mode: 0o600 });
-            const normalized = await runReminderNativeTask(_request, work, { runtime: api.runtime.subagent,
+            const receiptProvider = await observeOpenClawToolExecution(createSessionKey, () => work.deps.authority.assertCurrent(), new URL('file:///receipt-patch/manifest.json'));
+            const normalized = await runReminderNativeTask(_request, work, { executionEvidence: receiptProvider, runtime: api.runtime.subagent,
               toolsAlsoAllow: [toolName], resultVersion: 3,
               sessionKey: createSessionKey, message: `${operation === 'create' ? 'G3_REMINDER_CREATE_CHILD' : 'G3_REMINDER_DELETE_CHILD'} ${JSON.stringify({ input })}`,
               caller: { runId: parent.runId, agentId: 'main', sessionKey: parent.sessionKey, sessionId: parent.sessionId },
@@ -710,7 +989,7 @@ export default {
                 assert(createChild && createTerminal && createAfter);
                 const child = createChild; assert.throws(child.guard, 'Retired child invocation is not a live grant');
                 const effects = [{ kind: `reminder-${operation}`, reminderId, verified: true }];
-                return { operation: operation === 'create' ? 'create-intent' : 'delete-reminder',
+                return { validateTool(tool, receipt) { assert(verifyTransaction && receipt); verifyTransaction(receipt.executionArgs, tool.value); }, operation: operation === 'create' ? 'create-intent' : 'delete-reminder',
                   tool: { ...child, name: toolName }, after: createAfter, terminal: createTerminal,
                   effects: { status: 'known', refs: [reminderId], details: effects, reconciliation: { required: false, reason: null } }, uncertainty: [],
                   custody: { assertCurrent() { work.deps.authority.assertCurrent(); assert.equal(createWork, work); assert.equal(createChild, child); } } };
@@ -736,7 +1015,7 @@ export default {
             const assertCurrent = () => { work.deps.authority.assertCurrent(); signal?.throwIfAborted(); ctx.assertInvocationCurrent(); assert.equal(ctx.sessionKey, createSessionKey); };
             assertCurrent(); assert.equal(createChild, undefined);
             const createRaw = createReminderToolFactory({ name: toolName, source: work.deps, current: work.source,
-              jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }) });
+              jsonResult: (value, verify) => { verifyTransaction = verify; return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; } });
             const rawTool = createRaw({ ...ctx, assertInvocationCurrent: assertCurrent }); assert(rawTool && !Array.isArray(rawTool));
             const rawResult = await rawTool.execute(callId, params, signal);
             const value = rawResult.details;
@@ -755,7 +1034,7 @@ export default {
         if (!tool || Array.isArray(tool)) return tool;
         return { ...tool, async execute(callId, request, signal, onUpdate) {
           assert.equal(context.agentId, 'main'); assert.equal(context.deliveryContext?.channel, 'whatsapp');
-          assert.equal(context.deliveryContext?.accountId, business.mutationActive ? 'fixture-23' : business.createActive ? business.reminderOperation === 'delete' ? 'fixture-24' : 'fixture-22' : business.reminderActive ? 'fixture-19' : business.agenticActive ? 'fixture-18' : 'fixture-8');
+          assert.equal(context.deliveryContext?.accountId, business.mutationActive ? 'fixture-23' : business.createActive ? business.reminderOperation === 'delete' ? 'fixture-24' : 'fixture-22' : business.reminderActive ? 'fixture-19' : 'fixture-8');
           assert.equal(context.deliveryContext?.to, '+15550000001'); assert.equal(context.requesterSenderId, '+15550000001');
           assert.equal(business.calls.at(-1)?.callId, callId);
           if (business.reminderActive) { reminderGuard = () => context.assertInvocationCurrent(); business.guards.push(reminderGuard); }

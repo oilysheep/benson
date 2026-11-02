@@ -1,7 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { createCompletionAuthority, acceptAgentCompletion, reconstructCompletion, validateCompletion } from '../core/completion.js';
-import { createCompletionDomainResultV3, validateDomainResultV3, validateDomainResult, MAX_DOMAIN_RESULT_V3_BYTES } from '../core/domain-result.js';
+import { createCompletionDomainResultV3, validateDomainResultV3, validateDomainResult, withDomainPending, readDomainFactsData, MAX_DOMAIN_RESULT_V3_BYTES } from '../core/domain-result.js';
+import { renderJessicaDomainResult } from '../../../../agents/jessica-vacuum/lib/presentation.js';
+import { renderReminderDomainResult } from '../../../../agents/reminder-service/lib/presentation.js';
 import { createResponseV4Envelope, validateResponseV4Envelope, validateResponseV3Envelope, MAX_RESPONSE_V4_BYTES } from '../core/legacy-response.js';
 import { controlResponse, createMainResponseDelivery } from '../core/response-control.js';
 import type { Binding6, Completion6 } from '../core/completion-contracts.js';
@@ -67,6 +69,42 @@ test('v3/v4 preserve accepted full-byte/count upstream payloads with UTF-8, esca
     assert.throws(() => validateDomainResult(f.result), /shape|bytes/);
     assert.throws(() => validateResponseV3Envelope(response), /invalid|bytes/);
     f.retire(); assert.throws(() => validateCompletion(f.record, f.authority), /retired/);
+  }
+});
+
+test('versioned pending facts preserve full legacy source data through the existing v3/v4 carriers', () => {
+  const f = fixture('א', MAX_BYTES, false, false);
+  const result = withDomainPending(f.result, { schemaVersion: 1, domain: 'jessica-vacuum',
+    binding: { requesterId: 'reader', conversationId: 'conversation' }, clarificationId: 'original-question' });
+  assert.deepEqual(readDomainFactsData(result.facts.data).value, f.result.facts.data);
+  assert.deepEqual(result.effects, f.result.effects);
+  assert.deepEqual(result.content, f.result.content);
+  const response = createResponseV4Envelope({ messageCandidate: null }, trusted([result]));
+  const recovered = validateResponseV4Envelope(JSON.parse(JSON.stringify(response)));
+  assert.deepEqual(recovered.results[0], result);
+  assert.deepEqual(readDomainFactsData(recovered.results[0]!.facts.data).consumedPending,
+    readDomainFactsData(result.facts.data).consumedPending);
+});
+
+test('versioned pending metadata leaves canonical domain presentation unchanged', () => {
+  const base = { schemaVersion: 3, kind: 'benson.domain-result', executionMode: 'agentic',
+    outcome: { disposition: 'handled', status: 'success' }, evidence: { observations: [], gaps: [] },
+    warnings: [], failures: { domain: null, handling: null }, uncertainty: [], pendingContext: null,
+    content: { state: 'usable', text: 'Use verified domain facts.', language: 'he' } };
+  const jessica = validateDomainResultV3({ ...base, domain: 'jessica-vacuum', domainSchemaVersion: '1', operation: 'status',
+    effects: { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } },
+    facts: { verified: true, verificationScope: ['status'], data: { kind: 'status', observedAt: settings.now,
+      sourceUpdatedAt: settings.now, freshness: 'fresh', state: 'docked', batteryLevel: 90, activeSegments: [], currentSegment: null } } });
+  const reminder = validateDomainResultV3({ ...base, domain: 'reminder', domainSchemaVersion: 'legacy-unversioned', operation: 'create',
+    effects: { status: 'known', refs: ['reminder'], details: [{ reminderId: 'reminder', verified: true }], reconciliation: { required: false, reason: null } },
+    facts: { verified: true, verificationScope: ['transaction'], data: { transaction: { status: 'success', verified: true },
+      data: { record: { reminderId: 'reminder', status: 'active', content: 'Original reminder',
+        schedules: [{ type: 'one-shot', resolvedTime: '2026-11-03T10:00:00Z', timezone: 'UTC' }], calendar: { requested: false } } },
+      transport: { deliveries: [] } } } });
+  const options = { ...settings, language: 'he' as const };
+  for (const [result, render] of [[jessica, renderJessicaDomainResult], [reminder, renderReminderDomainResult]] as const) {
+    const original = render(result, options); assert.equal(original.kind, 'rendered');
+    assert.deepEqual(render(withDomainPending(result, null), options), original);
   }
 });
 

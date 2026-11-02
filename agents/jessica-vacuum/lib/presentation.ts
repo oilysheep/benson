@@ -1,7 +1,7 @@
 import { freeze, plain, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Presentation } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
 import type { AnyDomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
-import { validateDomainResultEnvelope } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
+import { validateDomainResultEnvelope, readDomainFactsData } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
 import { validateResult } from './results.js';
 import { formatUserDatetime } from '../../../shared/benson-datetime.js';
 /** Shared status wording derives only from validated domain facts, never model prose. */
@@ -27,7 +27,7 @@ export function renderJessicaDomainResult(raw: AnyDomainResult, options: { langu
     !value.warnings.length && !value.uncertainty.length && !value.evidence.gaps.length && value.pendingContext === null &&
     value.outcome.status === 'success' && value.facts.verified && value.failures.domain === null && value.failures.handling === null) {
     return renderJessicaPresentation({ schemaVersion: value.domainSchemaVersion, domain: value.domain, operation: value.operation,
-      status: value.outcome.status, verified: value.facts.verified, data: value.facts.data, warnings: value.warnings,
+      status: value.outcome.status, verified: value.facts.verified, data: readDomainFactsData(value.facts.data).value, warnings: value.warnings,
       error: null, pendingContext: null }, options.language);
   }
   if (value.domain !== 'jessica-vacuum' || value.operation !== 'status' ||
@@ -37,7 +37,7 @@ export function renderJessicaDomainResult(raw: AnyDomainResult, options: { langu
   try {
     if (!options.now || !Number.isFinite(Date.parse(options.now))) return unsupported('status_presentation_clock_required');
     const facts = validateResult({ schemaVersion: value.domainSchemaVersion, domain: value.domain, operation: value.operation,
-      status: value.outcome.status, verified: value.facts.verified, data: value.facts.data, warnings: value.warnings,
+      status: value.outcome.status, verified: value.facts.verified, data: readDomainFactsData(value.facts.data).value, warnings: value.warnings,
       error: value.failures.domain, pendingContext: value.pendingContext }, null, new Date(options.now));
     if (options.language === 'en') return renderJessicaPresentation(facts, 'en');
     return rendered(renderJessicaStatusText(facts, new Date(options.now)));

@@ -1,4 +1,5 @@
 import { assertInvocationCurrent } from '../../../integrations/openclaw/benson-routing/core/invocation.js';
+import { isDeepStrictEqual } from 'node:util';
 import { createHash } from 'node:crypto';
 import { createDomainCore } from './domain-core.js';
 import { DomainError } from './errors.js';
@@ -278,6 +279,30 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
     }
     return result;
   }
-  return Object.freeze({ execute: (raw: unknown, context: ExecutionContext) => currentResult(raw, context, false),
+  // Read existing authoritative state while invocation custody is still live.
+  // Failure to capture evidence never changes/replays the already executed result.
+  async function executeWithCompletion(raw: unknown, context: ExecutionContext) {
+    const result = await currentResult(raw, context, false);
+    let verified = false, request: ExecuteRequest | null = null;
+    try {
+      const derived = identity(raw, context); request = derived.request;
+      const guarded = invocationState(context.authority);
+      const history = await guarded.history(derived.key);
+      if (history) verified = history.requestHash === derived.requestHash && isDeepStrictEqual(history.result, result);
+      else if (result.status === 'failure' && result.error?.sideEffects === 'none' && !result.data) verified = true;
+      else {
+        const active = await guarded.active();
+        verified = !!active && belongsToRequest(active, derived) && result.status !== 'success' &&
+          !!result.data && 'operationId' in result.data && result.data.operationId === active.operationId;
+      }
+      assertInvocationCurrent(context.authority);
+    } catch { verified = false; }
+    const retained = structuredClone(result);
+    return { result, assertCompletion(args: unknown, value: unknown) {
+      if (!verified || !request || !isDeepStrictEqual(ordered(parseExecuteRequest(args)), ordered(request)) ||
+          !isDeepStrictEqual(ordered(value), ordered(retained))) throw new Error('jessica_operation_evidence_unavailable');
+    } };
+  }
+  return Object.freeze({ executeWithCompletion, execute: (raw: unknown, context: ExecutionContext) => currentResult(raw, context, false),
     reconcile: (raw: unknown, context: ExecutionContext) => currentResult(raw, context, true), state });
 }

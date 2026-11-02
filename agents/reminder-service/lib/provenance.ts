@@ -35,9 +35,12 @@ export async function validateProvenance(input: CreateInput | PlanItem, evidence
   for (const item of value.evidence) { if (evidence.has(item.id)) throw new Error('Duplicate Reminder evidence id'); evidence.set(item.id, item.text); }
   if (value.revision !== value.evidence.length || value.evidence.at(-1)?.id !== value.currentEvidenceId || !evidence.has(value.currentEvidenceId)) throw new Error('Reminder provenance revision invalid');
   const current = await evidenceReader.readCurrentUserText();
-  if ([...evidence.values()].some(text => !current.includes(text))) throw new Error('Reminder evidence not grounded in current task');
+  const currentEvidence = evidence.get(value.currentEvidenceId);
+  if (!currentEvidence || !current.includes(currentEvidence)) throw new Error('Reminder evidence not grounded in current task');
   const turns = await evidenceReader.readOriginalUserTurns();
-  if (!turns.length) throw new Error('Original Reminder user turns unavailable');
+  // Earlier quotations belong to independently acquired original turns, never
+  // a concatenated task brief. The last acquired turn must be this exact input.
+  if (!turns.length || turns.at(-1)?.text !== current) throw new Error('Original Reminder current turn unavailable');
   let exclusive = turns.length, latest = -1;
   for (let i = value.evidence.length - 1; i >= 0; i--) {
     const item = value.evidence[i];

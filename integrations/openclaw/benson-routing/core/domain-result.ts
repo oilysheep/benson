@@ -1,6 +1,7 @@
 import { type Static } from 'typebox';
 import { isDeepStrictEqual as same } from 'node:util';
-import { DomainResultSchema, DomainResultV3Schema, FactsSchema, FACT_KEYS, type DomainResult, type DomainResultV3,
+import { DomainResultSchema, DomainResultV3Schema, FactsSchema, FACT_KEYS, DomainFactsDataSchema, ConsumedPendingSchema,
+  type ConsumedPending, type DomainResult, type DomainResultV3,
   type AnyDomainResult, type Effects, type Admission, type NoRunOutcome } from './contracts.js';
 import { validateCompletion } from './completion.js';
 import { validateRenderedOutput, validateTaskResultEnvelope } from './legacy-response.js';
@@ -34,6 +35,12 @@ function validateSemantics<T extends AnyDomainResult>(value: T): T {
   }
   if (value.domainSchemaVersion === null && !missing('domainSchemaVersion')) fail('domain_result_version_missing');
   pending(value.pendingContext);
+  const data = readDomainFactsData(value.facts.data), consumed = data.consumedPending;
+  if (consumed !== null && (value.executionMode !== 'agentic' || consumed.domain !== value.domain ||
+      !['success', 'failure', 'clarification_required'].includes(value.outcome.status) ||
+      value.failures.handling !== null || value.evidence.gaps.length ||
+      value.effects.reconciliation.required || value.effects.status === 'possible' || value.uncertainty.length ||
+      (value.outcome.status === 'clarification_required' && value.pendingContext === null))) fail('domain_result_pending_consumption');
   const handling = value.failures.handling;
   if (handling !== null && (!identifier(handling.code) || handling.message.length > MAX_RENDERED_TEXT)) fail('domain_result_handling');
   const effects = value.effects;
@@ -56,6 +63,27 @@ function validateSemantics<T extends AnyDomainResult>(value: T): T {
   if ((value.content === null) !== suppressed) fail('domain_result_content_suppression');
   if (value.content !== null) userResponse(value.content);
   return freeze(value);
+}
+/** Explicit legacy/new dispatch. Unknown reserved versions never fall back to
+ * business data. This decoder proves syntax only, never historical custody. */
+export function readDomainFactsData(raw: unknown) {
+  const value = boundedCopy(raw);
+  if (value !== null && typeof value === 'object' && 'kind' in value &&
+      typeof value.kind === 'string' && value.kind.startsWith('benson.domain-facts')) {
+    const data = read(DomainFactsDataSchema, value, 'domain_facts_version_or_shape');
+    return freeze({ version: 1 as const, value: data.value, consumedPending: data.consumedPending });
+  }
+  return freeze({ version: 0 as const, value, consumedPending: null });
+}
+/** Called only by the existing domain host after independent semantic/native
+ * validation. A serialized reference is a claim until original Task custody
+ * and the exact prior pending are checked by the context consumer. */
+export function withDomainPending(result: AnyDomainResult, consumed: ConsumedPending | null): AnyDomainResult {
+  const value = validateDomainResultEnvelope(result);
+  if (readDomainFactsData(value.facts.data).version !== 0) fail('domain_facts_already_projected');
+  const reference = consumed === null ? null : read(ConsumedPendingSchema, consumed, 'consumed_pending_shape');
+  return validateDomainResultEnvelope({ ...value, facts: { ...value.facts,
+    data: { kind: 'benson.domain-facts', schemaVersion: 1, value: value.facts.data, consumedPending: reference } } });
 }
 const NormalizedFactsSchema = object({ ...FactsSchema.properties, domain: IdentifierSchema });
 type NormalizedFacts = Static<typeof NormalizedFactsSchema>;
@@ -148,7 +176,7 @@ function completionResult(raw: unknown, authority: unknown, options: CompletionR
   }
   const missing = record.completion.gaps.some(gap => gap.code === 'FACT_NOT_ESTABLISHED' && gap.path === 'facts.effects');
   let effects: unknown;
-  if (record.facts.effects.length) {
+  if (record.facts.effects.length || options.projectEffects !== undefined) {
     if (typeof options.projectEffects !== 'function') fail('domain_result_effect_projection_required');
     effects = synchronous(options.projectEffects(record.facts.effects), 'domain_result_effect_projection_must_be_synchronous');
     if (!effects || typeof effects !== 'object' || !('details' in effects) ||
