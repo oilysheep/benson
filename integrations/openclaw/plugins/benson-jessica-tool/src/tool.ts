@@ -1,4 +1,5 @@
 import Type from 'typebox';
+import { isDeepStrictEqual } from 'node:util';
 import type { OpenClawPluginToolFactory, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
 import { executeJessicaStatusTask, JESSICA_TASK_SCHEMA, JESSICA_TASK_ENTRY_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/task.js';
 import { resolveTrustedIdentity, assertRosterPolicyAgreement, type FamilyRoutes } from '../../../../../agents/jessica-vacuum/lib/identity.js';
@@ -6,7 +7,7 @@ import { authorize, type loadPolicy } from '../../../../../agents/jessica-vacuum
 import { DOMAIN_RESULT_OUTPUT_SCHEMA, DOMAIN_RESULT_V3_OUTPUT_SCHEMA, createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
 import { TaskEnvelopeSchema, type TaskEnvelope, type Effects, type AnyDomainResult } from '../../../benson-routing/core/contracts.js';
 import { assertInvocationCurrent } from '../../../benson-routing/core/invocation.js';
-import { decode, synchronous, fail } from '../../../benson-routing/core/value.js';
+import { boundedCopy, decode, synchronous, fail } from '../../../benson-routing/core/value.js';
 import { createCurrentRequestContext, type CurrentRequestEvidence, type CurrentRequestProjection } from '../../../benson-routing/core/conversation-context.js';
 import { validateCompletion, type CompletionAuthority } from '../../../benson-routing/core/completion.js';
 import type { ExecutionContext } from '../../../../../agents/jessica-vacuum/lib/executor.js';
@@ -22,7 +23,9 @@ type TaskDependencies = Parameters<typeof executeJessicaStatusTask>[2];
  */
 export function createJessicaReadToolFactory(options: {
   roster: FamilyRoutes; policy: ReturnType<typeof loadPolicy>; registryConfig: unknown;
-  read: TaskDependencies['read']; jsonResult(value: Result): ToolResult; clock?: () => Date;
+  read: TaskDependencies['read'];
+  jsonResult(value: Result, callId: string, assertCompletion: (args: unknown, value: unknown) => void): ToolResult;
+  clock?: () => Date;
   /** Adapter-private original source, using the existing domain task port.
    * A child invocation need not inherit the originating channel route.
    */
@@ -39,7 +42,7 @@ export function createJessicaReadToolFactory(options: {
     return { name: 'jessica_read', label: 'Jessica read',
       description: 'Read Jessica status, rooms, accepted capabilities, maintenance, lifetime statistics, or an enabled known dispatch operation. No device action.',
       parameters, executionMode: 'sequential',
-      async execute(_callId, raw, signal) {
+      async execute(callId, raw, signal) {
         const authority = { signal: AbortSignal.any([...(signal ? [signal] : []), ...(options.source ? [options.source.authority.signal] : [])]),
           assertCurrent() {
             synchronous(context.assertInvocationCurrent(), 'jessica_read_authority_must_be_synchronous');
@@ -59,7 +62,14 @@ export function createJessicaReadToolFactory(options: {
         assertInvocationCurrent(authority);
         const result = validateResult(value, null, (options.clock ?? (() => new Date()))());
         if (result.operation !== request.operation) throw new TypeError('jessica_read_result_mismatch');
-        const serialized = synchronous(options.jsonResult(result), 'jessica_read_serialization_must_be_synchronous');
+        const captured = boundedCopy(result), capturedRequest = boundedCopy(request);
+        const serialized = synchronous(options.jsonResult(result, callId, (args, value) => {
+          if (options.source) assertInvocationCurrent(options.source.authority);
+          else synchronous(context.assertInvocationCurrent(), 'jessica_read_authority_must_be_synchronous');
+          authorize(options.policy, identity, 'read');
+          if (!isDeepStrictEqual(boundedCopy(parseReadRequest(args)), capturedRequest) ||
+            !isDeepStrictEqual(boundedCopy(value), captured)) fail('jessica_read_evidence_mismatch');
+        }), 'jessica_read_serialization_must_be_synchronous');
         assertInvocationCurrent(authority);
         return serialized;
       },
@@ -69,7 +79,8 @@ export function createJessicaReadToolFactory(options: {
 /** Source candidate for the existing jessica_task registration; no HA I/O defaults. */
 export function createJessicaTaskToolFactory(options: {
   roster: FamilyRoutes; policy: ReturnType<typeof loadPolicy>; read: TaskDependencies['read'];
-  jsonResult(value: AnyDomainResult): ToolResult; clock?: () => Date; resultVersion?: 2 | 3;
+  jsonResult(value: AnyDomainResult, callId: string, assertCompletion?: () => void): ToolResult;
+  clock?: () => Date; resultVersion?: 2 | 3;
   task?: {
     source(context: OpenClawPluginToolContext<2>): CurrentRequestEvidence;
     run(request: TaskEnvelope, work: { callId: string; source: CurrentRequestProjection; execution: ExecutionContext }):
@@ -101,6 +112,7 @@ export function createJessicaTaskToolFactory(options: {
         authorize(options.policy, identity, 'read');
         let result: AnyDomainResult;
         let assertResultCurrent = () => assertInvocationCurrent(authority);
+        let assertCompletionCurrent: (() => void) | undefined;
         if (request !== null && typeof request === 'object' && 'operation' in request) {
           result = await executeJessicaStatusTask(callId, request, { identity, authority, read: options.read,
             ...options.clock ? { clock: options.clock } : {} });
@@ -145,9 +157,10 @@ export function createJessicaTaskToolFactory(options: {
             completion.binding.caller?.agentId !== 'main' || completion.binding.caller.sessionKey !== callerSessionKey ||
             completion.binding.caller.sessionId !== callerSessionId || completion.binding.completionTarget !== 'CALLER') throw new Error('jessica_task_completion_binding');
           result = project(completion, handoff.authority, { projectEffects: () => handoff.effects });
+          assertCompletionCurrent = () => { validateCompletion(handoff.completion, handoff.authority); };
           assertCurrent(); released.add(handoff.authority);
         }
-        const serialized = synchronous(options.jsonResult(result), 'jessica_task_serialization_must_be_synchronous');
+        const serialized = synchronous(options.jsonResult(result, callId, assertCompletionCurrent), 'jessica_task_serialization_must_be_synchronous');
         assertResultCurrent();
         return serialized;
       },

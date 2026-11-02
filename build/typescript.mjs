@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
@@ -39,6 +39,7 @@ const sources = [
   ['plugin-sdk/plugin-entry.d.ts', '0a4c99523de9000d90e4be08227261b3e5958f1ead5372364942909e78dc96d7'],
   ['plugin-entry-D4JWmN6h.d.ts', '48119827bb1152bbde76722ce8d6b72362e34de469b753e31a883108270f22f9'],
   ['plugin-sdk/reply-runtime.d.ts', '6eec7f3c85d878afed72e900033c37ff435059cda688e98512a347b739f1b008'],
+  ['plugin-sdk/tool-results.d.ts', 'e252a557575303d7c4e10c52dadac9cd0b59836bf3f6c1b5c7d7048b73c587d1'],
 ];
 const declarations = sources.map(([path, expected]) => {
   const text = read(join(sdk, 'dist', path));
@@ -64,6 +65,7 @@ generate(join(overlay, 'tsconfig.json'), JSON.stringify({
     paths: {
       'openclaw/plugin-sdk/plugin-entry': ['./dist/plugin-sdk/plugin-entry.d.ts'],
       'openclaw/plugin-sdk/reply-runtime': ['./dist/plugin-sdk/reply-runtime.d.ts'],
+      'openclaw/plugin-sdk/tool-results': ['./dist/plugin-sdk/tool-results.d.ts'],
     },
     rootDirs: ['./dist', '../../node_modules/openclaw/dist'],
   },
@@ -84,4 +86,34 @@ for (const { path } of declarations) {
 }
 // A successful build must leave the installed SDK byte-identical.
 for (const [path, expected] of sources) assert.equal(digest(read(join(sdk, 'dist', path))), expected);
+if (!process.argv.includes('--noEmit')) {
+  // The native routing entry reads this existing domain-owned resource relative
+  // to its emitted module. Keep its exact bytes; never load runtime/secret state.
+  const resource = 'agents/reminder-service/config/recipients.json';
+  generate(join(root, options.outDir, resource), read(join(root, resource)));
+  assert.equal(digest(read(join(root, options.outDir, resource))), digest(read(join(root, resource))));
+  // Both native domain entries consume the single canonical receipt pin.
+  const receiptManifest = 'integrations/openclaw/patches/tool-execution-receipts/manifest.json';
+  generate(join(root, options.outDir, receiptManifest), read(join(root, receiptManifest)));
+  assert.equal(digest(read(join(root, options.outDir, receiptManifest))), digest(read(join(root, receiptManifest))));
+  // Preserve the existing Python implementation's realpath-derived resources
+  // and state owner. This output depends on the canonical repository closure.
+  const executable = 'agents/reminder-service/tools/reminder-service';
+  const source = join(root, executable), target = join(root, options.outDir, executable);
+  const link = relative(dirname(target), source);
+  for (const dependency of [executable, 'agents/reminder-service/libexec/reminder-service-core',
+    'agents/reminder-service/lib/reminder_discovery.py']) {
+    const info = statSync(join(root, dependency));
+    assert(info.isFile() && (info.mode & 0o111) !== 0, `Missing executable dependency: ${dependency}`);
+  }
+  const existing = lstatSync(target, { throwIfNoEntry: false });
+  if (existing) {
+    assert(existing.isSymbolicLink(), 'Reminder output executable must be the canonical link');
+    assert.equal(readlinkSync(target), link, 'Reminder output executable mapping drift');
+  } else {
+    mkdirSync(dirname(target), { recursive: true });
+    symlinkSync(link, target);
+  }
+  assert.equal(realpathSync(target), realpathSync(source), 'Reminder output executable target drift');
+}
 console.log(`Strict TypeScript ${process.argv.includes('--noEmit') ? 'typecheck' : 'build'} PASS; OpenClaw 2026.10.4 declaration overlay verified.`);

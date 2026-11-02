@@ -1,0 +1,7 @@
+{
+  "id": "benson-routing",
+  "name": "Benson Routing",
+  "description": "Original input custody and the existing mandatory Response Controller.",
+  "version": "1.0.0",
+  "configSchema": { "type": "object", "additionalProperties": false, "properties": {} }
+}

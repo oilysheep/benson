@@ -138,3 +138,17 @@ test('verified suction then room start requires separate read-back and retains a
   assert.equal(result.status, 'success'); assert.deepEqual(trace.map(step => step.kind), ['setting', 'command']);
   assert.ok(result.data && 'appliedSettings' in result.data); assert.equal(result.data.appliedSettings.suction, 'strong');
 });
+
+test('completion witness retains exact canonical operation history without reexecution', async () => {
+  const f = executorFixture();
+  const { result, assertCompletion } = await f.executor.executeWithCompletion(f.request, f.context);
+  assert.equal(result.status, 'success'); assert.equal(f.trace.length, 1);
+  assertCompletion(f.request, structuredClone(result));
+  assert.throws(() => assertCompletion({ operation: 'dock' }, result), /evidence_unavailable/);
+  assert.throws(() => assertCompletion(f.request, { ...result, data: { operationId: 'foreign' } }), /evidence_unavailable/);
+  assert.equal(f.trace.length, 1);
+  const pending = executorFixture({ ack: false, effect: false });
+  const unknown = await pending.executor.executeWithCompletion(pending.request, pending.context);
+  assert.notEqual(unknown.result.status, 'success');
+  unknown.assertCompletion(pending.request, unknown.result); assert.equal(pending.trace.length, 1);
+});

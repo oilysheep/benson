@@ -45,6 +45,8 @@ test('intent entry admits existing Reminder discovery and lifecycle owners throu
   ] as const;
   for (const [name, args, operation] of operations) {
     const f = fixture(); let transactions = 0;
+    let taskLive = true, retainedCompletion: (() => void) | undefined;
+    f.context.assertInvocationCurrent = () => { assert(taskLive, 'Task invocation retired'); };
     f.context.sessionKey = 'main-session'; f.context.sessionId = 'main-session-id';
     const text = 'A self-contained Reminder request';
     const create = createReminderTaskToolFactory({ identities: f.identities,
@@ -55,7 +57,11 @@ test('intent entry admits existing Reminder discovery and lifecycle owners throu
           : { operation: SERVICE_OPERATIONS[operation], status: 'success', transaction: { status: 'success', verified: true },
             data: { record: { reminderId: 'existing', status: operation === 'delete-reminder' ? 'deleted' : 'active', content: 'fixture' } },
             transport: { deliveries: [] }, warnings: [] };
-      } }, jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }),
+      } }, jsonResult(value, callId, assertCompletion) {
+        assert.equal(callId, 'actual-main-call'); assert.equal(typeof assertCompletion, 'function');
+        retainedCompletion = assertCompletion;
+        return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+      },
       task: { source: () => ({ request: text,
         binding: { conversationRef: 'original-conversation', channel: 'whatsapp', accountId: 'fixture-account', kind: 'direct',
           peerId: 'fixture-private', threadId: null, requesterId: 'fixture-private' },
@@ -78,7 +84,7 @@ test('intent entry admits existing Reminder discovery and lifecycle owners throu
             caller: { runId: 'actual-main', agentId: 'main', sessionKey: 'main-session', sessionId: 'main-session-id' },
             completionTarget: 'CALLER', authorizationId: 'original-input', parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } };
           const authority = createCompletionAuthority({ schemaVersion: 6, kind: 'domain-task', binding, knownFacts: facts, results: [], coverage: 'complete', gaps: [], origin: 'agent' },
-            { assertCurrent: work.deps.authority.assertCurrent });
+            { assertCurrent() { assert(f.state.live, 'original source retired'); } });
           const completion = acceptAgentCompletion({ schemaVersion: 6, kind: 'domain-task', facts,
             userResponse: { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Use verified domain facts' } } }, authority);
           return { completion, authority, effects: { status: read ? 'none' : 'known', refs: read ? [] : ['existing'], details, reconciliation: { required: false, reason: null } } };
@@ -88,6 +94,9 @@ test('intent entry admits existing Reminder discovery and lifecycle owners throu
     const value = validateDomainResult((await tool.execute('actual-main-call', request)).details);
     assert.equal(value.operation, SERVICE_OPERATIONS[operation]); assert.equal(value.executionMode, 'agentic'); assert.equal(transactions, 1);
     await assert.rejects(tool.execute('retry', request), /already_started/); assert.equal(transactions, 1);
+    assert(retainedCompletion); taskLive = false; retainedCompletion();
+    await assert.rejects(tool.execute('after-retirement', request), /Task invocation retired/);
+    f.state.live = false; assert.throws(retainedCompletion, /original source retired/);
   }
 });
 test('Main read factory preserves full list in the model-visible JSON and details', async () => {
@@ -139,12 +148,16 @@ test('unverified/backend failure becomes safe DomainResult without raw diagnosti
   assert.equal(validateDomainResult(result.details).outcome.disposition, 'failed');
   assert(!JSON.stringify(result).includes('private backend diagnostic'));
 });
-for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent', 'missing-provenance', 'foreign-input', 'cancel-before-transaction', 'foreign-completion', 'foreign-caller-key', 'foreign-caller-id', 'missing-caller-session', 'changed-caller-session', 'duplicate-completion'] as const) {
+for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent', 'missing-provenance', 'foreign-input', 'cancel-before-transaction', 'foreign-completion', 'foreign-caller-key', 'foreign-caller-id', 'missing-caller-session', 'changed-caller-session', 'duplicate-completion', 'history-complete', 'history-unavailable', 'history-wrong-current', 'history-retired', 'history-retired-after-read'] as const) {
   test(`source-bound Reminder create entry: ${fault}`, async () => {
     const f = fixture(); let changed = false, transactions = 0;
     f.context.sessionKey = 'main-session'; f.context.sessionId = 'main-session-id';
     if (fault === 'missing-caller-session') { delete f.context.sessionKey; delete f.context.sessionId; }
-    const text = 'Remind me to drink water on October 28 at 10:00, without a calendar event.';
+    const historical = fault.startsWith('history-');
+    const previous = 'Remind me to drink water';
+    const text = historical ? 'On October 28 at 10:00, without a calendar event.'
+      : 'Remind me to drink water on October 28 at 10:00, without a calendar event.';
+    let historyLive = true, historyReads = 0;
     const record = { reminderId: 'created-fixture', status: 'active', content: 'drink water',
       schedule: { type: 'one-shot', resolvedTime: '2026-10-28T10:00:00+02:00', timezone: 'Asia/Jerusalem' }, calendar: { requested: false } };
     const details = [{ kind: 'reminder-create', reminderId: record.reminderId, verified: true }];
@@ -156,6 +169,12 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
         return { status: 'success', operation: 'create', transaction: { status: 'success', verified: true }, data: { record }, transport: { deliveries: [] }, warnings: [] }; } },
       jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }),
       task: {
+        ...historical ? { async originalUserTurns() {
+          historyReads++;
+          if (fault === 'history-unavailable') throw new Error('native originals unavailable');
+          return { turns: [{ text: previous }, { text: fault === 'history-wrong-current' ? 'different input' : text }],
+            assertCurrent() { assert(historyLive && fault !== 'history-retired', 'history retired'); } };
+        } } : {},
         source: () => ({ request: text,
           binding: { conversationRef: 'original-conversation', channel: 'whatsapp', accountId: fault === 'foreign-source' ? 'foreign' : 'fixture-account',
             kind: 'direct', peerId: 'fixture-private', threadId: null, requesterId: 'fixture-private' },
@@ -171,10 +190,14 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
             content: record.content, schedule: record.schedule, calendar: record.calendar,
             ...fault === 'missing-provenance' ? {} : { provenance: { schemaVersion: 1, contextId: 'original-conversation', revision: 1,
               createdAt: '2026-10-26T08:00:00Z', expiresAt: '2026-10-26T09:00:00Z', sourceConversation: { type: 'private', id: 'fixture-private' }, requesterId: 'reader',
-              currentEvidenceId: fault === 'foreign-input' ? 'foreign' : 'original-input', evidence: [{ id: 'original-input', text }],
-              fieldEvidence: [{ field: 'content', evidenceId: 'original-input', quote: 'drink water' },
+              ...historical ? { revision: 2 } : {},
+              currentEvidenceId: fault === 'foreign-input' ? 'foreign' : 'original-input', evidence: [...historical ? [{ id: 'previous-input', text: previous }] : [], { id: 'original-input', text }],
+              fieldEvidence: [{ field: 'content', evidenceId: historical ? 'previous-input' : 'original-input', quote: 'drink water' },
                 { field: 'schedule', evidenceId: 'original-input', quote: 'October 28 at 10:00' },
                 { field: 'calendar.requested', evidenceId: 'original-input', quote: 'without a calendar event' }] } } };
+          if (fault === 'history-retired-after-read') {
+            await deps.evidence.readOriginalUserTurns(); historyLive = false;
+          }
           const value = await executeReminderCreateTask(callId, { input }, source, deps);
           const binding = { inputId: fault === 'foreign-completion' ? 'foreign' : 'original-input', admissionId: 'original-input', conversationId: 'original-conversation',
             runId: 'actual-child', agentId: 'reminder-service', sessionKey: 'child-session', sessionId: 'child-session-id', domain: 'reminder', taskId: callId,
@@ -192,10 +215,11 @@ for (const fault of ['none', 'foreign-source', 'changed-source', 'forged-intent'
     const tool = create(f.context); assert(tool && !Array.isArray(tool));
     const request = { kind: 'benson.self-contained-request', version: 1, request: fault === 'forged-intent' ? 'Untrusted replacement' : text };
     const output = tool.execute('original-call', request, f.abort.signal);
-    if (fault !== 'none' && fault !== 'duplicate-completion') { await assert.rejects(output); assert.equal(transactions, ['foreign-completion', 'foreign-caller-key', 'foreign-caller-id'].includes(fault) ? 1 : 0); return; }
+    if (fault !== 'none' && fault !== 'duplicate-completion' && fault !== 'history-complete') { await assert.rejects(output); assert.equal(transactions, ['foreign-completion', 'foreign-caller-key', 'foreign-caller-id'].includes(fault) ? 1 : 0); return; }
     const value = validateDomainResult((await output).details); assert.equal(value.executionMode, 'agentic'); assert.equal(value.effects.status, 'known'); assert.equal(transactions, 1);
     const rendered = renderReminderDomainResult(value, { language: 'he', timezone: 'Asia/Jerusalem', now: '2026-10-26T08:00:00Z' });
     assert.equal(rendered.kind, 'rendered');
+    if (historical) assert.equal(historyReads, 1);
     if (fault === 'duplicate-completion') { await assert.rejects(tool.execute('original-call', request, f.abort.signal), /already_started/); assert.equal(transactions, 1); }
   });
 }

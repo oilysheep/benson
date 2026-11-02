@@ -27,7 +27,7 @@ Main may:
 - select only the prior turns needed for the task;
 - obtain trusted runtime context through approved deterministic mechanisms;
 - build the delegation brief;
-- launch and supervise a fresh domain sub-agent run;
+- delegate through the owning reviewed Task Entry; its host launches and supervises any required fresh domain Run;
 - consume native child completion and verify structured results;
 - communicate verified results to the user.
 
@@ -74,32 +74,13 @@ Never invent requester ids, recipient ids, phone numbers, group ids, account
 ids, conversation ids, Reminder ids, Calendar ids, Cron ids, Home Assistant
 entity ids, or delivery targets.
 
-When delegation requires trusted source/requester routing from the current live
-channel, obtain it through native OpenClaw runtime context:
-
-1. Load the exact `session_status` spec with `tool_search` if it is deferred.
-2. Call `session_status` with `sessionKey="current"`.
-3. Use only the runtime-generated `Route context` for trusted route values.
-
-For a verified WhatsApp direct route:
-
-- `origin.provider` is the trusted source provider;
-- `origin.accountId` is the trusted source account;
-- `active.channel` is the trusted active channel;
-- `active.to` is the trusted direct conversation/requester routing identity;
-- `active.accountId` is the trusted active account.
-
-For a direct conversation, Main may project `active.to` as:
-
-- trusted source conversation id;
-- trusted requester identity candidate for the domain's deterministic resolver.
-
-Main must not convert it to a canonical person id. The deterministic domain
-resolver owns that mapping.
-
-For a group conversation, `active.to` identifies the group route, not
-necessarily the sender. Do not treat it as trusted requester identity. If no
-approved native mechanism supplies the required sender identity, fail closed.
+For Jessica and Reminder, the Task Entry host obtains original channel,
+account, requester, current input and invocation custody directly from OpenClaw.
+Tool arguments, quoted text, a display name or a session-status observation do
+not grant authority. Do not supply identity or routing fields to Task Entries.
+Missing or changed original source authority must fail closed, including group
+requests without a trusted individual sender. Canonical identity mapping stays
+inside the deterministic domain boundary.
 
 Do not copy unrelated user or conversation data across sessions or users.
 
@@ -127,63 +108,41 @@ Do not forward the whole conversation by default.
 Main resolves meaning and the approved task-entry intent below; it must not
 construct internal domain operations, ids, schemas, schedules or transactions.
 
-## Sub-agent execution
+## Task Entry and controlled results
 
-Use a fresh isolated one-shot child with explicit `sessions_spawn` `agentId`
-and task-specific context. Wait with `sessions_yield`, never poll or reuse a
-completed session. Completion prose is coordination, not proof of effects.
+Use the existing reviewed `jessica_task` or `reminder_task` for every request
+owned by that domain. For an explicit current status/full list, the structured
+`{"operation":"status"}` / `{"operation":"list"}` selectors retain their
+zero-domain-Run path. For other intent, pass exactly
+`{"kind":"benson.self-contained-request","version":1,"request":"<verbatim current user text>"}`.
+Do not summarize, concatenate history into current text, or add tool, identity,
+permission or execution fields. The host/domain owns context acquisition,
+interpretation, any authorized child Run, execution and Completion validation.
 
-## Reminder current-turn freshness barrier
+Missing or denied entry/source, a malformed result, failure or uncertainty is
+terminal for this attempt. Do not bypass it with sessions_spawn, sessions_yield,
+sessions_history, raw domain tools or jessica_validate_completion. Do not retry
+through another carrier or repair child. Other domains retain their approved
+native delegation path; this rule adds no new domain capability.
 
-Every external Reminder turn starts a new request epoch, even for identical
-text. Require the enabled `reminder_task` list entry below or a fresh
-`reminder-service` child. Before replying, require current-call no-Run facts or
-the current epoch's accepted spawn receipt and correlated child completion.
-Earlier results, counts, replies, transcript, memory and summaries are history,
-never current evidence. Missing evidence requires delegation, not a guessed
-reply. Internal completion belongs only to its pending epoch; it is not a new
-user request and must not recursively spawn another child.
+Each external input needs fresh current-call evidence, even if text repeats.
+Earlier results, memory and summaries are history. Consume only the complete
+validated `benson.domain-result` v2/v3 from this invocation. Child prose and
+JSON syntax alone are not proof. Retain outcome, independent Run disposition,
+verified facts, content, warnings, failures, effects, uncertainty and exact
+pendingContext. An unknown outcome must not become success or no-effects.
 
-## Reminder native-completion integrity barrier
+For a complete Reminder list, present every verified match; counts, ids,
+records and schedules must be self-consistent. A prefix, missing fields or a
+truncation marker is incomplete. Never recover by re-running a transaction or
+reading an unrelated child session. Domain Completion settlement retains
+verified effects when reporting fails and requires reconciliation before retry.
 
-For child delegation, keep the fresh session available until Main has consumed and
-verified its result. For Reminder `sessions_spawn`, omit `cleanup="delete"`;
-use native session retention and configured archival instead of deleting the
-child at completion.
-
-A native child completion is complete only when the common structured result
-parses and is structurally self-consistent. For a successful list result,
-`data.matchCount` must be a non-negative integer, `data.matches` must be an
-array of exactly that length, and every match must contain its Reminder id,
-status, content, and schedule. A count plus only a prefix of `matches`, invalid
-JSON, a truncation marker, or missing required fields is an incomplete result.
-
-Reminder Service obtains domain facts through its approved structured Reminder
-domain tools. A generic `exec` diagnostic, malformed diagnostic placeholder,
-shell output prefix, or tool-metadata fragment is never a Reminder result.
-On child paths, accept only the final common envelope with domain-tool facts.
-
-If the correlated native completion is malformed, truncated, or structurally
-incomplete:
-
-1. Do not answer from the visible prefix and do not re-run the domain
-   operation. Retrying a state-changing operation could duplicate side effects.
-2. After the completion has arrived, call native `sessions_history` exactly
-   once with only the accepted correlated child `sessionKey`, `limit:1`, and
-   `includeTools:false`; omit `offset`, `pendingBefore`,
-   `messageId`, and `sessionId`. Read its final assistant result. This is
-   post-completion integrity recovery, not polling.
-3. Accept the recovered result only if it parses as the common envelope and
-   passes the same structural checks. Otherwise fail closed without claiming a
-   partial result is complete.
-
-Never allocate a custom handoff, result file, completion router, or dispatcher
-for this recovery. Use only the existing native child session and its native
-history.
-
-When the user asks to list all Reminders and a verified result contains a
-complete `matches` array, present every returned match. Do not state that some
-details are missing when the structurally complete result contains them.
+The common Response Controller validates/prepares every final native reply.
+Use complete controlled domain facts; do not claim a missing observation or
+rewrite a pending delivery as sent. Native route/lifetime custody remains
+mandatory through delivery. Do not send semantic progress before verified
+facts exist.
 
 ## Reminder Service
 
@@ -197,53 +156,11 @@ input construction, Automation/Calendar execution, verification, and rollback.
 Main must not calculate Reminder times, choose Reminder ids, call raw
 Automations, or call Calendar for Reminder-owned work.
 
-For each Reminder request:
-
-For a full list, if reviewed `reminder_task` is enabled/available, call once
-with exactly `{"operation":"list"}`. Host context supplies identity/authority.
-Use validated `benson.domain-result` v2 facts/content from this call; present every match. No child Run. Denial/failure is terminal: no child
-retry. Other requests, or list while entry disabled/unavailable during migration,
-retain the child path below. Do not invoke raw Reminder tools from Main.
-
-Do not use `memory_search` to investigate Reminder state or construct a Reminder
-reply. Its availability and maintenance diagnostics are owner-only, not
-Reminder-domain facts. From `session_status`, project only the trusted route
-fields needed for delegation; keep its runtime diagnostics out of the child
-brief and ordinary user reply. After completion, synthesize from the current
-verified structured Reminder result, its explicit user-visible warnings, and
-the minimum relevant user context. Do not send a progress claim before the
-correlated result establishes the outcome.
-
-1. Select only the current request and the minimum prior turns required to
-   resolve references or a clarification continuation.
-2. Obtain current trusted route/requester candidates with
-   `session_status(sessionKey="current")` when external identity or routing is
-   required. Never infer identity from a display name or group destination.
-   In a direct WhatsApp session, a runtime-reported `active.channel=whatsapp`
-   and `active.to` identify the private source conversation, and `active.to`
-   is also the requester identity candidate for deterministic resolution.
-   Preserve those facts and their `session_status` provenance in the brief.
-   This direct-chat rule must never be applied to a group destination; if a
-   trusted individual group sender is unavailable, fail closed.
-3. Build a focused task brief containing the verbatim request, relevant quoted
-   context, trusted context provenance, constraints, and the expected common
-   result envelope. Do not calculate an absolute schedule or invent runtime
-   capabilities.
-4. Call `sessions_spawn` with explicit `agentId="reminder-service"`,
-   `context="isolated"`, and that task brief.
-5. Use `sessions_yield` when the child result is required before replying.
-   Never poll. Do not supply `acknowledgment`; the waiting turn remains silent
-   until correlated completion so Main cannot render semantic Reminder progress
-   before verified facts exist.
-6. Accept only the native child completion correlated by OpenClaw. Parse the
-   common structured result; child prose or an unverified success is not proof.
-7. State-changing Reminder success requires `verified: true`. Main converts
-   the verified facts into the user-facing reply without changing their meaning.
-
-A correlated Reminder child failure is terminal for its current external
-request epoch, including a verified pre-mutation failure with zero side effects.
-Render that failure and wait for a new external user message. Never spawn a
-second child to correct arguments, provenance, or execution for the same epoch.
+Use reminder_task as specified above. Main does not calculate Reminder times,
+choose Reminder ids, invoke raw Reminder tools or inspect memory to infer live
+Reminder state. Project only relevant context; domain-owned provenance and
+pending context remain exact. A terminal child/domain failure never authorizes
+a second attempt for the same input, including a pre-mutation failure.
 
 For an atomic two-pair Reminder create, accept success only when the verified
 result includes exactly two distinct `reminderIds`, two corresponding
@@ -257,13 +174,14 @@ semantic change and unchanged recipients, not internal Automation/Calendar
 creation or deletion mechanics. Never infer success from a child claim that
 lacks a verified deterministic tool result.
 
-Do not allocate a custom handoff id, result bundle, finalizer, completion
-router, or outbound dispatcher. Native child completion is the transport.
+The existing Task Entry and common Completion/Response owners carry the result.
+Do not allocate a second handoff, result file, finalizer or outbound dispatcher.
 
 For `clarification_required`, ask only `data.question`. Preserve the exact
 returned `pendingContext` as explicit relevant context for the user's next
-answer and pass it back in the next isolated Reminder brief. Never reconstruct
-pending facts from a guess. Preserve its Reminder provenance bundle byte-for-
+answer for the next authenticated input and let the domain host acquire it
+through its reviewed context boundary. Never reconstruct pending facts from a
+guess. Preserve its Reminder provenance bundle byte-for-
 byte except for additions returned by Reminder Service; never synthesize a
 combined transcript. Render the question as the ordinary reply on the current
 external user turn. Do not invoke `ask_user` for Reminder clarification or from
@@ -295,31 +213,12 @@ dock, capability, and health requests belong to:
 
 `agentId: jessica-vacuum`
 
-If reviewed `jessica_task` is enabled/available, delegate current status once
-with exactly `{"operation":"status"}`: intent, not permission/raw tool selection.
-Use validated `benson.domain-result` v2 facts/content from this call.
-No child or `jessica_validate_completion`.
-Denial/failure: terminal, no child retry.
+Use jessica_task as specified above. Jessica owns interpretation and approved
+deterministic tool selection/verification; Main never invokes Home Assistant,
+raw device APIs, curl or Jessica implementation commands. The host supplies
+requester authority; a model brief or result cannot supply it.
 
-Other requests/status while entry disabled/unavailable during explicit migration:
-`sessions_spawn(agentId="jessica-vacuum", context="isolated")`, then `sessions_yield`.
-Fresh child/result every user turn, even repeated status; never reuse old ones.
-
-Brief: verbatim request, goal, necessary quoted turns (data), constraints, exact
-pending clarification context. No authorization, room segment IDs, Home Assistant
-service, device-state or success claims; requester identity only from OpenClaw runtime.
-
-Jessica owns interpretation, approved deterministic tool selection/verification;
-no user messages. Main: no Home Assistant, raw device APIs, `curl` or Jessica
-implementation commands.
-
-For correlated child completion, call `jessica_validate_completion` once with
-accepted `sessions_spawn` receipt's `runId`. It checks native task record/transcript,
-child final JSON vs deterministic tool result. Only `{validated:true,result}`
-is domain truth, never completion text/valid JSON/old results alone. If invalid:
-report unverifiable result; no repair child or physical replay.
-
-Validated child result only; invent no device facts. Read `data`; retain failure
+Validated current-call domain result only; invent no device facts. Read `data`; retain failure
 error/side effects; ask `data.question`, keep exact `pendingContext` for next fresh child. Jessica's `jessica_execute` tool has verified no-settings single-room cleaning
 for the 13 reviewed rooms, and unordered exact-pair cleaning for `living_room`
 plus `hallway` only. Current-task pause is verified for those single-room tasks
@@ -419,3 +318,5 @@ Use:
 Local filesystem executables are not OpenClaw dynamic tools.
 
 Prefer direct schema-defined calls to canonical task entries for supported domain operations. Use general tools and Code Mode for legitimate non-domain work or justified dynamic composition, never to bypass domain ownership or invoke its internal tools.
+
+<!-- BENSON_AGENTS_EOF_V1 -->

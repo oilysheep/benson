@@ -1,16 +1,89 @@
+import { isDeepStrictEqual } from 'node:util';
+import type { ToolExecutionEvidenceProvider } from '../../../benson-routing/core/tool-execution-evidence.js';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry';
-import { PublicSchemas, type ServiceOperation, type ToolName } from '../../../../../agents/reminder-service/lib/schemas.js';
-import { normalizeReminderServiceResult } from '../../../../../agents/reminder-service/lib/results.js';
-import { settleNativeDomainCompletion, type NativeDomainCompletionInput } from '../../../benson-routing/core/completion.js';
+import { PublicSchemas, parseRequest, type ServiceOperation, type ToolName } from '../../../../../agents/reminder-service/lib/schemas.js';
+import { SERVICE_OPERATIONS, normalizeReminderServiceResult } from '../../../../../agents/reminder-service/lib/results.js';
+import { MAX_NATIVE_TOOL_CALLS, settleNativeDomainCompletion, type NativeDomainCompletionInput } from '../../../benson-routing/core/completion.js';
 import { createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
-import { assertion, synchronous, fail } from '../../../benson-routing/core/value.js';
+import { assertion, synchronous, fail, plain, boundedCopy, decode, ObjectListSchema } from '../../../benson-routing/core/value.js';
 import type { Binding6 } from '../../../benson-routing/core/completion-contracts.js';
-import type { Effects } from '../../../benson-routing/core/contracts.js';
+import { EffectsSchema, type Effects } from '../../../benson-routing/core/contracts.js';
 import type { createReminderTaskToolFactory } from './tool.js';
+
+function serviceOperation(value: unknown): value is ServiceOperation {
+  return typeof value === 'string' && Object.hasOwn(SERVICE_OPERATIONS, value);
+}
 
 type Observation = { resultVersion?: 2 | 3 } & Omit<NativeDomainCompletionInput, 'binding' | 'knownFacts'> & {
   operation: ServiceOperation; effects: Effects; uncertainty: NativeDomainCompletionInput['knownFacts']['uncertainty'];
 };
+/** Canonical transaction identity validation, shared by aggregation and the
+ * receipt/domain correlation check. No report or transcript grants authority. */
+function reminderEffectIds(name: string, raw: unknown, operation: ServiceOperation, requestedId?: unknown): string[] {
+  if (!plain(raw) || !plain(raw.data)) fail('reminder_effect_identity_missing');
+  const ids: string[] = [];
+  const add = (id: unknown) => {
+    if (typeof id !== 'string' || !id.trim() || ids.includes(id)) fail('reminder_effect_identity_invalid');
+    ids.push(id);
+  };
+  // Canonical service carriers: one top-level reminderId, or the plan's
+  // top-level reminderIds with its complete, ordered record collection.
+  if (name === 'benson_reminder_create_plan') {
+    if (Object.hasOwn(raw, 'reminderId') || !Array.isArray(raw.reminderIds) || !raw.reminderIds.length ||
+      !Array.isArray(raw.data.records) || raw.reminderIds.length !== raw.data.records.length ||
+      Object.hasOwn(raw.data, 'record')) fail('reminder_effect_identity_missing');
+    for (const [index, id] of raw.reminderIds.entries()) {
+      add(id); const record: unknown = raw.data.records[index];
+      if (!plain(record) || record.reminderId !== id) fail('reminder_effect_identity_mismatch');
+    }
+  } else {
+    add(raw.reminderId);
+    if (Object.hasOwn(raw, 'reminderIds') || !plain(raw.data.record) || raw.data.record.reminderId !== raw.reminderId ||
+      requestedId !== undefined && requestedId !== raw.reminderId) fail('reminder_effect_identity_mismatch');
+    // Recipient-specific update verifies both the remaining original record
+    // and the newly restructured record. Neither effect may disappear.
+    if (Object.hasOwn(raw.data, 'restructuredRecord')) {
+      if (operation !== 'update-reminder' || !plain(raw.data.restructuredRecord)) fail('reminder_effect_identity_mismatch');
+      add(raw.data.restructuredRecord.reminderId);
+    }
+  }
+  return ids;
+}
+
+/** Project every captured domain carrier; this is a proposal until the existing
+ * normalizer validates complete native receipt coverage and private witnesses.
+ * Failed writes retain uncertainty and never become a no-effect assertion. */
+export function collectReminderRunEffects(tools: readonly NativeDomainCompletionInput['tool'][], taskId: string):
+  { effects: Effects; uncertainty: Observation['uncertainty'] } {
+  if (!tools.length || tools.length > MAX_NATIVE_TOOL_CALLS || new Set(tools.map(tool => tool.callId)).size !== tools.length) fail('reminder_effect_calls_invalid');
+  const effects: Effects = { status: 'none', refs: [], details: [], reconciliation: { required: false, reason: null } };
+  const uncertainty: Observation['uncertainty'] = [];
+  for (const tool of tools) {
+    const operation = reminderToolOperation(tool.name);
+    const value = normalizeReminderServiceResult(operation, tool.value, { taskId, pendingBinding: null, pendingExpiresAt: null });
+    if (operation === 'list-reminders' || operation === 'find-reminders') continue;
+    if (!value.verified) {
+      effects.status = 'possible'; effects.reconciliation = { required: true, reason: 'REMINDER_TRANSACTION_UNRESOLVED' };
+      uncertainty.push({ code: 'REMINDER_TRANSACTION_UNRESOLVED', callId: tool.callId, toolName: tool.name });
+      continue;
+    }
+    for (const id of reminderEffectIds(tool.name, tool.value, operation)) {
+      if (!effects.refs.includes(id)) effects.refs.push(id);
+      effects.details.push({ kind: 'reminder-' + value.operation, reminderId: id, verified: true });
+    }
+    if (effects.status === 'none') effects.status = 'known';
+  }
+  return { effects: decode(EffectsSchema, effects, 'reminder_effects_invalid'),
+    uncertainty: decode(ObjectListSchema, boundedCopy(uncertainty), 'reminder_uncertainty_invalid') };
+}
+function reminderToolOperation(name: string): ServiceOperation {
+  if (!Object.hasOwn(PublicSchemas, name)) fail('reminder_native_tool_not_admitted');
+  const operation = Object.entries(SERVICE_OPERATIONS).find(([, value]) => name === 'benson_reminder_' + value ||
+    (value === 'create' && name === 'benson_reminder_create_plan'))?.[0];
+  if (!serviceOperation(operation)) fail('reminder_native_tool_not_admitted');
+  return operation;
+}
+
 /** Retain the original service carrier in the native transcript. Normalization
  * occurs at this domain boundary, never by replacing the raw tool response.
  */
@@ -28,7 +101,28 @@ export function normalizeReminderCompletion(input: Observation & { binding: Bind
     status: value.status, verified: value.verified, verificationScope: value.verified ? ['reminder_transaction'] : [],
     data: value.data, warnings: value.warnings, error: value.error, pendingContext: value.pendingContext,
     effects: effects.details, uncertainty: structuredClone(input.uncertainty) };
-  const { record, authority } = settleNativeDomainCompletion({ ...input, knownFacts });
+  const { record, authority } = settleNativeDomainCompletion({ ...input, knownFacts, validateTool(tool, receipt) {
+    if (!receipt) fail('reminder_native_receipt_missing');
+    const operation = reminderToolOperation(tool.name);
+    const request = parseRequest(tool.name as ToolName, receipt.executionArgs);
+    if (request.operation !== operation) fail('reminder_native_arguments_mismatch');
+    if (!['list-reminders', 'find-reminders'].includes(operation)) {
+      if (!input.validateTool) fail('reminder_transaction_evidence_missing');
+      assertion(input.validateTool(tool, receipt), 'reminder_transaction_evidence_async');
+    }
+    const observed = normalizeReminderServiceResult(operation, tool.value, { taskId: input.binding.taskId, pendingBinding: null, pendingExpiresAt: null });
+    if (!['list-reminders', 'find-reminders'].includes(operation) && !observed.verified &&
+      (effects.status !== 'possible' || !effects.reconciliation.required || !effects.reconciliation.reason ||
+        !knownFacts.uncertainty.some(item => item.code === 'REMINDER_TRANSACTION_UNRESOLVED' &&
+          item.callId === tool.callId && item.toolName === tool.name))) fail('reminder_uncertain_effect_omitted');
+    if (observed.status !== 'success' && knownFacts.status === 'success') fail('reminder_domain_outcome_omitted');
+    if (observed.warnings.some(warning => !knownFacts.warnings.some(retained => isDeepStrictEqual(boundedCopy(warning), boundedCopy(retained))))) fail('reminder_domain_warning_omitted');
+    if (!['list-reminders', 'find-reminders'].includes(operation) && observed.verified) {
+      const ids = reminderEffectIds(tool.name, tool.value, operation, 'reminderId' in request ? request.reminderId : undefined);
+      for (const id of ids) if (!effects.refs.includes(id) ||
+        !effects.details.some(effect => effect.reminderId === id && effect.kind === 'reminder-' + observed.operation)) fail('reminder_effect_omitted');
+    }
+  } });
   const result = project(record, authority, { expectedRunId: input.binding.runId,
     ...record.completion.outcome === 'NORMAL' ? { expectedTaskResult: value } : {}, projectEffects: () => effects });
   return { completion: record, authority, effects: result.effects, result };
@@ -49,7 +143,10 @@ export async function runReminderNativeTask(request: Parameters<Task['run']>[0],
    */
   toolsAlsoAllow: readonly ToolName[];
   caller: NonNullable<Binding6['caller']>;
-  observe(): Observation;
+  executionEvidence: ToolExecutionEvidenceProvider;
+  /** Retained original-source/domain/terminal custody, independent of the
+   * active Task invocation. It permits result consumption, never execution. */
+  observe(runId: string): Observation;
 }) {
   if (options.resultVersion !== undefined && options.resultVersion !== 2 && options.resultVersion !== 3) fail('domain_result_version');
   const signal = work.deps.authority.signal, assertSource = work.deps.authority.assertCurrent.bind(work.deps.authority);
@@ -68,14 +165,19 @@ export async function runReminderNativeTask(request: Parameters<Task['run']>[0],
   // captured native terminal observation can authorize settlement below.
   await options.runtime.waitForRun({ runId: receipt.runId, timeoutMs: 45_000 });
   current();
-  const observed = synchronous(options.observe(), 'reminder_native_observation_must_be_synchronous');
-  if (!tools.some(name => name === observed.tool.name)) throw new Error('reminder_native_tool_not_admitted');
-  const assertCustody = observed.custody.assertCurrent.bind(observed.custody);
+  await options.executionEvidence.waitForSettlement(receipt.runId, signal); current();
+  const observed = synchronous(options.observe(receipt.runId), 'reminder_native_observation_must_be_synchronous');
+  if ([...(observed.preceding ?? []), observed].some(item => !tools.some(name => name === item.tool.name))) {
+    throw new Error('reminder_native_tool_not_admitted');
+  }
   const binding: Binding6 = { inputId, admissionId: inputId, conversationId: work.source.context.conversation.conversationRef,
     runId: receipt.runId, agentId: 'reminder-service', sessionKey, sessionId: observed.tool.sessionId,
     domain: 'reminder', taskId: work.callId, caller, completionTarget: 'CALLER', authorizationId: inputId,
     parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null } };
-  return normalizeReminderCompletion({ ...observed, ...options.resultVersion !== undefined ? { resultVersion: options.resultVersion } : {}, binding, custody: { assertCurrent(candidate) {
-    current(); return assertCustody(candidate);
-  } } });
+  const settled = normalizeReminderCompletion({ ...observed, executionEvidence: options.executionEvidence.evidence(receipt.runId),
+    ...options.resultVersion !== undefined ? { resultVersion: options.resultVersion } : {}, binding });
+  // Task invocation authority remains mandatory through production. The
+  // normalized result retains its independent source/domain/native custody
+  // after this invocation ends; it does not retain an execution grant.
+  current(); return settled;
 }

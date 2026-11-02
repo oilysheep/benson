@@ -1,0 +1,34 @@
+{
+  "package": "openclaw",
+  "version": "2026.10.4",
+  "contract": "openclaw.tool-execution-evidence.v1",
+  "patchSha256": "9f7e78e5470d91eae99d4c966d6aa6fceb8dcb85ff2ac6712d123a088cdf1610",
+  "files": [
+    {
+      "path": "dist/run-entry-gnb95g__.mjs",
+      "beforeSha256": "bb41e402f7cd1b241264e6b69dd30fe8291ac7da6ee538c07da9333b103c9eef",
+      "afterSha256": "8271f6ea8f880e0464b0c086be9516ee08dfa5557ef1009ae9c64bf25c9795a8"
+    },
+    {
+      "path": "dist/agent-core-RzJjRVA2.mjs",
+      "beforeSha256": "b916e5b7bb75d96d5d26577d29e763e9ba001ba12f69d5b25ec7cf1cfaf278d9",
+      "afterSha256": "1060aabf4cecca8a99c7b2eef2537223f62e5eda5a51baa6c89299d723cd9a8e"
+    },
+    {
+      "path": "dist/builtin-openclaw-qVsnLx0N.mjs",
+      "beforeSha256": "79d5c7c0da05f8e036426aa161f43908f3bdf3df8fb7e70a059e9ebb4813bb8a",
+      "afterSha256": "ca6d6179eece4daa82c4f06b74f7c7464506e3af7298dc7a38045cf9059bf7a6"
+    },
+    {
+      "path": "dist/selection-lyiH3_Xg.mjs",
+      "beforeSha256": "ada0b85022b76958e10ced25bef296912a84aba17130e6ccf95fd9442d0a5144",
+      "afterSha256": "c319af8a0fa4e0d086cd89da8272888991687cf22f0f93da18d99321c5c8c5b0"
+    },
+    {
+      "path": "dist/plugin-sdk/agent-core.js",
+      "beforeSha256": "ac318683f96817d5b57eb23b5289e9c1708e6f3c97673e92e864bb4c22b041a7",
+      "afterSha256": "c45732409b2ab7da594087e5c9dae7b88a431e85682e2cb4920d3692401a29ce"
+    }
+  ],
+  "scope": "Isolated only; no production installation; nested execution marks coverage incomplete."
+}

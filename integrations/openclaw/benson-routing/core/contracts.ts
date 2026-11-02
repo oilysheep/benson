@@ -1,7 +1,7 @@
 import Type, { type Static } from 'typebox';
 import { object, nullable, IdentifierSchema as Id, JsonSchema, JsonObjectSchema, ObjectListSchema,
   CandidateSchema, PendingSchema, TimestampSchema, TextSchema, IdListSchema,
-  GapsSchema, UserResponseSchema, MAX_RESPONSE_RESULTS, MAX_WARNINGS } from './value.js';
+  GapsSchema, UserResponseSchema, MAX_RESPONSE_RESULTS, MAX_WARNINGS, RevisionSchema } from './value.js';
 
 export const CONTROL_CONTRACT_VERSION = 1;
 export const RESPONSE_CONTRACT_VERSION = 2;
@@ -21,6 +21,20 @@ export const DomainSchema = Type.Union([Type.Literal('jessica-vacuum'), Type.Lit
 export type Domain = Static<typeof DomainSchema>;
 export const DOMAIN_VERSIONS = Object.freeze({ 'jessica-vacuum': '1', reminder: 'legacy-unversioned' });
 export const DOMAIN_AGENTS = Object.freeze({ 'jessica-vacuum': 'jessica-vacuum', reminder: 'reminder-service' });
+/** Domain semantic references, never native execution or admission authority.
+ * Reminder contextId is conversation-scoped, so the original evidence identity
+ * is required in addition to its existing revision. Jessica has no revision. */
+export const ConsumedPendingSchema = Type.Union([
+  object({ schemaVersion: Type.Literal(1), domain: Type.Literal('reminder'),
+    binding: PendingSchema.properties.binding, contextId: Id, revision: RevisionSchema, currentEvidenceId: Id }),
+  object({ schemaVersion: Type.Literal(1), domain: Type.Literal('jessica-vacuum'),
+    binding: PendingSchema.properties.binding, clarificationId: Id }),
+]);
+export type ConsumedPending = Static<typeof ConsumedPendingSchema>;
+/** Explicitly versioned metadata in the existing facts.data slot. The raw
+ * domain value remains intact; legacy unwrapped data proves no consumption. */
+export const DomainFactsDataSchema = object({ kind: Type.Literal('benson.domain-facts'), schemaVersion: Type.Literal(1),
+  value: JsonSchema, consumedPending: nullable(ConsumedPendingSchema) });
 export const NO_RUN_DISPOSITIONS = Object.freeze([
   'handled', 'no-change', 'suppressed', 'rejected', 'reasoning-required', 'unresolved', 'failed',
 ] as const);

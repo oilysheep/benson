@@ -51,7 +51,10 @@ test('raw native Reminder tools preserve existing schemas and whole transactions
   };
   for (const name of [...Object.keys(payloads), 'benson_reminder_create_plan'] as ToolName[]) {
     const create = createReminderToolFactory({ name, source,
-      jsonResult: value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], details: value }) });
+      jsonResult(value, verify, callId) {
+        assert.equal(callId, name); assert.equal(typeof verify, 'function');
+        return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+      } });
     assert.equal(create({ ...context, agentId: 'main' }), null);
     const tool = create(context); assert(tool && !Array.isArray(tool));
     assert.deepEqual(tool.parameters, schemaForTool(name, f.deps.identities, f.deps.route));
@@ -183,7 +186,7 @@ test('current-request projection grounds self-contained Reminder creation withou
   assert.equal(transactions, 1);
 });
 test('multi-turn/multi-schedule provenance and metadata remain grounded before one whole transaction', async () => {
-  const f = fixture(), previous = 'Remind me about coffee'; f.state.taskText = `${previous}\n${f.state.taskText}`; f.state.turns.unshift({ text: previous });
+  const f = fixture(), previous = 'Remind me about coffee'; f.state.turns.unshift({ text: previous });
   const schedules = [f.input.schedule, { ...f.input.schedule, resolvedTime: '2026-10-19T10:00:00+03:00' }];
   const { schedule: _schedule, ...base } = f.input;
   const provenance = { ...f.provenance, revision: 2, currentEvidenceId: 'turn-2', evidence: [{ id: 'turn-1', text: previous }, { id: 'turn-2', text: 'Create reminder tomorrow' }],

@@ -60,8 +60,9 @@ export class ReminderProcessError extends Error {
     readonly cleanupConfirmed = true) { super(code); }
 }
 /** Bounded I/O, one launch, no retries. Rejection never asserts that a launched write had no effect. */
-export function createReminderTransaction({ launchProcess = launchProcessGroup, deadlineMs = 180_000, maxOutputBytes = 8_388_608 }:
-  { launchProcess?: ProcessLauncher; deadlineMs?: number; maxOutputBytes?: number } = {}): ReminderTransaction {
+export function createReminderTransaction({ launchProcess = launchProcessGroup, deadlineMs = 180_000, maxOutputBytes = 8_388_608,
+  servicePath = REMINDER_SERVICE_PATH }:
+  { launchProcess?: ProcessLauncher; deadlineMs?: number; maxOutputBytes?: number; servicePath?: string } = {}): ReminderTransaction {
   if (!Number.isSafeInteger(deadlineMs) || deadlineMs < 1 || deadlineMs > 180_000 || !Number.isSafeInteger(maxOutputBytes) || maxOutputBytes < 1 || maxOutputBytes > 8_388_608) throw new Error('Reminder process budget invalid');
   return { async execute(request: ServiceRequest, authority: InvocationAuthority): Promise<unknown> {
     authority.signal.throwIfAborted(); assertInvocationCurrent(authority);
@@ -116,7 +117,7 @@ export function createReminderTransaction({ launchProcess = launchProcessGroup, 
       };
       try {
         authority.signal.throwIfAborted(); assertInvocationCurrent(authority);
-        child = launchProcess(REMINDER_SERVICE_PATH, argv, events); launched = true;
+        child = launchProcess(servicePath, argv, events); launched = true;
         if (authority.signal.aborted) abort();
       } catch {
         closed = true; clear();

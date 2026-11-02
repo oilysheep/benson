@@ -1,0 +1,343 @@
+--- a/dist/run-entry-gnb95g__.mjs
++++ b/dist/run-entry-gnb95g__.mjs
+@@ -1,3 +1,4 @@
++import { withToolExecutionEvidence, withToolEvidenceCandidate } from "./agent-core-RzJjRVA2.mjs";
+ import "./model-ref-shared-KBg0y299.mjs";
+ import { l as getAgentRunContext } from "./agent-run-registry-BaxMDLZF.mjs";
+ import { i as emitAgentEvent, n as captureAgentRunLifecycleGeneration, o as emitAgentEventForRunContext } from "./agent-events-GvNTkbe3.mjs";
+@@ -169,6 +170,9 @@
+ //#region src/agents/embedded-agent-runner/run-entry.ts
+ /** Runs one logical turn across model candidates and advances only the accepted winner. */
+ async function runEmbeddedAgentEntry(params) {
++	return await withToolExecutionEvidence(params.identity, () => runEmbeddedAgentEntryWithEvidence(params));
++}
++async function runEmbeddedAgentEntryWithEvidence(params) {
+ 	const admission = params.preparedRunAdmission;
+ 	const requester = {
+ 		...params.identity,
+@@ -355,7 +359,7 @@
+ 					return classified.value;
+ 				};
+ 				try {
+-					const result = await params.runCandidate(provider, model, {
++					const result = await withToolEvidenceCandidate(() => params.runCandidate(provider, model, {
+ 						agentHarnessRuntimeOverride: resolveRuntimeOverride(provider, model),
+ 						assistantErrorTranscript,
+ 						...runOptions.forceFallbackRetry ? { authProfileFailurePolicy: "local" } : {},
+@@ -373,7 +377,7 @@
+ 							contextEngineTurnCandidate = facts;
+ 							unsettledContextEngineTurnAttempt = facts;
+ 						}
+-					});
++					}));
+ 					return {
+ 						result,
+ 						classification: classifyResult(result),
+--- a/dist/agent-core-RzJjRVA2.mjs
++++ b/dist/agent-core-RzJjRVA2.mjs
+@@ -1,3 +1,4 @@
++import { AsyncLocalStorage } from "node:async_hooks";
+ import { r as __exportAll } from "./rolldown-runtime-Dr7-SnC6.mjs";
+ import { C as parseStrictNonNegativeInteger, P as resolvePositiveTimerTimeoutMs } from "./number-coercion-CuVhdCBs.mjs";
+ import { t as coerceErrorMessage } from "./error-coercion-CvJK4lmH.mjs";
+@@ -843,6 +844,7 @@
+ 		config,
+ 		signal,
+ 		emit,
++		evidence: registerToolEvidenceBatch(toolCalls),
+ 		resolved: /* @__PURE__ */ new Map(),
+ 		validated: /* @__PURE__ */ new Map(),
+ 		onParallelStarted: scheduling?.onParallelStarted,
+@@ -996,7 +998,7 @@
+ 		assistantMessage: batch.assistantMessage,
+ 		toolCall: preparation.toolCall,
+ 		hasUnobservedAsyncToolResults: batch.hasUnobservedAsyncToolResults || batch.assistantMessage.content.slice(0, batch.assistantMessage.content.indexOf(toolCall)).some((item) => item.type === "toolCall" && item.async === true)
+-	}, batch.signal, batch.emit);
++	}, batch.signal, batch.emit, batch.evidence);
+ 	return execution.kind === "immediate" ? await finalizeExecutedToolCall(batch, preparation, execution.outcome, preparation.args) : {
+ 		...preparation,
+ 		execution
+@@ -1162,6 +1164,7 @@
+ 			errorKind: "argument-validation"
+ 		};
+ 	}
++	recordToolEvidenceArguments(batch.evidence, toolCall, "validatedArgs", validatedArgs);
+ 	return {
+ 		kind: "prepared",
+ 		toolCall,
+@@ -1169,7 +1172,7 @@
+ 		args: validatedArgs
+ 	};
+ }
+-async function prepareToolCallExecution(prepared, executionContext, signal, emit) {
++async function prepareToolCallExecution(prepared, executionContext, signal, emit, evidence) {
+ 	const updateEvents = [];
+ 	let acceptingUpdates = true;
+ 	const onUpdate = (partialResult) => {
+@@ -1199,6 +1202,7 @@
+ 		};
+ 	};
+ 	const readyExecution = (args, run, disposeSource = () => {}) => {
++		recordToolEvidenceArguments(evidence, prepared.toolCall, "executionArgs", args);
+ 		let disposed = false;
+ 		const dispose = () => {
+ 			if (!disposed) {
+@@ -1291,6 +1295,7 @@
+ 	return readyExecution(readyPreparation.args, (onImplementationStart) => runWithAgentToolExecutionContext(executionContext, () => readyPreparation.execute(onImplementationStart)), readyPreparation.dispose);
+ }
+ async function finalizeExecutedToolCall(batch, prepared, executed, finalArgs) {
++	recordToolEvidenceOriginalOutcome(batch.evidence, { ...executed, toolCall: prepared.toolCall });
+ 	let result = executed.result;
+ 	let isError = executed.isError;
+ 	if (executed.executionStarted && batch.config.afterToolCall) try {
+@@ -1325,12 +1330,15 @@
+ 	}, finalArgs);
+ }
+ async function finalizeToolCallOutcome(batch, finalized, args) {
++	recordToolEvidenceOriginalOutcome(batch.evidence, finalized);
+ 	const outcome = await applyToolOutcomeHook(batch, finalized, args);
+ 	const warning = batch.warnings?.find((entry) => entry.toolCallId === outcome.toolCall.id);
+-	return warning ? {
++	const final = warning ? {
+ 		...outcome,
+ 		result: appendToolLoopWarning(outcome.result, warning)
+ 	} : outcome;
++	recordToolEvidenceOutcome(batch.evidence, final);
++	return final;
+ }
+ async function applyToolOutcomeHook(batch, finalized, args) {
+ 	if (!batch.config.afterToolOutcome) return finalized;
+@@ -1836,11 +1844,15 @@
+ 		this.mutableState.isStreaming = true;
+ 		this.mutableState.streamingMessage = void 0;
+ 		this.mutableState.errorMessage = void 0;
++		const finishEvidence = beginToolEvidenceAttempt();
++		let evidenceFailed = false;
+ 		try {
+ 			await executor(abortController.signal);
+ 		} catch (error) {
++			evidenceFailed = true;
+ 			await this.handleRunFailure(error, abortController.signal.aborted);
+ 		} finally {
++			finishEvidence(evidenceFailed || abortController.signal.aborted);
+ 			this.finishRun();
+ 		}
+ 	}
+@@ -1883,6 +1895,7 @@
+ 	* and `finishRun()` clears runtime-owned state.
+ 	*/
+ 	async processEvents(event) {
++		if (event.type === "message_end") observeToolEvidenceMessage(event.message);
+ 		let publishedToolResult = event.type === "message_end" && event.message.role === "toolResult" ? event.message : void 0;
+ 		const messageIndex = this.mutableState.messages.length;
+ 		switch (event.type) {
+@@ -2529,3 +2542,171 @@
+ };
+ //#endregion
+ export { collectEntriesForBranchSummaryFromBranches as a, parseCommandArgs as c, streamProxy as i, substituteArgs as l, agent_core_exports as n, generateBranchSummary as o, openClawAgentCoreRuntime as r, prepareBranchEntries as s, Agent as t, runAgentLoop as u };
++
++
++
++// Temporary 2026.10.4 observation only. Native execution/lifecycle remain owners.
++const storage = new AsyncLocalStorage(), candidates = new AsyncLocalStorage();
++const observers = new Set();
++const contract = "openclaw.tool-execution-evidence.v1";
++const MAX_CALLS = 64;
++function snapshot(value) {
++	let bytes = 0, nodes = 0;
++	const seen = new Set();
++	const copy = (input, depth = 0) => {
++		if (++nodes > 32768 || depth > 32) throw new Error("receipt_limit");
++		if (input === null || typeof input === "boolean") return input;
++		if (typeof input === "number" && Number.isFinite(input)) return input;
++		if (typeof input === "string") {
++			bytes += Buffer.byteLength(input);
++			if (bytes > 1048576) throw new Error("receipt_limit");
++			return input;
++		}
++		if (typeof input !== "object" || seen.has(input)) throw new Error("receipt_value");
++		const array = Array.isArray(input), keys = Reflect.ownKeys(input);
++		if (array ? keys.length !== input.length + 1 || input.length > 32768 :
++			Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null) throw new Error("receipt_value");
++		seen.add(input);
++		const result = array ? [] : Object.create(null);
++		for (const key of keys) {
++			if (array && key === "length") continue;
++			const field = Object.getOwnPropertyDescriptor(input, key);
++			if (typeof key !== "string" || !field || !("value" in field) || !field.enumerable ||
++				array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= input.length)) throw new Error("receipt_value");
++			bytes += Buffer.byteLength(key);
++			if (bytes > 1048576) throw new Error("receipt_limit");
++			Object.defineProperty(result, key, { value: copy(field.value, depth + 1), enumerable: true });
++		}
++		seen.delete(input);
++		return Object.freeze(result);
++	};
++	return copy(value);
++}
++// Select only the native public result carrier, never internal metadata/callbacks.
++function resultCarrier(result) {
++	const content = Object.getOwnPropertyDescriptor(result, "content"), details = Object.getOwnPropertyDescriptor(result, "details");
++	if (!content || !("value" in content) || details && !("value" in details)) throw new Error("receipt_result");
++	return snapshot({ content: content.value, ...details && details.value !== undefined ? { details: details.value } : {} });
++}
++function publish(scope, event) {
++	if (scope.closed) { scope.valid = false; return; }
++	try {
++		const frozen = Object.freeze({ contract, token: scope.token, identity: scope.identity, ...event });
++		for (const observer of scope.observers) {
++			if (!observers.has(observer)) { scope.valid = false; continue; }
++			try {
++				const value = observer.receive(frozen);
++				if (value && typeof value.then === "function") { scope.valid = false; Promise.resolve(value).catch(() => {}); }
++			} catch { scope.valid = false; }
++		}
++	} catch { scope.valid = false; }
++}
++export const toolExecutionEvidenceProvider = Object.freeze({ contract, version: "2026.10.4" });
++export function observeToolExecutionEvidence(sessionKey, receive) {
++	if (typeof sessionKey !== "string" || !sessionKey || typeof receive !== "function") throw new Error("receipt_observer");
++	const observer = { sessionKey, receive };
++	observers.add(observer);
++	return () => { observers.delete(observer); };
++}
++export async function withToolExecutionEvidence(identity, execute) {
++	const selected = [...observers].filter(observer => observer.sessionKey === identity.sessionKey);
++	if (!selected.length) return await storage.run(undefined, execute);
++	let runIdentity;
++	try { runIdentity = snapshot({ runId: identity.runId, sessionId: identity.sessionId, sessionKey: identity.sessionKey, agentId: identity.agentId }); } catch { return await storage.run(undefined, execute); }
++	const scope = { token: Object.freeze({}), identity: runIdentity, observers: selected, calls: [],
++		attempts: 0, active: 0, currentAttempt: 0, valid: true, closed: false, modelCalls: [], candidateCount: 0, candidateActive: 0 };
++	return await storage.run(scope, async () => {
++		publish(scope, { type: "begin" });
++		let returned = false;
++		try { const result = await execute(); returned = true; return result; }
++		finally {
++			const complete = returned && scope.valid && scope.candidateCount > 0 && scope.candidateActive === 0 && scope.attempts > 0 && scope.active === 0 &&
++				scope.calls.every(call => call.done) && scope.modelCalls.length === scope.calls.length && scope.modelCalls.every(call =>
++					scope.calls.filter(candidate => candidate.attempt === call.attempt && candidate.callId === call.callId && candidate.name === call.name && JSON.stringify(candidate.originalArgs) === JSON.stringify(call.arguments)).length === 1);
++			publish(scope, { type: "seal", complete, count: scope.calls.length, attempts: scope.attempts, isCurrent: () => scope.closed && scope.valid && complete });
++			scope.closed = true;
++		}
++	});
++}
++export async function withToolEvidenceCandidate(execute) {
++	const scope = storage.getStore();
++	if (!scope) return await execute();
++	const frame = { scope, supported: 0, attempts: 0 };
++	scope.candidateCount++; scope.candidateActive++; if (scope.closed) scope.valid = false;
++	return await candidates.run(frame, async () => {
++		try { return await execute(); }
++		finally { scope.candidateActive--; if (!frame.supported || !frame.attempts) scope.valid = false; }
++	});
++}
++export function observeToolEvidenceHarness(builtIn) {
++	const scope = storage.getStore(), frame = candidates.getStore();
++	if (!scope) return;
++	if (!builtIn || !frame || frame.scope !== scope || scope.closed) scope.valid = false;
++	else frame.supported++;
++}
++export function beginToolEvidenceAttempt() {
++	const scope = storage.getStore(), frame = candidates.getStore();
++	if (!scope) return () => {};
++	if (scope.active || scope.closed || !frame || frame.scope !== scope || !frame.supported) scope.valid = false;
++	if (frame) frame.attempts++;
++	scope.active++; scope.currentAttempt = ++scope.attempts;
++	return failed => { scope.active--; if (failed) scope.valid = false; };
++}
++export function observeToolEvidenceMessage(message) {
++	const scope = storage.getStore();
++	if (!scope) return;
++	try {
++		if (message.role !== "assistant") return;
++		if (message.stopReason === "error" || message.stopReason === "aborted" || message.errorMessage) scope.valid = false;
++		for (const call of message.content ?? []) if (call.type === "toolCall") {
++			if (scope.modelCalls.length >= MAX_CALLS || scope.closed) { scope.valid = false; return; }
++			scope.modelCalls.push(snapshot({ attempt: scope.currentAttempt, callId: call.id, name: call.name, arguments: call.arguments }));
++		}
++	} catch { scope.valid = false; }
++}
++export function registerToolEvidenceBatch(calls) {
++	const scope = storage.getStore();
++	if (!scope) return;
++	const batch = new WeakMap();
++	try { for (const call of calls) {
++		if (scope.calls.length >= MAX_CALLS || scope.closed) { scope.valid = false; break; }
++		const entry = { ordinal: scope.calls.length, attempt: scope.currentAttempt, callId: call.id, name: call.name, done: false };
++		if (batch.has(call) || scope.calls.some(prior => prior.attempt === entry.attempt && prior.callId === entry.callId)) scope.valid = false;
++		scope.calls.push(entry);
++		entry.originalArgs = snapshot(call.arguments);
++		batch.set(call, entry);
++	} } catch { scope.valid = false; }
++	return { scope, batch };
++}
++export function recordToolEvidenceArguments(evidence, call, kind, args) {
++	if (!evidence) return;
++	try {
++		const entry = evidence.batch.get(call);
++		if (!entry || entry.done || evidence.scope.closed) { evidence.scope.valid = false; return; }
++		entry[kind] = snapshot(args);
++	} catch { evidence.scope.valid = false; }
++}
++export function recordToolEvidenceOriginalOutcome(evidence, outcome) {
++	if (!evidence) return;
++	try {
++		const entry = evidence.batch.get(outcome.toolCall);
++		if (!entry || entry.done || evidence.scope.closed) { evidence.scope.valid = false; return; }
++		if (!Object.hasOwn(entry, "originalResult")) { entry.originalResult = resultCarrier(outcome.result); entry.originalIsError = outcome.isError; }
++	} catch { evidence.scope.valid = false; }
++}
++export function recordToolEvidenceOutcome(evidence, outcome) {
++	if (!evidence) return;
++	const { scope, batch } = evidence;
++	try {
++		const entry = batch.get(outcome.toolCall);
++		if (!entry || entry.done || scope.closed) { scope.valid = false; return; }
++		entry.done = true;
++		const { done, ...identity } = entry;
++		publish(scope, { type: "receipt", receipt: snapshot({ ...identity,
++			executionStarted: outcome.executionStarted, isError: outcome.isError, result: resultCarrier(outcome.result) }) });
++	} catch { scope.valid = false; }
++}
++export function invalidateNestedToolEvidence() {
++	const scope = storage.getStore();
++	if (scope) scope.valid = false;
++}
+--- a/dist/builtin-openclaw-qVsnLx0N.mjs
++++ b/dist/builtin-openclaw-qVsnLx0N.mjs
+@@ -1,3 +1,4 @@
++import { invalidateNestedToolEvidence } from "./agent-core-RzJjRVA2.mjs";
+ import { c as normalizeOptionalLowercaseString, g as readStringValue, l as normalizeOptionalString, n as localeLowercasePreservingWhitespace, o as normalizeLowercaseStringOrEmpty, t as hasNonEmptyString } from "./string-coerce-1VuiLaaR.mjs";
+ import { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, s as asFiniteNumber, u as asPositiveFiniteNumber, v as parseDateFirstTimestampMs, w as parseStrictPositiveInteger, y as parseDateStringTimestampMs } from "./number-coercion-CuVhdCBs.mjs";
+ import { r as consumeRootOptionToken } from "./cli-root-options-DGcy1qRg.mjs";
+@@ -12110,6 +12111,7 @@
+ //#region src/agents/embedded-agent-subscribe.tool-lifecycle.ts
+ function createEmbeddedToolLifecycleRunner(ctx) {
+ 	return async (toolParams) => {
++		invalidateNestedToolEvidence();
+ 		ctx.flushAssistantStream();
+ 		const startEvent = {
+ 			type: "tool_execution_start",
+--- a/dist/selection-lyiH3_Xg.mjs
++++ b/dist/selection-lyiH3_Xg.mjs
+@@ -1,3 +1,4 @@
++import { observeToolEvidenceHarness } from "./agent-core-RzJjRVA2.mjs";
+ import { t as formatErrorMessage } from "./errors-O33D01XW.mjs";
+ import { O as freezeDiagnosticTraceContext, P as runWithDiagnosticTraceContext, T as createDiagnosticTraceContext, c as emitTrustedDiagnosticEventWithPrivateData, k as getActiveDiagnosticTraceContext, s as emitTrustedDiagnosticEvent, w as createChildDiagnosticTraceContext } from "./diagnostic-events-BADdmgZf.mjs";
+ import { t as createSubsystemLogger } from "./subsystem-I-uqdx4f.mjs";
+@@ -572,6 +573,7 @@
+ 	});
+ }
+ async function runAgentHarnessOperation(harness, params, execute) {
++	observeToolEvidenceHarness(isBuiltInOpenClawAgentHarness(harness));
+ 	await prepareActiveNodeContext(readRunOperatorAuthority(params)?.profileId);
+ 	resolveAdmittedRunActiveAssertion(params.admittedRunContext, params.abortSignal)?.();
+ 	const activeTrace = getActiveDiagnosticTraceContext();
+--- a/dist/plugin-sdk/agent-core.js
++++ b/dist/plugin-sdk/agent-core.js
+@@ -3,4 +3,5 @@
+ import { a as calculateContextTokens, c as estimateContextTokens, d as findTurnStartIndex, g as shouldCompact, h as prepareCompaction, l as estimateTokens, m as getLastAssistantUsage, n as IMAGE_BLOCK_TOKENS, p as generateSummary, s as compact, t as DEFAULT_COMPACTION_SETTINGS, u as findCutPoint, w as serializeConversation } from "../compaction-BR_rsQOI.mjs";
+ import { t as uuidv7 } from "../uuid-Di8CBf9j.mjs";
+ import { a as collectEntriesForBranchSummaryFromBranches, i as streamProxy, o as generateBranchSummary, r as openClawAgentCoreRuntime, s as prepareBranchEntries, t as Agent, u as runAgentLoop } from "../agent-core-RzJjRVA2.mjs";
++export { observeToolExecutionEvidence, toolExecutionEvidenceProvider } from "../agent-core-RzJjRVA2.mjs";
+ export { Agent, BRANCH_SUMMARY_PREFIX, BRANCH_SUMMARY_SUFFIX, COMPACTION_SUMMARY_PREFIX, COMPACTION_SUMMARY_SUFFIX, DEFAULT_COMPACTION_SETTINGS, IMAGE_BLOCK_TOKENS, bashExecutionToText, buildSessionContext, calculateContextTokens, collectEntriesForBranchSummaryFromBranches, compact, convertToLlm, estimateContextTokens, estimateTokens, findCutPoint, findTurnStartIndex, generateBranchSummary, generateSummary, getLastAssistantUsage, openClawAgentCoreRuntime, prepareBranchEntries, prepareCompaction, runAgentLoop, serializeConversation, shouldCompact, streamProxy, uuidv7 };

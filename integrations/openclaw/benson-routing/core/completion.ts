@@ -1,4 +1,5 @@
 import Type from 'typebox';
+import { readToolExecutionEvidence, receiptDomainValue, type ToolExecutionReceipt } from './tool-execution-evidence.js';
 import { isDeepStrictEqual as same } from 'node:util';
 import { FactsSchema, FACT_KEYS, DOMAIN_VERSIONS, DOMAIN_AGENTS, type Facts } from './contracts.js';
 import { Binding3Schema, Binding4Schema, Binding5Schema, Binding6Schema, CompletionSchema, WorkflowSchema, SemanticsSchema,
@@ -331,28 +332,62 @@ export function reconstructCompletion(authority: unknown): Completion {
   const s = snapshot(authority); if (s.outcome === 'NORMAL') fail('completion_origin_mismatch');
   return validateCompletion(fromSnapshot(s, 'unavailable'), authority);
 }
-/** Private native observations for the accepted single-tool domain harness.
+/** Private native observations for one complete bounded domain Run.
  * The domain adapter supplies verified facts and retained live custody; neither
  * model wording nor serialized identities can establish either.
  */
-export interface NativeDomainCompletionInput {
-  binding: Binding6;
-  knownFacts: Facts;
+export const MAX_NATIVE_TOOL_CALLS = 64;
+export interface NativeToolObservation {
   tool: { runId: string; sessionKey: string; sessionId: string; callId: string; name: string; value: unknown };
   after: { runId: string | undefined; callId: string | undefined; value: unknown; error: string | undefined };
+}
+export interface NativeDomainCompletionInput extends NativeToolObservation {
+  /** Private provider custody; never a model-supplied report or transcript. */
+  executionEvidence?: unknown;
+  binding: Binding6;
+  knownFacts: Facts;
+  /** Complete ordered prefix, excluding the final tool/after pair above.
+   * Omission retains the explicit legacy single-tool contract. Never a subset.
+   */
+  preceding?: readonly NativeToolObservation[];
+  /** Domain-owned validation of every captured raw result, before settlement. */
+  validateTool?(tool: Readonly<NativeToolObservation['tool']>, receipt?: Readonly<ToolExecutionReceipt>): unknown;
   terminal: { runId: string | undefined; sessionKey: string | undefined; sessionId: string | undefined; success: boolean; messages: unknown[] };
   custody: CompletionCustody;
 }
-export function settleNativeDomainCompletion(input: NativeDomainCompletionInput) {
+/** Explicit terminal reasoning-only path. No placeholder tool/effect is made up. */
+export interface NativeDomainNoToolCompletionInput extends Omit<NativeDomainCompletionInput, 'tool' | 'after' | 'preceding'> {
+  noTools: true;
+}
+export function settleNativeDomainCompletion(input: NativeDomainCompletionInput | NativeDomainNoToolCompletionInput) {
   const b = structuredClone(input.binding);
   // Capture the typed observation fields, not arbitrary native/host wrappers.
   // SDK metadata and retained guard callbacks are neither business JSON nor
   // transferable authority. Never clone or invoke those additional fields.
-  const tool = { runId: input.tool.runId, sessionKey: input.tool.sessionKey, sessionId: input.tool.sessionId,
-    callId: input.tool.callId, name: input.tool.name, value: boundedCopy(input.tool.value) };
-  const details = plain(input.after.value) ? Object.getOwnPropertyDescriptor(input.after.value, 'details') : undefined;
-  const after = { runId: input.after.runId, callId: input.after.callId, error: input.after.error,
-    details: details && 'value' in details ? boundedCopy(details.value) : null };
+  const capture = (observation: NativeToolObservation) => {
+    exact(observation, ['tool', 'after'], 'native_observation_invalid');
+    const t = field(observation, 'tool'), a = field(observation, 'after');
+    if (!plain(t) || !plain(a)) fail('native_observation_invalid');
+    const runId = field(t, 'runId'), sessionKey = field(t, 'sessionKey'), sessionId = field(t, 'sessionId'),
+      callId = field(t, 'callId'), name = field(t, 'name');
+    if (!identifier(runId) || !identifier(sessionKey) || !identifier(sessionId) || !identifier(callId) || !identifier(name)) fail('native_observation_invalid');
+    const tool = freeze({ runId, sessionKey, sessionId, callId, name, value: boundedCopy(field(t, 'value')) });
+    // The observational hook may redact/truncate its payload. Only native
+    // receipts establish original/final outcomes; retain hook identity/errors.
+    return { tool, after: { runId: field(a, 'runId'), callId: field(a, 'callId'), error: field(a, 'error') } };
+  };
+  const observations: ReturnType<typeof capture>[] = [];
+  if ('noTools' in input) {
+    if (input.noTools !== true || ['tool', 'after', 'preceding'].some(key => Object.hasOwn(input, key)) ||
+      !['failure', 'clarification_required'].includes(input.knownFacts.status) || input.knownFacts.verified ||
+      input.knownFacts.verificationScope.length || input.knownFacts.effects.length) fail('native_reasoning_outcome_invalid');
+  } else {
+    const prefix: unknown = Object.hasOwn(input, 'preceding') ? field(input, 'preceding') : [];
+    if (!Array.isArray(prefix)) fail('native_observation_invalid');
+    assertArrayData(prefix);
+    if (prefix.length >= MAX_NATIVE_TOOL_CALLS) fail('native_tool_limit_exceeded');
+    observations.push(...prefix.map(capture), capture({ tool: input.tool, after: input.after }));
+  }
   // Native transcript text is a carrier, not bounded domain JSON. Capture only
   // the fields needed to correlate tool evidence; validate report text inside
   // settlement so malformed/oversized reporting cannot erase verified effects.
@@ -370,28 +405,45 @@ export function settleNativeDomainCompletion(input: NativeDomainCompletionInput)
   const terminal = { runId: input.terminal.runId, sessionKey: input.terminal.sessionKey,
     sessionId: input.terminal.sessionId, success: input.terminal.success, messages };
   const assertSource = input.custody.assertCurrent.bind(input.custody);
-  const ensure = (ok: unknown): void => { if (!ok) fail('native_completion_unverified'); };
+  const ensure = (ok: unknown, code = 'native_completion_unverified'): void => { if (!ok) fail(code); };
   const assertEvidence: CompletionCustody['assertCurrent'] = candidate => {
     assertion(assertSource(candidate), 'completion_custody_must_be_synchronous');
     ensure(same(boundedCopy(candidate), boundedCopy(b)));
     ensure(terminal.runId === b.runId && terminal.sessionKey === b.sessionKey && terminal.sessionId === b.sessionId);
-    ensure(tool.runId === b.runId && tool.sessionKey === b.sessionKey && tool.sessionId === b.sessionId);
-    ensure(after.runId === tool.runId && after.callId === tool.callId && !after.error);
-    ensure(same(after.details, tool.value));
+    const coverage = readToolExecutionEvidence(input.executionEvidence, {
+      runId: b.runId, sessionKey: b.sessionKey, sessionId: b.sessionId, agentId: b.agentId });
+    ensure(coverage.receipts.length === observations.length);
+    for (const [index, receipt] of coverage.receipts.entries()) {
+      const observation = observations[index];
+      ensure(observation && receipt.callId === observation.tool.callId && receipt.name === observation.tool.name);
+      ensure(receipt.executionStarted && !receipt.originalIsError && !receipt.isError, 'native_tool_not_successful');
+      ensure(observation && same(receiptDomainValue(receipt), observation.tool.value), 'native_tool_original_result_mismatch');
+      if (observation && input.validateTool) assertion(input.validateTool(observation.tool, receipt), 'native_domain_validation_must_be_synchronous');
+    }
+    // Transcript projections may omit evidence; any present projection must agree.
+    // Only the native receipt/seal above establishes complete enumeration.
+    const seenCalls = new Set<string>(), seenResults = new Set<string>();
+    for (const message of terminal.messages) {
+      if (!message) continue;
+      if (message.role === 'assistant') for (const part of message.content ?? []) {
+        if (part?.type !== 'toolCall') continue;
+        ensure(typeof part.id === 'string' && !seenCalls.has(part.id));
+        ensure(coverage.receipts.some(receipt => receipt.callId === part.id && receipt.name === part.name));
+        if (typeof part.id === 'string') seenCalls.add(part.id);
+      }
+      if (message.role === 'toolResult') {
+        const index = coverage.receipts.findIndex(receipt => receipt.callId === message.toolCallId && receipt.name === message.toolName);
+        ensure(typeof message.toolCallId === 'string' && seenCalls.has(message.toolCallId) && !seenResults.has(message.toolCallId));
+        ensure(index >= 0 && !message.isError);
+        if (typeof message.toolCallId === 'string') seenResults.add(message.toolCallId);
+      }
+    }
     ensure(Array.isArray(terminal.messages));
     const messages = terminal.messages as unknown[];
-    const calls = messages.flatMap(entry => plain(entry) && entry.role === 'assistant' && Array.isArray(entry.content)
-      ? entry.content.filter((part: unknown) => plain(part) && part.type === 'toolCall') : []);
-    const results = messages.filter(entry => plain(entry) && entry.role === 'toolResult');
-    ensure(calls.length === 1 && results.length === 1);
-    const call: unknown = calls[0], result: unknown = results[0];
-    ensure(plain(call) && call.id === tool.callId && call.name === tool.name);
-    ensure(plain(result) && result.toolCallId === tool.callId && result.toolName === tool.name && !result.isError);
-    if (!plain(result) || !Array.isArray(result.content)) fail('native_completion_unverified');
-    const part: unknown = result.content[0];
-    ensure(result.content.length === 1 && plain(part) && part.type === 'text' && part.text === JSON.stringify(tool.value));
-    const index = messages.findIndex(entry => plain(entry) && entry.role === 'assistant' && Array.isArray(entry.content) && entry.content.includes(call));
-    ensure(index >= 0 && messages.indexOf(result) > index);
+    for (const { tool, after } of observations) {
+      ensure(tool.runId === b.runId && tool.sessionKey === b.sessionKey && tool.sessionId === b.sessionId);
+      ensure(after.runId === tool.runId && after.callId === tool.callId && !after.error);
+    }
   };
   assertEvidence(b);
   const facts = structuredClone(input.knownFacts);

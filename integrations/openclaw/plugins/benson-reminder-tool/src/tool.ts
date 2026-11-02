@@ -5,6 +5,9 @@ import type { IdentityContract } from '../../../../../agents/reminder-service/li
 import { executeReminderTool, type ReminderTransaction, type Dependencies } from '../../../../../agents/reminder-service/lib/service.js';
 import { schemaForTool } from '../../../../../agents/reminder-service/lib/tool-contracts.js';
 import { normalizeReminderServiceResult, SERVICE_OPERATIONS } from '../../../../../agents/reminder-service/lib/results.js';
+import { isDeepStrictEqual } from 'node:util';
+import { parseRequest } from '../../../../../agents/reminder-service/lib/schemas.js';
+import { boundedCopy } from '../../../benson-routing/core/value.js';
 import type { ToolName } from '../../../../../agents/reminder-service/lib/schemas.js';
 import { DOMAIN_RESULT_OUTPUT_SCHEMA, DOMAIN_RESULT_V3_OUTPUT_SCHEMA, createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
 import { TaskEnvelopeSchema, type TaskEnvelope, type Effects, type AnyDomainResult } from '../../../benson-routing/core/contracts.js';
@@ -13,6 +16,7 @@ import { createCurrentRequestContext, type CurrentRequestEvidence, type CurrentR
 import { assertInvocationCurrent } from '../../../benson-routing/core/invocation.js';
 import { decode, synchronous, fail } from '../../../benson-routing/core/value.js';
 import { resolveReminderRuntimeRoute } from './identity.js';
+import type { OriginalUserTurn } from '../../../../../agents/reminder-service/lib/provenance.js';
 
 type Tool = Exclude<NonNullable<ReturnType<OpenClawPluginToolFactory<2>['create']>>, unknown[]>;
 type ToolResult = Awaited<ReturnType<Tool['execute']>>;
@@ -21,7 +25,8 @@ type ToolResult = Awaited<ReturnType<Tool['execute']>>;
  * deliveryContext and model arguments cannot manufacture source authority.
  */
 export function createReminderToolFactory(options: {
-  name: ToolName; source: Dependencies; jsonResult(value: unknown): ToolResult;
+  name: ToolName; source: Dependencies;
+  jsonResult(value: unknown, assertCompletion: (args: unknown, value: unknown) => void, callId: string): ToolResult;
   current?: CurrentRequestProjection;
 }): OpenClawPluginToolFactory<2>['create'] {
   const source = options.source;
@@ -52,7 +57,11 @@ export function createReminderToolFactory(options: {
           } },
         });
         assertInvocationCurrent(authority);
-        const serialized = synchronous(options.jsonResult(result), 'reminder_tool_serialization_must_be_synchronous');
+        const retained = boundedCopy(result), request = boundedCopy(parseRequest(options.name, raw));
+        const serialized = synchronous(options.jsonResult(result, (args, value) => {
+          assertInvocationCurrent(source.authority);
+          if (!isDeepStrictEqual(boundedCopy(parseRequest(options.name, args)), request) || !isDeepStrictEqual(boundedCopy(value), retained)) throw new Error('reminder_transaction_evidence_mismatch');
+        }, callId), 'reminder_tool_serialization_must_be_synchronous');
         assertInvocationCurrent(authority);
         return serialized;
       } };
@@ -61,9 +70,17 @@ export function createReminderToolFactory(options: {
 /** Source candidate for the existing reminder_task registration; no registration here. */
 export function createReminderTaskToolFactory(options: {
   identities: IdentityContract; transaction: ReminderTransaction;
-  jsonResult(value: AnyDomainResult): ToolResult; clock?: () => Date; resultVersion?: 2 | 3;
+  /** A completed agentic result retains Completion custody, independently of
+   * this invocation's execution authority. Deterministic list has no Run. */
+  jsonResult(value: AnyDomainResult, callId: string, assertCompletion?: () => void): ToolResult;
+  clock?: () => Date; resultVersion?: 2 | 3;
   task?: {
     source(context: OpenClawPluginToolContext<2>): CurrentRequestEvidence;
+    /** Optional original-source custody; omission keeps current-input-only
+     * evidence. This supplies quotes, never pending or effect authority. */
+    originalUserTurns?(context: OpenClawPluginToolContext<2>): Promise<{
+      turns: readonly OriginalUserTurn[]; assertCurrent(): void;
+    }>;
     run(request: TaskEnvelope, context: { callId: string; source: CurrentRequestProjection; deps: Dependencies }):
       Promise<{ completion: unknown; authority: CompletionAuthority; effects: Effects }>;
   };
@@ -96,6 +113,7 @@ export function createReminderTaskToolFactory(options: {
         };
         let result: AnyDomainResult;
         let assertResultCurrent = () => assertInvocationCurrent(authority);
+        let assertCompletionCurrent: (() => void) | undefined;
         // The strict list shape retains its zero-Run path. Other input is
         // accepted only by the explicitly assembled, source-bound task entry.
         if (request !== null && typeof request === 'object' && 'operation' in request) {
@@ -117,16 +135,30 @@ export function createReminderTaskToolFactory(options: {
             binding.requesterId !== route.senderId || binding.kind !== (route.sourceType === 'group' ? 'group' : 'direct')) {
             throw new Error('reminder_task_source_mismatch');
           }
+          let originals: { turns: readonly OriginalUserTurn[]; assertCurrent(): void } | undefined;
           const assertCurrent = () => {
             assertInvocationCurrent(authority);
             if (context.sessionKey !== callerSessionKey || context.sessionId !== callerSessionId) throw new Error('reminder_task_caller_changed');
             if (current.revalidateProjection(source, { signal: authority.signal }).status !== 'available') throw new Error('reminder_task_source_retired');
             const fresh = resolveReminderRuntimeRoute(context, options.identities);
             if (!fresh || Object.entries(route).some(([key, value]) => Reflect.get(fresh, key) !== value)) throw new Error('reminder_task_route_changed');
+            originals?.assertCurrent();
           };
           const taskDeps: Dependencies = { ...deps, authority: { signal: authority.signal, assertCurrent }, evidence: {
             async readCurrentUserText() { assertCurrent(); return source.context.current.text; },
-            async readOriginalUserTurns() { assertCurrent(); return [{ text: source.context.current.text }]; },
+            async readOriginalUserTurns() {
+              assertCurrent();
+              if (!options.task?.originalUserTurns) return [{ text: source.context.current.text }];
+              if (!originals) {
+                const acquired = await options.task.originalUserTurns(context);
+                assertCurrent(); acquired.assertCurrent();
+                if (!Array.isArray(acquired.turns) || !acquired.turns.length ||
+                  acquired.turns.some(turn => !turn || typeof turn.text !== 'string' || !turn.text.trim()) ||
+                  acquired.turns.at(-1)?.text !== source.context.current.text) throw new Error('reminder_task_originals_unavailable');
+                originals = { turns: structuredClone(acquired.turns), assertCurrent: () => acquired.assertCurrent() };
+              }
+              assertCurrent(); return structuredClone(originals.turns);
+            },
           } };
           assertResultCurrent = assertCurrent;
           assertCurrent();
@@ -143,10 +175,11 @@ export function createReminderTaskToolFactory(options: {
             completion.binding.caller.sessionKey !== callerSessionKey || completion.binding.caller.sessionId !== callerSessionId ||
             completion.binding.completionTarget !== 'CALLER') throw new Error('reminder_task_completion_binding');
           result = project(completion, handoff.authority, { projectEffects: () => handoff.effects });
+          assertCompletionCurrent = () => { validateCompletion(handoff.completion, handoff.authority); };
           if (result.operation !== null && !Object.values(SERVICE_OPERATIONS).some(operation => operation === result.operation)) throw new Error('reminder_task_operation_not_enabled');
           assertCurrent(); released.add(handoff.authority);
         }
-        const serialized = synchronous(options.jsonResult(result), 'reminder_task_serialization_must_be_synchronous');
+        const serialized = synchronous(options.jsonResult(result, callId, assertCompletionCurrent), 'reminder_task_serialization_must_be_synchronous');
         assertResultCurrent();
         return serialized;
       },

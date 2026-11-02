@@ -49,7 +49,8 @@ export const ResultSchema = object({ schemaVersion: Type.Literal('1'), status: T
   domain: Type.Literal('jessica-vacuum'), operation: nullable(Type.Enum([...READ_OPERATIONS, ...EXECUTE_OPERATIONS])), verified: Type.Boolean(),
   data: nullable(Type.Union([ReadDataSchema, ActionDataSchema, ClarificationSchema])),
   warnings: Type.Array(object({ code: Nonempty, message: Nonempty })), error: nullable(ErrorSchema),
-  pendingContext: nullable(object({ version: Type.Literal('1'), clarificationId: Nonempty, expiresAt: Nonempty })) });
+  pendingContext: nullable(object({ version: Type.Literal('1'),
+    clarificationId: Type.String({ pattern: '^[A-Za-z0-9_-]{1,64}$' }), expiresAt: Nonempty })) });
 export type Result = Static<typeof ResultSchema>;
 const PlanEvidenceSchema = Type.Object({ operation: Type.Enum(EXECUTE_OPERATIONS),
   rooms: Type.Array(Type.Object({ slug: Nonempty, segmentId: Type.Optional(Positive) })), settings: nullable(SettingsSchema),
@@ -118,7 +119,9 @@ export function validateResult(raw: unknown, expectedPlan: unknown = null, now =
   if (result.status === 'clarification_required') {
     const data = decode(ClarificationSchema, result.data, 'clarification_invalid');
     if (result.verified || result.error !== null || !data.question || !result.pendingContext ||
-        !instant(result.pendingContext.expiresAt) || Date.parse(result.pendingContext.expiresAt) <= now.getTime()) deny('INVALID_RESULT', 'integrity', 'Clarification contract is invalid');
+        !Number.isFinite(now.getTime()) || !instant(result.pendingContext.expiresAt) ||
+        Date.parse(result.pendingContext.expiresAt) <= now.getTime() ||
+        Date.parse(result.pendingContext.expiresAt) > now.getTime() + 30 * 60_000) deny('INVALID_RESULT', 'integrity', 'Clarification contract is invalid');
   } else {
     if (result.pendingContext !== null || (result.status === 'failure') !== (result.error !== null)) deny('INVALID_RESULT', 'integrity', 'Result status and error disagree');
     if (result.operation === null || result.data === null) {
