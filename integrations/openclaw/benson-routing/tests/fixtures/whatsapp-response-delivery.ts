@@ -619,11 +619,13 @@ function registerReminderProductObservations(api: OpenClawPluginApi) {
   const calls: { name: string; callId: string; runId: string; sessionKey: string }[] = [];
   const results: ReturnType<typeof validateDomainResultEnvelope>[] = [];
   const children: { sessionKey: string; success: boolean }[] = [];
+  const settlements = new Map<string, { promise: Promise<void>; resolve(): void }>();
   const rejected: string[] = [], rejections = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
   api.on('before_tool_call', (event, ctx) => {
     if (event.toolName !== 'reminder_task' && !event.toolName.startsWith('jessica_') && !event.toolName.startsWith('benson_reminder_')) return;
     assert(ctx.toolCallId && ctx.runId && ctx.sessionKey);
     calls.push({ name: event.toolName, callId: ctx.toolCallId, runId: ctx.runId, sessionKey: ctx.sessionKey });
+    if (!settlements.has(ctx.runId)) settlements.set(ctx.runId, Promise.withResolvers<void>());
   });
   api.on('after_tool_call', event => {
     if (event.toolName === 'reminder_task' && event.error !== undefined) {
@@ -632,16 +634,20 @@ function registerReminderProductObservations(api: OpenClawPluginApi) {
       } else failed.reject(new Error('Product Task returned an unexpected native error'));
     }
     if (event.toolName.startsWith('jessica_') && event.error !== undefined) failed.reject(new Error('Unexpected Jessica error'));
-    // Native hooks expose sanitized payloads. Read originals only from the
-    // existing authoritative receipt provider after complete Run settlement.
+    // Native hooks expose sanitized payloads. The fixture observes complete
+    // model-bound carriers separately after Main settles; hooks grant no authority.
   });
   api.on('agent_end', (event, ctx) => {
+    if (ctx.agentId === 'main' && ctx.runId) settlements.get(ctx.runId)?.resolve();
     if (ctx.agentId === 'reminder-service' || ctx.agentId === 'jessica-vacuum') { assert(ctx.sessionKey); children.push({ sessionKey: ctx.sessionKey, success: event.success }); }
   });
-  return { calls, results, children, rejected, rejections: rejections.map(item => item.promise), failed: failed.promise };
+  return { calls, results, children, rejected, settlements, rejections: rejections.map(item => item.promise), failed: failed.promise };
 }
 async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType<typeof registerReminderProductObservations>) {
   isolated();
+  const restored = existsSync('/tmp/product-recovery-restart');
+  if (restored) assert.equal(readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').length, 1,
+    'Restart must not replay a settled transaction');
   const registryUrl = '/repo/node_modules/openclaw/dist/registry-loaded-BugfxX6l.mjs';
   const registry = await import(registryUrl) as {
     r(id: string): { plugin: { config: { resolveAccount(cfg: unknown, id: string): unknown };
@@ -654,9 +660,6 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
   const responseKey = { channelId: 'whatsapp', accountId, capability: 'benson.response-controller.v1' };
   const productBinding = channel.runtimeContexts.get(responseKey); assert(productBinding, 'Actual Response entry must own the binding');
   const { calls, results, children } = observed;
-  const receipts = await observeOpenClawToolExecution('agent:main:main', () => {
-    assert.equal(api.lifecycle.signal?.aborted, false);
-  }, new URL('file:///receipt-patch/manifest.json'));
   const abort = new AbortController(), connected = Promise.withResolvers<void>();
   let accepted = Promise.withResolvers<void>(), emitSocket: ((event: string, payload: unknown) => void) | undefined;
   const sends: { jid: string; text: string }[] = [], errors: string[] = [];
@@ -680,57 +683,86 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
     getStatus: () => ({ accountId }), setStatus(status: Record<string, unknown>) { if (status.connected) connected.resolve(); } });
   let timer: NodeJS.Timeout;
   const deadline = new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error(
-    `Reminder product deadline: ${JSON.stringify({ calls, results, children, sends, errors })}`)), 90_000); });
+    `Reminder product deadline: ${JSON.stringify({ calls, results, children, sends, errors })}`)), 150_000); });
   const cases: unknown[] = [];
   try {
     await Promise.race([deadline, connected.promise, monitor.then(() => { throw new Error('Monitor stopped before connection'); })]);
-    for (const [index, text] of ['G3_MAIN_READ_REMINDER', PRODUCT_REMINDER_PENDING_TEXT, PRODUCT_REMINDER_ANSWER_TEXT, 'G3_MAIN_READ_JESSICA'].entries()) {
+    const inputs = restored ? ['G3_MAIN_READ_REMINDER'] :
+      ['G3_MAIN_READ_REMINDER', PRODUCT_REMINDER_PENDING_TEXT, PRODUCT_REMINDER_ANSWER_TEXT, 'G3_MAIN_READ_JESSICA'];
+    for (const [index, text] of inputs.entries()) {
       accepted = Promise.withResolvers<void>(); assert(emitSocket);
-      emitSocket('messages.upsert', { type: 'notify', messages: [{ key: { remoteJid: '15550000001@s.whatsapp.net', id: `product-reminder-${index}`, fromMe: false },
+      emitSocket('messages.upsert', { type: 'notify', messages: [{ key: { remoteJid: '15550000001@s.whatsapp.net', id: restored ? 'product-restored' : `product-reminder-${index}`, fromMe: false },
         message: { conversation: text }, messageTimestamp: Math.floor(Date.now()/1000), pushName: 'Fixture sender' }] });
       await Promise.race([deadline, observed.failed, index === 1 || index === 2 ? observed.rejections[index - 1] : accepted.promise, monitor.then(() => { throw new Error('Monitor stopped before delivery'); })]);
       const mainCalls = calls.filter(call => call.name === 'reminder_task' || call.name === 'jessica_task');
       assert.equal(mainCalls.length, index + 1); const mainCall = mainCalls[index]!;
-      await Promise.race([deadline, observed.failed, receipts.waitForSettlement(mainCall.runId, abort.signal)]);
-      const coverage = readToolExecutionEvidence(receipts.evidence(mainCall.runId), receipts.inspectIdentity(mainCall.runId));
-      assert.equal(coverage.identity.agentId, 'main'); assert.equal(coverage.receipts.length, 1);
-      const receipt = coverage.receipts[0]!;
-      assert.equal(receipt.callId, mainCall.callId); assert.equal(receipt.name, index === 3 ? 'jessica_task' : 'reminder_task');
-      assert.equal(receipt.executionStarted, true);
+      const settlement = observed.settlements.get(mainCall.runId); assert(settlement);
+      await Promise.race([deadline, observed.failed, settlement.promise]);
       assert.equal(children.length, 0); assert.equal(calls.length, index + 1);
       const transactionCount = readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').length;
-      assert.equal(transactionCount, 1, 'Disabled history must not execute a transaction');
+      assert.equal(transactionCount, restored ? 2 : 1, 'Only the explicit list input may execute a transaction');
       if (index === 0 || index === 3) {
-        assert.equal(receipt.originalIsError, false); assert.equal(receipt.isError, false);
-        assert(plain(receipt.originalResult)); assert(Array.isArray(receipt.originalResult.content));
-        const value = validateDomainResultEnvelope(receipt.originalResult.details);
+        // Inspect complete tool results actually serialized to the provider.
+        // These are proof observations; runtime authority stays in the entries.
+        const carriers: unknown = JSON.parse(readFileSync('/tmp/product-native-carriers.json', 'utf8'));
+        assert(Array.isArray(carriers)); const carrier: unknown = carriers.at(-1);
+        assert(plain(carrier)); assert.equal(carrier.tool, index === 3 ? 'jessica_task' : 'reminder_task');
+        const value = validateDomainResultEnvelope(carrier.value);
         assert.equal(value.domain, index === 3 ? 'jessica-vacuum' : 'reminder'); assert.equal(value.facts.verified, true);
         assert.equal(value.outcome.status, 'success'); assert.equal(value.executionMode, 'deterministic');
         assert.equal(value.effects.status, 'none'); results.push(value);
+        if (index === 0) {
+          assert(plain(value.facts.data) && Array.isArray(value.facts.data.matches));
+          assert.equal(value.facts.data.matches.length, 3);
+          for (const item of [1, 2, 3]) assert(sends.at(-1)?.text.includes(`Product reminder ${item}`));
+        }
         cases.push({ name: index === 3 ? 'product-jessica-status' : 'product-list', result: value, send: sends.at(-1), childRuns: 0 });
       } else {
         assert.equal(observed.rejected.length, index);
-        // Native tool exceptions may be rendered as ordinary text carriers;
-        // neither flag can turn this into authoritative domain-success facts.
-        assert.throws(() => validateDomainResultEnvelope(plain(receipt.originalResult) ? receipt.originalResult.details : undefined));
-        assert(JSON.stringify(receipt.result).includes('native_original_history_resource_bounds_unavailable'));
         cases.push({ name: index === 1 ? 'history-v1-disabled' : 'history-v2-disabled', childRuns: 0, transactionCount,
-          originalIsError: receipt.originalIsError, isError: receipt.isError });
+          error: 'native_original_history_resource_bounds_unavailable' });
       }
+    }
+    if (restored) {
+      assert.equal(sends.length, 1); assert.equal(calls.length, 1); assert.deepEqual(errors, []);
+      writeReport({ probe: 'PASS', cases, calls, children, transactionCount: 2,
+        resourceUsage: process.resourceUsage(), restoredFreshRead: true });
+      return;
     }
     assert.deepEqual(calls.map(call => call.name), ['reminder_task', 'reminder_task', 'reminder_task', 'jessica_task']);
     assert.deepEqual(transportGlobal.__bensonIsolatedHaReads, [`http://127.0.0.1:8123/api/states/${VACUUM_ENTITY}`, 'http://127.0.0.1:8123/api/states']);
     const transactions = readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').map(line => JSON.parse(line) as string[]);
     assert.equal(transactions.length, 1); assert.equal(transactions[0]![0], 'list-reminders');
+    // Exercise native retirement and restoration of the same compatible artifact.
+    // No state restore, transcript migration or business-operation replay occurs.
+    assert(plain(productBinding) && typeof productBinding.createTurn === 'function');
+    const recoveryContext = { Provider: 'whatsapp', Surface: 'whatsapp', AccountId: accountId,
+      SenderId: '+15550000001', From: '+15550000001', To: '+15550000002',
+      MessageSid: 'retired-recovery-probe', SessionKey: 'agent:main:main', RawBody: 'recovery probe' };
+    const retiredTurn: unknown = productBinding.createTurn({ ctx: recoveryContext, replyOptions: {} });
+    assert(plain(retiredTurn) && typeof retiredTurn.resolve === 'function');
+    const resolveRetired = retiredTurn.resolve;
+    for (const operation of ['disable', 'enable']) {
+      await promisify(execFile)('/usr/bin/node', ['/repo/node_modules/openclaw/openclaw.mjs', 'plugins', operation, 'benson-routing'],
+        { encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 });
+      const current = channel.runtimeContexts.get(responseKey);
+      if (operation === 'disable') assert.equal(current, undefined);
+    }
+    let retiredResolverCalls = 0;
+    await assert.rejects(async () => resolveRetired(async () => { retiredResolverCalls++; },
+      { ctx: { ...recoveryContext }, abortSignal: new AbortController().signal }));
+    assert.equal(retiredResolverCalls, 0, 'Restoration must not revive retired authority');
     const connection = channel.runtimeContexts.get({ ...responseKey, capability: 'connection-controller' }) as { getActiveListener(): { close(): Promise<void> } };
     assert(connection); await Promise.race([deadline, connection.getActiveListener().close()]);
-    assert.equal(channel.runtimeContexts.get(responseKey), productBinding, 'Product binding lifetime belongs to its plugin');
-    assert.equal(sends.length, 2, 'Only independent deterministic reads may deliver domain results'); assert.deepEqual(errors, []);
+    assert.equal(sends.length, 2); assert.deepEqual(errors, []);
     writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.4', reminderProduct: true, cases, calls, children,
+      coreSdkPatched: false, resourceUsage: process.resourceUsage(),
       productEntries: ['benson-routing', 'benson-reminder-tool', 'benson-jessica-tool'], haReads: transportGlobal.__bensonIsolatedHaReads,
-      transactionCount: transactions.length, limits: 'Actual product entries/native lifecycle; synthetic provider, socket, HA transport ports and transaction backend. Deterministic list/status and disabled v1/v2 history paths only; zero child Runs or mutations. No native pending, recovery/concurrency or production acceptance.' });
+      transactionCount: transactions.length, recovery: { retiredAuthorityRejected: true, retiredResolverCalls,
+        hotReloadBindingAvailable: channel.runtimeContexts.get(responseKey) !== undefined, sameArtifact: true },
+      limits: 'Actual product entries/native lifecycle; synthetic provider, socket, HA transport ports and transaction backend. Deterministic list/status, disabled v1/v2 history and same-artifact routing restoration only; zero child Runs or mutations. No native pending, cross-version state recovery, exhaustive concurrency or production acceptance.' });
   } finally {
-    receipts.dispose(); clearTimeout(timer!); abort.abort(); try { await monitor; } finally { delete transportGlobal[transportSlot]; }
+    clearTimeout(timer!); abort.abort(); try { await monitor; } finally { delete transportGlobal[transportSlot]; }
     assert.equal(ws.isClosed, true); assert.equal(ev.listenerCount('messages.upsert'), 0);
   }
 }

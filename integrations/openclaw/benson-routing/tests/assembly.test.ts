@@ -40,6 +40,20 @@ test('emitted routing identity resource is byte-identical and loadable', () => {
   assert.doesNotThrow(() => loadCanonicalIdentityContract());
 });
 
+test('release package roots select only emitted entries and exact canonical manifests', () => {
+  for (const plugin of ['benson-routing', 'plugins/benson-jessica-tool', 'plugins/benson-reminder-tool']) {
+    const directory = `integrations/openclaw/${plugin}`;
+    const packagePath = resolve('output/typescript', directory, 'package.json');
+    const pkg: unknown = JSON.parse(readFileSync(packagePath, 'utf8'));
+    assert(plain(pkg) && plain(pkg.openclaw) && plain(pkg.peerDependencies));
+    assert.deepEqual(pkg.openclaw.extensions, ['./src/index.js']);
+    assert.equal(pkg.peerDependencies.openclaw, '2026.10.4');
+    assert(existsSync(resolve('output/typescript', directory, 'src/index.js')));
+    assert.deepEqual(readFileSync(resolve('output/typescript', directory, 'openclaw.plugin.json')),
+      readFileSync(resolve(directory, 'openclaw.plugin.json')));
+  }
+});
+
 test('emitted Reminder runner reaches the canonical executable and preserves its resource/state root', () => {
   const canonical = resolve('agents/reminder-service/tools/reminder-service');
   assert(lstatSync(REMINDER_SERVICE_PATH).isSymbolicLink());
