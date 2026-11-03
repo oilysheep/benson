@@ -13,7 +13,7 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
   if (completionV6Only && (target !== 'native-correlation' || codeModeOnly)) throw new TypeError('Completion v6 requires its isolated correlation fixture');
   if (mainHookSurfaceOnly && (target !== 'main-interception' || codeModeOnly || completionV6Only)) throw new TypeError('Main hook surface requires its isolated Main fixture');
   if (supportedNativeOnly && (target !== 'main-interception' || codeModeOnly || completionV6Only || mainHookSurfaceOnly)) throw new TypeError('Supported native proof requires its isolated Main profile');
-  const receiptPatch = target === 'tool-execution-receipts' || !!completionV6Only || target === 'whatsapp-response-delivery';
+  const receiptPatch = target === 'tool-execution-receipts' || !!completionV6Only || target === 'whatsapp-response-delivery' && !reminderProduct;
   const repo = realpathSync(process.cwd());
   const npmCache = installed ? realpathSync(process.env.BENSON_WHATSAPP_NPM_CACHE ??
     join(repo, '.checkpoints/ts03-whatsapp-installer-20261031/npm-cache')) : undefined;

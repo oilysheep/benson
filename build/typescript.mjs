@@ -87,6 +87,22 @@ for (const { path } of declarations) {
 // A successful build must leave the installed SDK byte-identical.
 for (const [path, expected] of sources) assert.equal(digest(read(join(sdk, 'dist', path))), expected);
 if (!process.argv.includes('--noEmit')) {
+  // Repository-dependent release roots: native discovery selects the emitted
+  // entry directly. Never redirect a package to the legacy dist entry.
+  for (const plugin of ['benson-routing', 'plugins/benson-jessica-tool', 'plugins/benson-reminder-tool']) {
+    const directory = `integrations/openclaw/${plugin}`;
+    const source = json(join(root, directory, 'package.json'));
+    const manifest = json(join(root, directory, 'openclaw.plugin.json'));
+    assert.equal(source.name, manifest.id);
+    assert.ok(existsSync(join(root, options.outDir, directory, 'src/index.js')));
+    generate(join(root, options.outDir, directory, 'package.json'), JSON.stringify({
+      name: source.name, version: source.version, private: true, type: 'module',
+      peerDependencies: { openclaw: pkg.version },
+      openclaw: { extensions: ['./src/index.js'] },
+    }, null, 2) + '\n');
+    generate(join(root, options.outDir, directory, 'openclaw.plugin.json'),
+      read(join(root, directory, 'openclaw.plugin.json')));
+  }
   // The native routing entry reads this existing domain-owned resource relative
   // to its emitted module. Keep its exact bytes; never load runtime/secret state.
   for (const resource of ['agents/reminder-service/config/recipients.json',

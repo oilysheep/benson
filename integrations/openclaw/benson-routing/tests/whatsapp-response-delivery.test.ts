@@ -7,7 +7,10 @@ import { validateDomainResultEnvelope } from '../core/domain-result.js';
 test('isolated product entries preserve list and reject unsafe v1/v2 history before child or mutation', { timeout: 300_000 }, () => {
   const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'reminder-product');
   assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.reminderProduct, true);
-  assert.equal(result.transactionCount, 1); assert.equal(result.providerRequests, 8);
+  assert.equal(result.transactionCount, 2); assert.equal(result.providerRequests, 10);
+  assert.equal(result.coreSdkPatched, false);
+  assert.deepEqual(result.recovery, { retiredAuthorityRejected: true, retiredResolverCalls: 0,
+    hotReloadBindingAvailable: false, sameArtifact: true, coldRestart: true, restoredFreshRead: true, replayedInputs: 0 });
   assert.deepEqual(result.isolation, { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false });
   console.log(JSON.stringify(result));
 });

@@ -2,7 +2,7 @@ import { createOpenClawDomainRunCollector, observeOpenClawToolExecution } from '
 import assert from 'node:assert/strict';
 import { execFileSync, spawn } from 'node:child_process';
 import { once } from 'node:events';
-import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, watch, writeFileSync } from 'node:fs';
+import { cpSync, existsSync, mkdirSync, readFileSync, renameSync, symlinkSync, unlinkSync, watch, writeFileSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { createHash, randomUUID } from 'node:crypto';
@@ -495,7 +495,9 @@ const argv = process.argv.slice(2); fs.appendFileSync('/tmp/reminder-transaction
 let value;
 if (argv[0] === 'list-reminders') {
   assert.deepEqual(argv, ['list-reminders', '--requester', 'reader']);
-  value = {status:'success',operation:'list',verified:true,matchCount:0,matches:[],warnings:[]};
+  value = {status:'success',operation:'list',verified:true,matchCount:3,
+    matches:[1,2,3].map(i=>({schemaVersion:4,reminderId:'product-'+i,status:'active',content:'Product reminder '+i,
+      schedules:[{type:'one-shot',resolvedTime:'2026-11-10T10:00:00+02:00',timezone:'Asia/Jerusalem'}]})),warnings:[]};
 } else {
   assert.equal(argv[0], 'create-intent'); assert.equal(argv[1], '--input-json'); assert.equal(argv.length,3);
   const input = JSON.parse(argv[2]); assert.equal(input.requesterId,'reader'); assert.equal(input.content,'drink water');
@@ -671,6 +673,8 @@ process.stdout.write(JSON.stringify(value));
           assert(record(value.outcome)); assert.equal(value.outcome.status, failed ? 'failure' : 'success');
           assert.equal(value.content.state, 'usable'); assert.equal(typeof value.content.text, 'string');
           assert(readMarker); mainReadCarriers.push({ marker: readMarker, tool, callId: call.id, value });
+          // Test observations of the actual model input, never domain authority.
+          if (reminderProduct) writeFileSync('/tmp/product-native-carriers.json', JSON.stringify(mainReadCarriers));
         }
       }
       const useTool = mutationChild || mutationParent || correlation || completionChild || reminderChild || reminderParent || content.includes('G3_HANDLED_TOOL_FAILURE') || readTools !== null;
@@ -757,20 +761,13 @@ process.stdout.write(JSON.stringify(value));
     type: 'module', openclaw: { extensions: ['./index.mjs'] } }));
   writeFileSync('/tmp/plugin/index.mjs', `export { default } from '/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/${target}.js';\n`);
   const productPaths: string[] = [], productEntries: Record<string, { enabled: boolean; hooks: { allowConversationAccess: boolean } }> = {};
-  if (reminderProduct) {
-    mkdirSync('/tmp/product-tree/integrations/openclaw', { recursive: true });
-    symlinkSync('/repo/output/typescript/agents', '/tmp/product-tree/agents');
-    symlinkSync('/repo/output/typescript/integrations/openclaw/patches', '/tmp/product-tree/integrations/openclaw/patches');
-  }
-  if (reminderProduct) for (const [id, manifest, entry] of [
-    ['benson-routing', '/routing-plugin-manifest.json', 'benson-routing'],
-    ['benson-reminder-tool', '/reminder-plugin-manifest.json', 'plugins/benson-reminder-tool'],
-    ['benson-jessica-tool', '/jessica-plugin-manifest.json', 'plugins/benson-jessica-tool'],
+  if (reminderProduct) for (const [id, entry] of [
+    ['benson-routing', 'benson-routing'],
+    ['benson-reminder-tool', 'plugins/benson-reminder-tool'],
+    ['benson-jessica-tool', 'plugins/benson-jessica-tool'],
   ]) {
-    const path = `/tmp/product-tree/integrations/openclaw/${entry}`; mkdirSync(path, { recursive: true }); productPaths.push(path);
-    writeFileSync(`${path}/openclaw.plugin.json`, readFileSync(manifest!));
-    writeFileSync(`${path}/package.json`, JSON.stringify({ name: `@benson/${id}`, version: '0.0.0', type: 'module', openclaw: { extensions: ['./index.mjs'] } }));
-    writeFileSync(`${path}/index.mjs`, `export { default } from '/repo/output/typescript/integrations/openclaw/${entry}/src/index.js';\n`);
+    const path = `/repo/output/typescript/integrations/openclaw/${entry}`; productPaths.push(path);
+    assert.deepEqual(JSON.parse(readFileSync(`${path}/package.json`, 'utf8')).openclaw.extensions, ['./src/index.js']);
     productEntries[id!] = { enabled: true, hooks: { allowConversationAccess: true } };
   }
   const config: OpenClawPluginApi['config'] = { gateway: { mode: 'local', bind: 'loopback', port: 19491, auth: { mode: 'none' }, controlUi: { enabled: false } },
@@ -801,15 +798,23 @@ process.stdout.write(JSON.stringify(value));
     });
     console.error('Isolated WhatsApp: fixture config applied through native CLI');
   } else writeFileSync('/tmp/config.json', JSON.stringify(config));
-  const gateway = spawn('/usr/bin/node', [...whatsappMonitorOnly ? ['--import', '/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/whatsapp-response-delivery.js'] : [], '/repo/node_modules/openclaw/openclaw.mjs', 'gateway', 'run'], { stdio: ['ignore', 'pipe', 'pipe'] });
   let diagnostics = '', startupDiagnostics = '';
-  for (const stream of [gateway.stdout, gateway.stderr]) stream.on('data', chunk => {
-    startupDiagnostics = (startupDiagnostics + String(chunk)).slice(0, 12000);
-    diagnostics = (diagnostics + String(chunk)).slice(-12000);
-  });
-  const exited = once(gateway, 'exit');
+  const startGateway = () => {
+    const child = spawn('/usr/bin/node', [...whatsappMonitorOnly ? ['--import', '/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/whatsapp-response-delivery.js'] : [], '/repo/node_modules/openclaw/openclaw.mjs', 'gateway', 'run'], { stdio: ['ignore', 'pipe', 'pipe'] });
+    for (const stream of [child.stdout, child.stderr]) stream.on('data', chunk => {
+      startupDiagnostics = (startupDiagnostics + String(chunk)).slice(0, 12000);
+      diagnostics = (diagnostics + String(chunk)).slice(-12000);
+    });
+    return child;
+  };
+  let gateway = startGateway(), exited = once(gateway, 'exit');
+  const stopGateway = async () => {
+    gateway.kill('SIGTERM');
+    const kill = setTimeout(() => gateway.kill('SIGKILL'), 10_000);
+    try { await exited; } finally { clearTimeout(kill); }
+  };
   const watcher = watch('/tmp');
-  try {
+  const readReport = async () => {
     const deadline = AbortSignal.timeout(140_000);
     while (!existsSync(report)) {
       const waiter = new AbortController();
@@ -823,6 +828,23 @@ process.stdout.write(JSON.stringify(value));
     }
     const result: unknown = JSON.parse(readFileSync(report, 'utf8')); assert(record(result));
     assert.equal(result[completionV6Only ? 'completion' : correlation ? 'mapping' : 'probe'], 'PASS', JSON.stringify(result));
+    return result;
+  };
+  try {
+    let result = await readReport();
+    if (reminderProduct) {
+      const first = result;
+      await stopGateway();
+      unlinkSync(report); writeFileSync('/tmp/product-recovery-restart', 'same-artifact\n');
+      gateway = startGateway(); exited = once(gateway, 'exit');
+      const restored = await readReport();
+      assert.equal(restored.restoredFreshRead, true); assert.equal(restored.transactionCount, 2);
+      assert(Array.isArray(first.cases) && Array.isArray(restored.cases));
+      assert(record(first.recovery));
+      result = { ...first, cases: [...first.cases, ...restored.cases], transactionCount: 2,
+        recovery: { ...first.recovery, coldRestart: true, restoredFreshRead: true, replayedInputs: 0 },
+        restoredResourceUsage: restored.resourceUsage };
+    }
     if (mainHookSurfaceOnly) {
       assert.equal(requests, 0); assert.equal(mainReadCarriers.length, 0);
     } else if (target === 'whatsapp-response-delivery') {
@@ -844,9 +866,8 @@ process.stdout.write(JSON.stringify(value));
   } catch (error) {
     throw new Error(`Fixture proof failed; providerRequests=${requests}; contractFailures=${JSON.stringify(contractFailures)}; productRequests=${JSON.stringify(productRequests)}; startup: ${startupDiagnostics}; gateway diagnostics: ${diagnostics}`, { cause: error });
   } finally {
-    watcher.close(); gateway.kill('SIGTERM');
-    const kill = setTimeout(() => gateway.kill('SIGKILL'), 10_000);
-    try { await exited; } finally { clearTimeout(kill); provider.closeAllConnections(); await new Promise<void>(resolve => provider.close(() => resolve())); }
+    watcher.close();
+    try { await stopGateway(); } finally { provider.closeAllConnections(); await new Promise<void>(resolve => provider.close(() => resolve())); }
   }
 }
 // The stock plugin loader requires a synchronous ESM import graph.
