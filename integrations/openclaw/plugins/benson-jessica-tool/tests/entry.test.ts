@@ -23,7 +23,7 @@ const hooks = registerHooks({ load(url, context, next) {
 const entry = (await import('../src/index.js')).default;
 hooks.deregister();
 
-function fixture() {
+function fixture(registrationMode: 'full' | 'tool-discovery' = 'full') {
   const identities = loadCanonicalIdentityContract();
   const config: unknown = JSON.parse(readFileSync('agents/reminder-service/config/recipients.json', 'utf8'));
   assert(plain(config) && Array.isArray(config.recipients));
@@ -47,7 +47,10 @@ function fixture() {
   const tools = new Map<string, OpenClawPluginToolFactory<2>['create']>();
   const register: unknown = entry.register; assert.equal(typeof register, 'function');
   if (typeof register !== 'function') assert.fail('Missing entry');
-  register({ registrationMode: 'full', resolvePath: (p: string) => resolve('output/typescript/integrations/openclaw/plugins/benson-jessica-tool', p),
+  const resources: string[] = [];
+  register({ registrationMode, resolvePath: (p: string) => {
+    resources.push(p); return resolve('output/typescript/integrations/openclaw/plugins/benson-jessica-tool', p);
+  },
     runtime: { channel: { runtimeContexts: { get() { return state.bound ? { current(received: unknown) {
       assert.equal(received, context); return { assertCurrent: authority,
         source() { throw Error('Status must not acquire source history'); },
@@ -62,6 +65,8 @@ function fixture() {
       assert.equal(factory.contextVersion, 2); assert.equal(options.optional, true);
       assert(!tools.has(options.name)); tools.set(options.name, factory.create);
     } });
+  assert.deepEqual(resources, ['../../../../agents/reminder-service/config/recipients.json',
+    '../../../../agents/jessica-vacuum/config/policy.v1.json', '../../../../agents/jessica-vacuum/config/registry.v1.json']);
   const create = tools.get('jessica_task'); assert(create);
   const tool = create(context); assert(tool && !Array.isArray(tool));
   return { state, context, tools, tool };
@@ -70,7 +75,7 @@ function fixture() {
 test('Jessica discovery has no runtime/resource access; existing manifest roster stays exact', () => {
   const register: unknown = entry.register; assert.equal(typeof register, 'function');
   if (typeof register !== 'function') assert.fail('Missing entry');
-  for (const registrationMode of ['discovery', 'tool-discovery', 'setup-only', 'setup-runtime', 'cli-metadata']) register({ registrationMode });
+  for (const registrationMode of ['discovery', 'setup-only', 'setup-runtime', 'cli-metadata']) register({ registrationMode });
   const f = fixture();
   const manifest: unknown = JSON.parse(readFileSync('integrations/openclaw/plugins/benson-jessica-tool/openclaw.plugin.json', 'utf8'));
   assert(plain(manifest) && plain(manifest.contracts) && Array.isArray(manifest.contracts.tools));
@@ -79,6 +84,21 @@ test('Jessica discovery has no runtime/resource access; existing manifest roster
     assert.equal(f.tools.get(name)?.({ ...f.context, agentId: 'jessica-vacuum' }), null);
   }
   assert.equal(f.state.credentials, 0); assert.equal(f.state.reads, 0);
+});
+
+test('Jessica tool-discovery registers inert schemas and retains live Response authority', async () => {
+  const f = fixture('tool-discovery');
+  assert.equal(f.state.credentials, 0); assert.equal(f.state.reads, 0);
+  assert.deepEqual(f.tool.parameters, fixture().tool.parameters);
+  f.state.bound = false;
+  await assert.rejects(f.tool.execute('status-call', { operation: 'status' }), /native_original_source_unavailable/);
+  assert.equal(f.state.credentials, 0); assert.equal(f.state.reads, 0);
+  f.state.bound = true;
+  const result = validateDomainResultEnvelope((await f.tool.execute('status-call', { operation: 'status' })).details);
+  assert.equal(result.outcome.status, 'success'); assert.equal(f.state.reads, 2);
+  f.state.current = false;
+  await assert.rejects(f.tool.execute('status-call', { operation: 'status' }), /retired/);
+  assert.equal(f.state.reads, 2);
 });
 
 test('Jessica status composes canonical HA read, authorization, domain result and retained Response custody', async () => {

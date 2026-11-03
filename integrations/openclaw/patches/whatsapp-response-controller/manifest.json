@@ -1,7 +1,7 @@
 {
   "package": "@openclaw/whatsapp",
   "version": "2026.10.4",
-  "hostVersion": "2026.10.4",
+  "hostVersion": "2026.10.10",
   "integrity": "sha512-1kF4se963qOcX8VkUc/n+SaE7jYBMkjP5zqIVNNgGPsuGqXvu7nMOiMAdz5wBLYIjzddN6TbG8UjT13CRlyVbA==",
   "target": "dist/.setup/monitor-QPGSf7uJ.mjs",
   "beforeSha256": "8b0de14c8398f91657dc1b2118671aaeab973a1ba0b62fea49938fe567cbf57a",

@@ -4,6 +4,6 @@
   "private": true,
   "type": "module",
   "files": ["dist", "adapters", "core", "openclaw.plugin.json"],
-  "peerDependencies": { "openclaw": "2026.10.4" },
+  "peerDependencies": { "openclaw": "2026.10.10" },
   "openclaw": { "extensions": ["./dist/index.js"] }
 }

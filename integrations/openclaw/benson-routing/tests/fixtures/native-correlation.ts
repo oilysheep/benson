@@ -479,7 +479,7 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
   assert(!mainHookSurfaceOnly || (!correlation && !codeModeOnly && !completionV6Only));
   const reminderManifest = reminderProduct ? JSON.parse(readFileSync('/reminder-plugin-manifest.json', 'utf8')) as { contracts: { tools: string[] } } : undefined;
   const exposedTools = reminderManifest ? [...reminderManifest.contracts.tools, 'jessica_task'] : (whatsappInstallerOnly ? ['jessica_task', 'jessica_read', 'jessica_execute', 'reminder_task', 'benson_reminder_create', 'benson_reminder_delete'] : completionV6Only ? ['jessica_read', 'jessica_task'] : correlation ? ['jessica_read'] : ['jessica_read', 'jessica_task', 'reminder_task']);
-  assert.equal(JSON.parse(readFileSync('/repo/node_modules/openclaw/package.json', 'utf8')).version, '2026.10.4');
+  assert.equal(JSON.parse(readFileSync('/repo/node_modules/openclaw/package.json', 'utf8')).version, '2026.10.10');
   for (const path of ['/tmp/home', '/tmp/state', '/tmp/workspace', '/tmp/plugin']) mkdirSync(path, { recursive: true });
   if (reminderProduct) {
     writeFileSync('/repo/output/typescript/agents/jessica-vacuum/config/registry.v1.json', readFileSync('/repo/agents/jessica-vacuum/config/registry.v1.json'));
@@ -798,6 +798,32 @@ process.stdout.write(JSON.stringify(value));
     });
     console.error('Isolated WhatsApp: fixture config applied through native CLI');
   } else writeFileSync('/tmp/config.json', JSON.stringify(config));
+  let coldToolInventory: unknown;
+  try { if (reminderProduct) {
+    // A separate native process has no full-mode registry to reuse. Exercise
+    // scoped tool-discovery before Gateway startup or any business input.
+    execFileSync('/usr/bin/node', ['--input-type=module', '-e', `
+      import { readFileSync, writeFileSync } from 'node:fs';
+      import { r as resolveInventory } from '/repo/node_modules/openclaw/dist/tools-effective-inventory-B-x_99en.mjs';
+      const cfg = JSON.parse(readFileSync('/tmp/config.json', 'utf8'));
+      const inventory = await resolveInventory({ cfg, agentId: 'main', workspaceDir: '/tmp/workspace',
+        sessionKey: 'agent:main:main', sessionId: 'cold-inventory', messageProvider: 'whatsapp',
+        accountId: 'fixture-0', currentChannelId: '+15550000001',
+        modelProvider: 'fixture-local', modelId: 'correlation' });
+      writeFileSync('/tmp/product-cold-inventory.json', JSON.stringify({
+        tools: inventory.groups.flatMap(group => group.tools.map(tool => tool.id)).sort(),
+        profile: inventory.profile }));
+    `], { encoding: 'utf8', timeout: 45_000, maxBuffer: 1024 * 1024 });
+    coldToolInventory = JSON.parse(readFileSync('/tmp/product-cold-inventory.json', 'utf8'));
+    assert(record(coldToolInventory));
+    assert.deepEqual(coldToolInventory.tools, ['jessica_task', 'reminder_task']);
+    assert.equal(requests, 0, 'Inventory must not call a model provider');
+    assert(!existsSync('/tmp/reminder-transactions.jsonl'), 'Inventory must not invoke the domain backend');
+  } } catch (error) {
+    provider.closeAllConnections();
+    await new Promise<void>(resolve => provider.close(() => resolve()));
+    throw error;
+  }
   let diagnostics = '', startupDiagnostics = '';
   const startGateway = () => {
     const child = spawn('/usr/bin/node', [...whatsappMonitorOnly ? ['--import', '/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/whatsapp-response-delivery.js'] : [], '/repo/node_modules/openclaw/openclaw.mjs', 'gateway', 'run'], { stdio: ['ignore', 'pipe', 'pipe'] });
@@ -861,7 +887,7 @@ process.stdout.write(JSON.stringify(value));
         assert.equal(carriers.length, item.values.length); assert.deepEqual(carriers.map(carrier => carrier.value), item.values);
       }
     }
-    console.log(JSON.stringify({ ...result, isolation: { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false },
+    console.log(JSON.stringify({ ...result, ...reminderProduct ? { coldToolInventory } : {}, isolation: { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false },
       providerRequests: requests, providerScenarios, fallbackModels, mainReadCarriers }));
   } catch (error) {
     throw new Error(`Fixture proof failed; providerRequests=${requests}; contractFailures=${JSON.stringify(contractFailures)}; productRequests=${JSON.stringify(productRequests)}; startup: ${startupDiagnostics}; gateway diagnostics: ${diagnostics}`, { cause: error });

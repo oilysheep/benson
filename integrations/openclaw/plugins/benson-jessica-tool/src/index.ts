@@ -12,14 +12,12 @@ export default definePluginEntry({
   id: 'benson-jessica-tool', name: 'Benson Jessica Tool',
   description: 'Jessica deterministic status entry with trusted native Response custody.',
   register(api) {
-    if (api.registrationMode !== 'full') return;
-    // Resolve canonical resources from the package root after native capture.
-    const identities = loadCanonicalIdentityContract(api.resolvePath('../../../../agents/reminder-service/config/recipients.json'));
-    const policyConfig: unknown = JSON.parse(readFileSync(api.resolvePath('../../../../agents/jessica-vacuum/config/policy.v1.json'), 'utf8'));
-    const registryConfig: unknown = JSON.parse(readFileSync(api.resolvePath('../../../../agents/jessica-vacuum/config/registry.v1.json'), 'utf8'));
-    const roster = { accountId: identities.accountId, approvedIds: identities.trustedRequesterIds,
-      subjectForRoute: (route: string) => identities.requesterForPrivateRoute(route) };
-    const read = createJessicaReader({ registryConfig, policyConfig, source: createHaReader(createHaTransport()) });
+    if (api.registrationMode !== 'full' && api.registrationMode !== 'tool-discovery') return;
+    // Resolve against the selected package while registration owns that root;
+    // native loading may later rebind its record to a captured module root.
+    const identitiesPath = api.resolvePath('../../../../agents/reminder-service/config/recipients.json');
+    const policyPath = api.resolvePath('../../../../agents/jessica-vacuum/config/policy.v1.json');
+    const registryPath = api.resolvePath('../../../../agents/jessica-vacuum/config/registry.v1.json');
     // No child scope or sealed completion acquisition is assembled here. Keep
     // the existing optional registrations unavailable rather than granting raw
     // domain access without original-source and completion custody.
@@ -27,6 +25,15 @@ export default definePluginEntry({
       api.registerTool({ contextVersion: 2, create() { return null; } }, { name, optional: true });
     }
     api.registerTool({ contextVersion: 2, create(context) {
+      if (context.agentId !== 'main') return null;
+      // Scoped native discovery needs the same tool schema. Canonical config
+      // reads are deferred to construction; HA credentials/IO remain execute-only.
+      const identities = loadCanonicalIdentityContract(identitiesPath);
+      const policyConfig: unknown = JSON.parse(readFileSync(policyPath, 'utf8'));
+      const registryConfig: unknown = JSON.parse(readFileSync(registryPath, 'utf8'));
+      const roster = { accountId: identities.accountId, approvedIds: identities.trustedRequesterIds,
+        subjectForRoute: (route: string) => identities.requesterForPrivateRoute(route) };
+      const read = createJessicaReader({ registryConfig, policyConfig, source: createHaReader(createHaTransport()) });
       const tool = createJessicaTaskToolFactory({ roster, policy: loadPolicy(policyConfig), read, resultVersion: 3,
         jsonResult(value, callId, assertCompletion) {
           const turn = currentNativeTurn(api, context);

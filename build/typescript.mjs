@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, readlinkSync, realpathSync, renameSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
@@ -16,7 +16,7 @@ const json = path => JSON.parse(read(path));
 assert.ok(process.argv.slice(2).every(arg => arg === '--noEmit'), 'Only --noEmit is supported');
 const pkg = json(join(sdk, 'package.json'));
 assert.equal(pkg.name, 'openclaw');
-assert.equal(pkg.version, '2026.10.4');
+assert.equal(pkg.version, '2026.10.10');
 assert.equal(pkg.type, 'module');
 assert.deepEqual(pkg.exports['./plugin-sdk/plugin-entry'], {
   types: './dist/plugin-sdk/plugin-entry.d.ts', default: './dist/plugin-sdk/plugin-entry.js',
@@ -35,22 +35,40 @@ for (const flag of ['strict', 'noUncheckedIndexedAccess', 'exactOptionalProperty
 for (const flag of ['skipLibCheck', 'skipDefaultLibCheck', 'noCheck']) assert.notEqual(options[flag], true, `Forbidden compiler flag: ${flag}`);
 
 const sources = [
-  ['agent-harness-runtime-DZjstJNb.d.ts', '579e0bb10c356e3cad710411b0f36b37fe70348dc7e15448361202f3b9e991a7'],
-  ['plugin-sdk/plugin-entry.d.ts', '0a4c99523de9000d90e4be08227261b3e5958f1ead5372364942909e78dc96d7'],
-  ['plugin-entry-D4JWmN6h.d.ts', '48119827bb1152bbde76722ce8d6b72362e34de469b753e31a883108270f22f9'],
-  ['plugin-sdk/reply-runtime.d.ts', '6eec7f3c85d878afed72e900033c37ff435059cda688e98512a347b739f1b008'],
-  ['plugin-sdk/tool-results.d.ts', 'e252a557575303d7c4e10c52dadac9cd0b59836bf3f6c1b5c7d7048b73c587d1'],
+  ['config-contracts-CaROPwlH.d.ts', '9f1374e4661eeeb8f04297c65daa65db0320512734917d06a0ceba344b6e0246'],
+  ['plugin-sdk/plugin-entry.d.ts', 'e7d9cf7464837ea534be87e6096165ee4fb1394a8e40f36c8f791f09d91f9413'],
+  ['plugin-sdk/reply-runtime.d.ts', 'a6ff80275d3aa267630badde8a18d3f32e962dcbb0cdd28d37e2152140cfb568'],
+  ['plugin-sdk/tool-results.d.ts', 'c8e6062dfe1e952476d012f8ee3e6d877abb24c26925664d6c48e75aba75200c'],
 ];
-const declarations = sources.map(([path, expected]) => {
+for (const [path, expected] of sources) {
   const text = read(join(sdk, 'dist', path));
   assert.equal(digest(text), expected, `Unsupported SDK declaration bytes: ${path}`);
-  return { path, text };
-});
+}
+// This release splits mutually branded types across declaration files. Keep a
+// single declaration graph: mixing original and overlay copies breaks identity.
+// Only the optional-label declaration below changes; runtime files stay native.
+const declarations = [];
+function collectDeclarations(directory) {
+  for (const entry of readdirSync(directory, { withFileTypes: true })) {
+    const path = join(directory, entry.name);
+    if (entry.isDirectory()) collectDeclarations(path);
+    else if (entry.isFile() && path.endsWith('.d.ts')) {
+      declarations.push({ path: relative(join(sdk, 'dist'), path), text: read(path) });
+    }
+  }
+}
+collectDeclarations(join(sdk, 'dist'));
+declarations.sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+const declarationInventory = declarations.map(({ path, text }) => [path, digest(text)]);
+assert.equal(declarations.length, 376);
+assert.equal(digest(JSON.stringify(declarationInventory)), '294e8cb7fcd54a875a2de0cbcaca476efe58c31dbd240f3e6d4342fc7e0652c0',
+  'Unsupported SDK declaration graph');
 const needle = '  type: "label";\n  targetId: string;\n  label?: string;\n} | {';
-const monolith = declarations[0];
+const monolith = declarations.find(({ path }) => path === sources[0][0]);
+assert.ok(monolith);
 assert.equal(monolith.text.split(needle).length, 2, 'The correction must have exactly one target');
 monolith.text = monolith.text.replace(needle, needle.replace('label?: string;', 'label?: string | undefined;'));
-assert.equal(digest(monolith.text), '08a1539a3259e7f7006a28699ffa38935b5453e43defb0ffa2e597880882beae');
+assert.equal(digest(monolith.text), 'ef224c6c11781b4cdcbfb60b988881e2a5dbb072db58c2320f199883caa1752f');
 function generate(path, text) {
   if (existsSync(path) && read(path) === text) return;
   mkdirSync(dirname(path), { recursive: true });
@@ -65,6 +83,7 @@ generate(join(overlay, 'tsconfig.json'), JSON.stringify({
     paths: {
       'openclaw/plugin-sdk/plugin-entry': ['./dist/plugin-sdk/plugin-entry.d.ts'],
       'openclaw/plugin-sdk/reply-runtime': ['./dist/plugin-sdk/reply-runtime.d.ts'],
+      'openclaw/plugin-sdk/reply-payload': ['./dist/plugin-sdk/reply-payload.d.ts'],
       'openclaw/plugin-sdk/tool-results': ['./dist/plugin-sdk/tool-results.d.ts'],
     },
     rootDirs: ['./dist', '../../node_modules/openclaw/dist'],
@@ -80,12 +99,13 @@ const files = new Set(lines.filter(line => line.startsWith('/') && existsSync(li
 for (const line of lines) if (!files.has(line)) console.error(line);
 if (result.stderr) process.stderr.write(result.stderr);
 if (result.status !== 0) process.exit(result.status ?? 1);
-for (const { path } of declarations) {
+for (const [path] of sources) {
   assert.ok(files.has(join(overlay, 'dist', path)), `Missing declaration overlay input: ${path}`);
-  assert.ok(!files.has(join(sdk, 'dist', path)), `Original declaration bypassed overlay: ${path}`);
 }
+for (const path of files) assert.ok(!path.startsWith(join(sdk, 'dist') + '/') || !path.endsWith('.d.ts'),
+  `Original declaration bypassed overlay: ${path}`);
 // A successful build must leave the installed SDK byte-identical.
-for (const [path, expected] of sources) assert.equal(digest(read(join(sdk, 'dist', path))), expected);
+for (const [path, expected] of declarationInventory) assert.equal(digest(read(join(sdk, 'dist', path))), expected);
 if (!process.argv.includes('--noEmit')) {
   // Repository-dependent release roots: native discovery selects the emitted
   // entry directly. Never redirect a package to the legacy dist entry.
@@ -134,4 +154,4 @@ if (!process.argv.includes('--noEmit')) {
   }
   assert.equal(realpathSync(target), realpathSync(source), 'Reminder output executable target drift');
 }
-console.log(`Strict TypeScript ${process.argv.includes('--noEmit') ? 'typecheck' : 'build'} PASS; OpenClaw 2026.10.4 declaration overlay verified.`);
+console.log(`Strict TypeScript ${process.argv.includes('--noEmit') ? 'typecheck' : 'build'} PASS; OpenClaw ${pkg.version} declaration overlay verified.`);
