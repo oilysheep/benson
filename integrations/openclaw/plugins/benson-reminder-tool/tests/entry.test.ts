@@ -11,17 +11,17 @@ import { plain } from '../../../benson-routing/core/value.js';
 test('Reminder metadata discovery performs no runtime registration or resource access', () => {
   const register: unknown = entry.register; assert.equal(typeof register, 'function');
   if (typeof register !== 'function') assert.fail('register unavailable');
-  for (const registrationMode of ['discovery', 'tool-discovery', 'setup-only', 'setup-runtime', 'cli-metadata']) {
+  for (const registrationMode of ['discovery', 'setup-only', 'setup-runtime', 'cli-metadata']) {
     register({ registrationMode });
   }
 });
-function fixture() {
+function fixture(registrationMode: 'full' | 'tool-discovery' = 'full') {
   const tools = new Map<string, OpenClawPluginToolFactory<2>['create']>();
   const hooks: string[] = [], disposals: (() => void)[] = [], signal = new AbortController();
   const register: unknown = entry.register; assert.equal(typeof register, 'function');
   if (typeof register !== 'function') assert.fail('register unavailable');
   const resources: string[] = [];
-  register({ registrationMode: 'full', resolvePath(input: string) {
+  register({ registrationMode, resolvePath(input: string) {
     resources.push(input); return resolve('output/typescript/integrations/openclaw/plugins/benson-reminder-tool', input);
   }, lifecycle: { signal: signal.signal,
     onDispose(callback: () => void) { disposals.push(callback); } },
@@ -51,6 +51,23 @@ test('Reminder typed entry registers the exact existing manifest roster and leav
   const create = f.tools.get('reminder_task'); assert(create);
   assert.equal(create({ agentId: 'reminder-service', assertInvocationCurrent() {} }), null);
   for (const dispose of f.disposals) dispose();
+});
+
+test('Reminder tool-discovery registers schemas without Domain Run hooks or resource access', async () => {
+  const f = fixture('tool-discovery');
+  assert.deepEqual(f.hooks, []); assert.deepEqual(f.disposals, []);
+  const full = fixture();
+  assert.deepEqual(f.resources, full.resources);
+  assert.deepEqual([...f.tools.keys()].sort(), [...full.tools.keys()].sort());
+  const create = f.tools.get('reminder_task'), fullCreate = full.tools.get('reminder_task'); assert(create && fullCreate);
+  const context: OpenClawPluginToolContext<2> = { agentId: 'main', assertInvocationCurrent() {} };
+  const tool = create(context), fullTool = fullCreate(context); assert(tool && !Array.isArray(tool) && fullTool && !Array.isArray(fullTool));
+  assert.deepEqual(tool.parameters, fullTool.parameters);
+  await assert.rejects(tool.execute('call', { operation: 'list' }), /native_original_source_unavailable/);
+  assert.deepEqual(f.resources, ['../../../../agents/reminder-service/config/recipients.json',
+    '../../../../agents/reminder-service/tools/reminder-service', '../../patches/tool-execution-receipts/manifest.json']);
+  for (const name of Object.keys(PublicSchemas)) assert.equal(f.tools.get(name)?.({ agentId: 'reminder-service', assertInvocationCurrent() {} }), null);
+  for (const dispose of full.disposals) dispose();
 });
 test('Reminder list and intent reject missing shared native source before transaction or child launch', async () => {
   const f = fixture(), identities = loadCanonicalIdentityContract();

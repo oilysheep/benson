@@ -12,7 +12,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry';
 import { copyReplyPayloadMetadata } from 'openclaw/plugin-sdk/reply-payload';
-import { getReplyFromConfig, type ReplyPayload } from 'openclaw/plugin-sdk/reply-runtime';
+import { getReplyFromConfig, type GetReplyOptions, type ReplyPayload } from 'openclaw/plugin-sdk/reply-runtime';
 import { createMainResponseDelivery, createDirectReadResponseDelivery, createDirectAgenticResponseDelivery } from '../../core/response-control.js';
 import { createSourceAdmissionController, createNativeDispatchRunAdmissionController, projectRequestAdmission } from '../../core/request-control.js';
 import { executeJessicaStatusTask } from '../../../../../agents/jessica-vacuum/lib/task.js';
@@ -132,7 +132,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
   if (installerOnly) console.error('Isolated WhatsApp: loaded monitor proof');
   // Read-only test visibility into the host's actual registered, instance-wrapped
   // entry. Never unwrap it or synthesize its plugin/lifecycle authority.
-  const registryUrl = '/repo/node_modules/openclaw/dist/registry-loaded-BugfxX6l.mjs';
+  const registryUrl = '/repo/node_modules/openclaw/dist/registry-loaded-BqhugwOe.mjs';
   const registry = await import(registryUrl) as { r(id: string): {
     plugin: { id: string; config: { resolveAccount(cfg: unknown, id: string): unknown };
       gateway: { startAccount(ctx: unknown): Promise<unknown> } };
@@ -378,9 +378,18 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
           });
         }
         const original = replyOptions.onAgentRunStart;
-        replyOptions.onAgentRunStart = (id: string) => {
+        const originalPrepared = replyOptions.onPreparedAgentRunStart;
+        const observeStart = (id: string) => {
           if (name === 'main-domain-read') { assert(requestDecision); phases.push('main-started'); }
-          runId = id; if (typeof original === 'function') original(id);
+          runId = id;
+        };
+        replyOptions.onAgentRunStart = (...args: Parameters<NonNullable<GetReplyOptions['onAgentRunStart']>>) => {
+          observeStart(args[0]);
+          return typeof original === 'function' ? original(...args) : undefined;
+        };
+        replyOptions.onPreparedAgentRunStart = (...args: Parameters<NonNullable<GetReplyOptions['onPreparedAgentRunStart']>>) => {
+          observeStart(args[0].runId);
+          return typeof originalPrepared === 'function' ? originalPrepared(...args) : undefined;
         };
         replyOptions.disableTools = !domainRead;
         const originalTerminal = replyOptions.onAgentRunTerminalOutcome;
@@ -648,7 +657,7 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
   const restored = existsSync('/tmp/product-recovery-restart');
   if (restored) assert.equal(readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').length, 1,
     'Restart must not replay a settled transaction');
-  const registryUrl = '/repo/node_modules/openclaw/dist/registry-loaded-BugfxX6l.mjs';
+  const registryUrl = '/repo/node_modules/openclaw/dist/registry-loaded-BqhugwOe.mjs';
   const registry = await import(registryUrl) as {
     r(id: string): { plugin: { config: { resolveAccount(cfg: unknown, id: string): unknown };
       gateway: { startAccount(ctx: unknown): Promise<unknown> } };

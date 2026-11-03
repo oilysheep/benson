@@ -7,7 +7,7 @@ unchanged supported extension. No production installation is approved.
 
 | Surface | Exact inventory / responsibility |
 | --- | --- |
-| Official package / host | `@openclaw/whatsapp@2026.10.4` / `openclaw@2026.10.4`; archive integrity and both artifact hashes are authoritative in `manifest.json`. |
+| Official package / host | `@openclaw/whatsapp@2026.10.4` / `openclaw@2026.10.10`; archive integrity and both artifact hashes are authoritative in `manifest.json`. The exact host combination is qualified for TS05's two no-Run reads; it does not extend the separate Core/SDK receipt patch. |
 | Modified upstream artifact | Only `dist/.setup/monitor-QPGSf7uJ.mjs`; two hunks: add `createBensonResponseDispatch` and wrap the existing monitor's `dispatchReplyFromConfig` assembly. |
 | Controller binding | Existing account-scoped `benson.response-controller.v1` runtime context; synchronous `createTurn`, resolver closure plus frozen final native context/signal handoff, synchronous final gate. |
 | Enforcement | Early deny gate plus final gate after native hook assembly; current binding/signal, one resolver, one approved terminal text, no streaming/progress/alternate payload; rejection, unauthorized fallback and duplicate attempts blocked. |

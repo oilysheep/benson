@@ -19,20 +19,23 @@ export default definePluginEntry({
   id: 'benson-reminder-tool', name: 'Benson Reminder Tool',
   description: 'Existing Reminder transactions and native Task entry with controlled Completion.',
   register(api) {
-    if (api.registrationMode !== 'full') return;
-    // Native source capture relocates modules. Anchor existing canonical
-    // resources to the configured package root, never the captured JS URL.
-    const identities = loadCanonicalIdentityContract(api.resolvePath('../../../../agents/reminder-service/config/recipients.json'));
-    const transaction = createReminderTransaction({ servicePath: api.resolvePath('../../../../agents/reminder-service/tools/reminder-service') });
+    const full = api.registrationMode === 'full';
+    if (!full && api.registrationMode !== 'tool-discovery') return;
+    // Retain the selected resource roots before native capture rebinds the
+    // plugin record. Path resolution performs no resource or backend access.
+    const identitiesPath = api.resolvePath('../../../../agents/reminder-service/config/recipients.json');
+    const servicePath = api.resolvePath('../../../../agents/reminder-service/tools/reminder-service');
     const receiptManifest = pathToFileURL(api.resolvePath('../../patches/tool-execution-receipts/manifest.json'));
     const tools = Object.keys(PublicSchemas) as ToolName[];
-    const collector = createOpenClawDomainRunCollector(api, { agentId: 'reminder-service', tools });
+    // Tool discovery advertises capabilities without acquiring Run hooks or
+    // lifecycle ownership. Those remain with the existing full activation.
+    const collector = full ? createOpenClawDomainRunCollector(api, { agentId: 'reminder-service', tools }) : undefined;
     // Transient registration dependencies only; the collector owns native
     // observations, the transaction owns domain execution and durable state.
     type Work = { source: Dependencies; current: Parameters<typeof createReminderToolFactory>[0]['current'];
-      assertExecuting(): void; record: ReturnType<typeof collector.begin>['record'] };
+      assertExecuting(): void; record: ReturnType<NonNullable<typeof collector>['begin']>['record'] };
     const active = new Map<string, Work>();
-    api.lifecycle.onDispose?.(() => active.clear());
+    if (full) api.lifecycle.onDispose?.(() => active.clear());
     for (const name of tools) api.registerTool({ contextVersion: 2, create(context) {
       const work = context.sessionKey ? active.get(context.sessionKey) : undefined;
       if (context.agentId !== 'reminder-service' || !work) return null;
@@ -46,6 +49,10 @@ export default definePluginEntry({
     } }, { name, optional: true });
     api.registerTool({ contextVersion: 2, create(context) {
       if (context.agentId !== 'main') return null;
+      // Native capture relocates modules: use the package-root resolver for
+      // existing nonsecret resources. The transaction runs only at execution.
+      const identities = loadCanonicalIdentityContract(identitiesPath);
+      const transaction = createReminderTransaction({ servicePath });
       let originalHistory: NativeOriginalUserTurns | undefined;
       const tool = createReminderTaskToolFactory({ identities, transaction, resultVersion: 3,
         jsonResult(value, callId, assertCompletion) {
@@ -67,6 +74,7 @@ export default definePluginEntry({
             return { turns: history.turns.map(turn => ({ text: turn.text })), assertCurrent: history.assertCurrent };
           },
           async run(request, work) {
+            if (!collector) fail('reminder_native_scope_unavailable');
             assertInvocationCurrent(work.deps.authority);
             const turn = currentNativeTurn(api, context), caller = turn.caller(context, work.callId);
             const originals = originalHistory;
@@ -77,8 +85,7 @@ export default definePluginEntry({
             const scope = collector.begin(sessionKey, retainedCurrent);
             let provider: Awaited<ReturnType<typeof observeOpenClawToolExecution>> | undefined;
             try {
-              provider = await observeOpenClawToolExecution(sessionKey, retainedCurrent,
-                receiptManifest);
+              provider = await observeOpenClawToolExecution(sessionKey, retainedCurrent, receiptManifest);
               assertInvocationCurrent(work.deps.authority); retainedCurrent();
               const execution = { source: { ...work.deps, authority: { signal: api.lifecycle.signal!, assertCurrent: retainedCurrent } },
                 current: work.source, assertExecuting() { assertInvocationCurrent(work.deps.authority); scope.assertExecuting(); },
