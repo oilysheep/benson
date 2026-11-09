@@ -3,11 +3,11 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
-  "files": ["dist", "openclaw.plugin.json"],
+  "files": ["src", "openclaw.plugin.json"],
   "peerDependencies": {
     "openclaw": "2026.10.10"
   },
   "openclaw": {
-    "extensions": ["./dist/index.js"]
+    "extensions": ["./src/index.ts"]
   }
 }
