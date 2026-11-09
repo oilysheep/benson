@@ -9,15 +9,16 @@ CORE="$ROOT/libexec/reminder-service-core"
 TOOL="$ROOT/tools/reminder-service"
 PLUGIN_DIR="$PKG/integrations/openclaw/plugins/benson-reminder-tool"
 PLUGIN_RUNNER="$PLUGIN_DIR/dist/runner.js"
-PLUGIN_INDEX="$PLUGIN_DIR/dist/index.js"
 PLUGIN_CONTRACTS="$PLUGIN_DIR/dist/contracts.js"
+# Retained transaction/schema corpus. Canonical plugin registration and authority
+# are exercised by benson-reminder-tool/tests/entry.test.ts and task.test.ts.
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 
 for file in AGENTS.md README.md lib/reminder_discovery.py libexec/reminder-service-core tools/reminder-service; do
   [[ -f "$ROOT/$file" ]] || fail "missing $file"
 done
-for file in "$PLUGIN_RUNNER" "$PLUGIN_INDEX" "$PLUGIN_CONTRACTS"; do
+for file in "$PLUGIN_RUNNER" "$PLUGIN_CONTRACTS"; do
   [[ -f "$file" ]] || fail "missing Reminder plugin contract: $file"
 done
 for absent in \
@@ -33,10 +34,10 @@ do
 done
 
 python3 - "$CORE" "$ROOT/lib/reminder_discovery.py" "$TOOL" \
-  "$MAIN_AGENTS" "$ROOT/AGENTS.md" "$PLUGIN_RUNNER" "$PLUGIN_INDEX" "$PLUGIN_CONTRACTS" <<'PY'
+  "$MAIN_AGENTS" "$ROOT/AGENTS.md" "$PLUGIN_RUNNER" "$PLUGIN_CONTRACTS" <<'PY'
 from pathlib import Path
 import sys
-core, discovery, tool, main, reminder, plugin_runner, plugin_index, plugin_contracts = [Path(p).read_text(encoding="utf-8") for p in sys.argv[1:]]
+core, discovery, tool, main, reminder, plugin_runner, plugin_contracts = [Path(p).read_text(encoding="utf-8") for p in sys.argv[1:]]
 for p, text in zip(sys.argv[1:4], (core, discovery, tool)):
     compile(text, p, "exec")
 assert '"automations", "list"' in core
@@ -57,24 +58,14 @@ assert 'custom handoff id' in main
 assert 'tools/reminder-service`' in reminder
 assert 'native child completion' in reminder
 assert 'reminder-result-for-main' not in reminder
-assert 'toolContext.agentId !== "reminder-service"' in plugin_index
-assert 'validateJsonSchemaValue' in plugin_index
-assert 'runReminderService' in plugin_index
-assert 'getConversationSession' in plugin_index
-assert 'readOriginalUserTurns' in plugin_index
-assert 'entry.message.__openclaw?.transport?.channel === "whatsapp"' in plugin_index
-assert 'entry.message.__openclaw?.senderId === runtimeRoute.senderId' in plugin_index
 for name in (
     'benson_reminder_create', 'benson_reminder_list', 'benson_reminder_find',
     'benson_reminder_update', 'benson_reminder_pause', 'benson_reminder_resume',
     'benson_reminder_delete',
 ):
     assert name in plugin_contracts
-assert 'benson_reminder_service' not in plugin_index
 assert 'benson_reminder_service' not in plugin_contracts
-assert 'calendar_event_' not in plugin_index
 assert 'calendar_event_' not in plugin_contracts
-assert 'gog' not in plugin_index.lower()
 assert 'gog' not in plugin_contracts.lower()
 assert '../../../../../agents/reminder-service/tools/reminder-service' in plugin_runner
 print('STATIC_NATIVE_FIRST_CONTRACT=PASS')
