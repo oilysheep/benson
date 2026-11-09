@@ -61,6 +61,9 @@ State:
 - what is explicitly out of scope;
 - the acceptance condition.
 
+Identify the first working vertical slice through the intended user flow and
+the minimum prerequisites and evidence needed to reach its earliest safe E2E.
+
 Do not expand the objective into adjacent cleanup or redesign.
 
 ## Phase 2 — Inspect verified current state
@@ -177,8 +180,8 @@ permission-sensitive, safety-sensitive, and externally observable operations.
 Use LLM reasoning where semantic interpretation, ambiguity, planning, or
 language reasoning is genuinely required.
 
-Apply the root AGENTS.md capability-discovery order and the global research gate
-before selecting an implementation. Architecture Section 7.6 owns native-first
+Apply the global research gate before selecting an implementation.
+Architecture Section 7.6 owns native-first
 preference, core immutability and any explicitly approved exception. A plan must
 not treat an existing OpenClaw core patch as permission for another one.
 
@@ -293,7 +296,7 @@ For each stage:
 - target;
 - exact change;
 - reason;
-- checkpoint;
+- recoverable baseline or existing checkpoint reference, as required by AGENTS.md;
 - validation;
 - expected result;
 - rollback when relevant;
