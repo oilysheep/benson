@@ -1,6 +1,8 @@
 import { AsyncLocalStorage } from 'node:async_hooks';
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 import type { OpenClawPluginApi, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
+import { getPluginRuntimeGatewayRequestScope } from 'openclaw/plugin-sdk/plugin-runtime';
 import { copyReplyPayloadMetadata } from 'openclaw/plugin-sdk/reply-payload';
 import type { ReplyPayload } from 'openclaw/plugin-sdk/reply-runtime';
 import { createMainResponseDelivery } from '../../core/response-control.js';
@@ -10,8 +12,10 @@ import { MAX_RESPONSE_RESULTS, plain, synchronous, fail } from '../../core/value
 import type { AnyDomainResult } from '../../core/contracts.js';
 import type { CurrentRequestEvidence } from '../../core/conversation-context.js';
 import type { Binding6 } from '../../core/completion-contracts.js';
-import { resolveRoute, type IdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
+import type { IdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
+import { createNativeMainRequestAdmission } from './request.js';
 import { renderReminderDomainResult } from '../../../../../agents/reminder-service/lib/presentation.js';
+import { PublicSchemas } from '../../../../../agents/reminder-service/lib/schemas.js';
 import { renderJessicaDomainResult } from '../../../../../agents/jessica-vacuum/lib/presentation.js';
 import { acquireOriginalUserTurns, retainOriginalUserWrite, type NativeOriginalUserTurns } from './conversation.js';
 
@@ -20,6 +24,8 @@ type ToolContext = OpenClawPluginToolContext<2>;
 type Caller = NonNullable<Binding6['caller']>;
 type Registry = OpenClawPluginApi['runtime']['channel']['runtimeContexts'];
 export type ResponseHost = {
+  registrationMode?: OpenClawPluginApi['registrationMode'];
+  logger?: Pick<OpenClawPluginApi['logger'], 'warn'>;
   lifecycle: Pick<OpenClawPluginApi['lifecycle'], 'signal' | 'onDispose'>;
   runtime: { channel: { runtimeContexts: Pick<Registry, 'get' | 'register'> } };
   on: OpenClawPluginApi['on'];
@@ -38,13 +44,80 @@ function nativeTurn(value: unknown): value is NativeTurn {
   return plain(value) && typeof value.source === 'function' && typeof value.caller === 'function' &&
     typeof value.record === 'function' && typeof value.assertCurrent === 'function' && typeof value.originalUserTurns === 'function';
 }
+/** Read-only projection, never authority. At before_main this is the selected
+ * channel dispatch registry; at source_refusal native Tool scope may replace it.
+ * Fingerprints compare technical source/registration identities without paths.
+ */
+export function projectNativeRegistrySelection(value: unknown) {
+  if (!plain(value)) return { registry: value === undefined ? 'absent' : 'unavailable' };
+  if (!Array.isArray(value.plugins) || !Array.isArray(value.tools)) return { registry: 'unavailable' };
+  const plugins: unknown[] = value.plugins, tools: unknown[] = value.tools;
+  const fingerprint = (input: string) => createHash('sha256').update(input).digest('hex');
+  const project = (id: string, names: readonly string[]) => {
+    const records = plugins.filter(record => plain(record) && record.id === id);
+    if (records.length !== 1) return { record: records.length ? 'multiple' : 'absent' };
+    const record = records[0];
+    if (!plain(record)) return { record: 'unavailable' };
+    const registrations = tools.filter(tool => plain(tool) && tool.pluginId === id);
+    const groups = new Map<string, number>();
+    let valid = registrations.length <= 32;
+    for (const registration of registrations) {
+      if (!plain(registration) || !Array.isArray(registration.names) || registration.names.length === 0 || registration.names.length > 32 ||
+        typeof registration.optional !== 'boolean' || registration.names.some(name => typeof name !== 'string' || !names.includes(name))) {
+        valid = false; break;
+      }
+      // Same declared identity and multiplicity as native tool adoption.
+      const identity = JSON.stringify([registration.optional, [...new Set(registration.names)].sort()]);
+      groups.set(identity, (groups.get(identity) ?? 0) + 1);
+    }
+    return { record: 'one', state: record.status === 'loaded' ? record.enabled === true ? 'loaded_enabled' : 'loaded_disabled' : 'other',
+      source: typeof record.source === 'string' && record.source.length > 0 && record.source.length <= 16384
+        ? fingerprint(record.source) : 'unavailable',
+      tools: valid ? fingerprint(JSON.stringify([...groups].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))) : 'unavailable' };
+  };
+  return { registry: 'present',
+    jessica: project('benson-jessica-tool', ['jessica_task', 'jessica_read', 'jessica_execute', 'jessica_validate_completion']),
+    reminder: project('benson-reminder-tool', ['reminder_task', ...Object.keys(PublicSchemas)]),
+  };
+}
+function registrationOwnerDiagnostics(api: ResponseHost, phase: 'before_main' | 'gateway_start', registrationOwner: unknown, selected?: unknown): void {
+  try {
+    api.logger?.warn(`benson.native_registration_owner ${JSON.stringify({ phase,
+      sameRegistryAsSelected: registrationOwner === undefined || selected === undefined ? 'unavailable' : registrationOwner === selected,
+      ...projectNativeRegistrySelection(registrationOwner),
+    })}`);
+  } catch { /* Observation cannot change admission or source refusal. */ }
+}
+function registryDiagnostics(api: ResponseHost, phase: 'before_main' | 'source_refusal', registrationOwner?: unknown): void {
+  try {
+    const scope = getPluginRuntimeGatewayRequestScope();
+    api.logger?.warn(`benson.native_registry_selection ${JSON.stringify({ phase, scope: scope ? 'present' : 'absent',
+      ...projectNativeRegistrySelection(scope?.pluginRegistry) })}`);
+    if (phase === 'before_main') registrationOwnerDiagnostics(api, phase, registrationOwner, scope?.pluginRegistry);
+  } catch {
+    // Observability cannot grant authority or change the original refusal.
+    try { api.logger?.warn(`benson.native_registry_selection ${JSON.stringify({ phase, scope: 'unavailable', registry: 'unavailable' })}`); } catch { /* No raw exception. */ }
+  }
+}
+function sourceUnavailable(api: ResponseHost, reason: 'account_missing' | 'binding_missing' |
+  'binding_invalid' | 'resolver_scope_missing' | 'turn_invalid' | 'group_metadata_missing'): never {
+  // Only closed enums: distinguish discovery ownership from retired lifecycle
+  // without exposing context, source text, identifiers or runtime objects.
+  const mode = api.registrationMode === 'full' || api.registrationMode === 'tool-discovery'
+    ? api.registrationMode : api.registrationMode === undefined ? 'unknown' : 'other';
+  const lifecycle = api.lifecycle.signal ? api.lifecycle.signal.aborted ? 'aborted' : 'active' : 'unavailable';
+  try { api.logger?.warn(`benson.native_original_source_unavailable reason=${reason} registration_mode=${mode} lifecycle=${lifecycle}`); } catch { /* Refuse below. */ }
+  registryDiagnostics(api, 'source_refusal');
+  return fail('native_original_source_unavailable');
+}
 export function currentNativeTurn(api: ResponseHost, context: ToolContext): NativeTurn {
   const accountId = context.deliveryContext?.accountId;
-  if (!accountId) fail('native_original_source_unavailable');
+  if (!accountId) sourceUnavailable(api, 'account_missing');
   const binding: unknown = api.runtime.channel.runtimeContexts.get({ channelId: 'whatsapp', accountId, capability });
-  if (!plain(binding) || typeof binding.current !== 'function') fail('native_original_source_unavailable');
+  if (binding === undefined) sourceUnavailable(api, 'binding_missing');
+  if (!plain(binding) || typeof binding.current !== 'function') sourceUnavailable(api, 'binding_invalid');
   const turn: unknown = synchronous(binding.current(context), 'native_original_source_must_be_synchronous');
-  if (!nativeTurn(turn)) fail('native_original_source_unavailable');
+  if (!nativeTurn(turn)) sourceUnavailable(api, 'turn_invalid');
   return turn;
 }
 
@@ -52,6 +125,10 @@ export function registerResponseController(api: ResponseHost, identities: Identi
   const signal = api.lifecycle.signal, dispose = api.lifecycle.onDispose;
   if (!signal || !dispose) fail('native_plugin_lifecycle_unavailable');
   signal.throwIfAborted();
+  // Observation only: preserve the public registration frame for comparison
+  // with the later dispatch selection. This reference never grants authority.
+  let diagnosticRegistrationOwner: unknown;
+  try { diagnosticRegistrationOwner = getPluginRuntimeGatewayRequestScope()?.pluginRegistry; } catch { /* UNKNOWN, never a fallback. */ }
   const scope = new AsyncLocalStorage<NativeTurn>();
   const key = { channelId: 'whatsapp', accountId: identities.accountId, capability };
   if (api.runtime.channel.runtimeContexts.get(key) !== undefined) fail('native_response_binding_already_owned');
@@ -63,41 +140,35 @@ export function registerResponseController(api: ResponseHost, identities: Identi
   const binding = Object.freeze({
     current(context: ToolContext) {
       const turn = scope.getStore();
-      if (!turn) fail('native_original_source_unavailable');
+      if (!turn) sourceUnavailable(api, 'resolver_scope_missing');
       turn.source(context); return turn;
     },
     createTurn(input: { ctx: unknown; replyOptions: unknown }) {
       if (!plain(input.ctx) || !plain(input.replyOptions)) fail('native_response_context_invalid');
-      const ctx = input.ctx, captured = Object.freeze(Object.fromEntries(
-        ['Provider', 'Surface', 'AccountId', 'SenderId', 'From', 'To', 'MessageSid', 'SessionKey', 'RawBody'].map(name => [name, ctx[name]])));
-      const text = (name: string) => { const value = captured[name]; if (typeof value !== 'string' || !value.trim()) fail('native_response_context_invalid'); return value; };
-      if (text('Provider') !== 'whatsapp' || text('Surface') !== 'whatsapp' || text('AccountId') !== identities.accountId) fail('native_response_route_invalid');
-      const route = resolveRoute(identities, { channel: 'whatsapp', accountId: identities.accountId, to: text('From'), senderId: text('SenderId') });
-      if (!route) fail('native_response_requester_untrusted');
-      const requestId = text('MessageSid'), sessionKey = text('SessionKey');
       let handoff: { ctx: Record<string, unknown>; abortSignal: AbortSignal } | undefined;
       let executionLive = true, started = false, main: Caller | undefined, terminal: boolean | undefined;
       const calls = new Map<string, string>();
       const results = new Map<string, { value: AnyDomainResult; current(): void }>();
-      const current = () => {
+      const nativeCurrent = () => {
         signal.throwIfAborted(); handoff?.abortSignal.throwIfAborted();
         if (!live || !handoff || api.runtime.channel.runtimeContexts.get(key) !== binding) fail('native_response_authority_retired');
-        for (const name of Object.keys(captured)) {
-          if (ctx[name] !== captured[name] || handoff.ctx[name] !== captured[name]) fail('native_response_source_changed');
-        }
       };
+      const request = createNativeMainRequestAdmission(identities, input.ctx, nativeCurrent);
+      const { route, requestId, sessionKey } = request;
+      const current = request.assertSourceCurrent;
       const invocation = (context: ToolContext) => {
         current();
         if (!executionLive || context.agentId !== 'main' || context.sessionKey !== sessionKey ||
           context.deliveryContext?.channel !== 'whatsapp' || context.deliveryContext.accountId !== identities.accountId ||
           context.deliveryContext.to !== route.sourceId || context.requesterSenderId !== route.senderId) fail('native_original_source_mismatch');
+        request.assertCurrent();
         synchronous(context.assertInvocationCurrent(), 'native_original_source_authority_must_be_synchronous');
       };
       const turn: NativeTurn = Object.freeze({
         assertCurrent: current,
         source(context: ToolContext): CurrentRequestEvidence {
           invocation(context);
-          return { request: text('RawBody'),
+          return { request: request.request,
             binding: { conversationRef: sessionKey, channel: 'whatsapp', accountId: identities.accountId,
               kind: route.sourceType === 'group' ? 'group' : 'direct', peerId: route.sourceId, threadId: null, requesterId: route.senderId },
             currentTurn() {
@@ -107,11 +178,11 @@ export function registerResponseController(api: ResponseHost, identities: Identi
                 // A group peer is not its sender. Reuse the exact native
                 // observation already validated against this resolver input.
                 const metadata = originalWrite?.message.__openclaw;
-                if (writeUnavailable || !plain(metadata) || !plain(metadata.senderIdentity)) fail('native_original_source_unavailable');
+                if (writeUnavailable || !plain(metadata) || !plain(metadata.senderIdentity)) sourceUnavailable(api, 'group_metadata_missing');
                 sender = { source: 'native_metadata', id: route.senderId, identity: structuredClone(metadata.senderIdentity),
                   name: metadata.senderName ?? null, username: metadata.senderUsername ?? null };
               }
-              return { entryId: requestId, role: 'user', text: text('RawBody'), sender,
+              return { entryId: requestId, role: 'user', text: request.request, sender,
                 inputProvenance: { kind: 'external_user' } };
             },
             assertCurrent() { invocation(context); },
@@ -123,7 +194,7 @@ export function registerResponseController(api: ResponseHost, identities: Identi
           if (!context.sessionId || !originalWrite || writeUnavailable) fail('native_original_context_unavailable');
           const source = turn.source(context);
           const history = await acquireOriginalUserTurns({ target: { agentId: 'main', sessionKey, sessionId: context.sessionId },
-            binding: source.binding, request: text('RawBody'), write: originalWrite, assertCurrent: current });
+            binding: source.binding, request: request.request, write: originalWrite, assertCurrent: current });
           invocation(context); return history;
         },
         caller(context: ToolContext, callId: string) {
@@ -147,7 +218,7 @@ export function registerResponseController(api: ResponseHost, identities: Identi
         try {
           current();
           if (context.sessionKey !== sessionKey) fail('native_original_context_unavailable');
-          const observed = retainOriginalUserWrite(message, { requestId, request: text('RawBody'),
+          const observed = retainOriginalUserWrite(message, { requestId, request: request.request,
             senderId: route.senderId, accountId: identities.accountId });
           // Native admission and runtime persistence may observe the same
           // original write. Repeated observation is not another original input;
@@ -189,11 +260,13 @@ export function registerResponseController(api: ResponseHost, identities: Identi
           if (started || !plain(raw) || !Object.isFrozen(raw) || !plain(raw.ctx) ||
             Reflect.ownKeys(raw).length !== 2 || !(raw.abortSignal instanceof AbortSignal)) fail('native_response_handoff_invalid');
           const nativeSignal = raw.abortSignal;
-          started = true; handoff = { ctx: raw.ctx, abortSignal: nativeSignal }; current();
+          started = true; handoff = { ctx: raw.ctx, abortSignal: nativeSignal };
           try {
+            request.admit(raw.ctx); current();
+            registryDiagnostics(api, 'before_main', diagnosticRegistrationOwner);
             return await scope.run(turn, () => response.resolveNativeCandidate({ resolve, signal: nativeSignal,
               copyMetadata: (source, approved) => copyReplyPayloadMetadata(source as ReplyPayload, approved) }));
-          } finally { executionLive = false; binders.delete(turn); terminals.delete(turn); writes.delete(turn); }
+          } finally { executionLive = false; request.retire(); binders.delete(turn); terminals.delete(turn); writes.delete(turn); }
         },
       });
     },
@@ -210,6 +283,15 @@ export function registerResponseController(api: ResponseHost, identities: Identi
     }
   });
   api.on('agent_end', (event, context) => { const turn = scope.getStore(); if (turn && context.agentId === 'main') terminals.get(turn)?.(context, event.success); });
+  api.on('gateway_start', () => {
+    if (!live || signal.aborted) return;
+    let selected: unknown;
+    try { selected = getPluginRuntimeGatewayRequestScope()?.pluginRegistry; } catch { /* UNKNOWN observation. */ }
+    registrationOwnerDiagnostics(api, 'gateway_start', diagnosticRegistrationOwner, selected);
+  });
   const lease = api.runtime.channel.runtimeContexts.register({ ...key, context: binding, abortSignal: signal });
-  dispose(() => { live = false; lease.dispose(); scope.disable(); });
+  dispose(() => {
+    diagnosticRegistrationOwner = undefined;
+    live = false; lease.dispose(); scope.disable();
+  });
 }

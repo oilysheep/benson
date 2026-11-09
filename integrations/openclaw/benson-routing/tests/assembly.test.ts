@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { currentNativeTurn, registerResponseController, type ResponseHost } from '../adapters/openclaw/response.js';
+import { currentNativeTurn, projectNativeRegistrySelection, registerResponseController, type ResponseHost } from '../adapters/openclaw/response.js';
 import { loadIdentityContract } from '../../../../agents/reminder-service/lib/identity.js';
 import type { OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
 import { plain } from '../core/value.js';
@@ -47,7 +47,7 @@ test('release package roots select only emitted entries and exact canonical mani
     const pkg: unknown = JSON.parse(readFileSync(packagePath, 'utf8'));
     assert(plain(pkg) && plain(pkg.openclaw) && plain(pkg.peerDependencies));
     assert.deepEqual(pkg.openclaw.extensions, ['./src/index.js']);
-    assert.equal(pkg.peerDependencies.openclaw, '2026.10.4');
+    assert.equal(pkg.peerDependencies.openclaw, '2026.10.10');
     assert(existsSync(resolve('output/typescript', directory, 'src/index.js')));
     assert.deepEqual(readFileSync(resolve('output/typescript', directory, 'openclaw.plugin.json')),
       readFileSync(resolve(directory, 'openclaw.plugin.json')));
@@ -90,22 +90,42 @@ function host() {
     recipients: [{ id: 'operator', type: 'person', channel: 'whatsapp', to: '+15550000001' }] });
   registerResponseController(api, identities);
   return { api, abort, replace(value: unknown) { binding = value; },
+    hookNames() { return [...hooks.keys()].sort(); },
     dispose() { for (const callback of disposals) callback(); },
     hook(name: string, event: unknown, context: unknown) {
       const handler = hooks.get(name); assert.equal(typeof handler, 'function');
       if (typeof handler === 'function') return handler(event, context);
       throw new Error('Missing hook');
     },
-    turn(requestId = 'request-1', from = '+15550000001') {
+    turn(requestId = 'request-1', from = '+15550000001', delta: Record<string, unknown> = {}) {
       assert(plain(binding) && typeof binding.createTurn === 'function');
       const ctx = { Provider: 'whatsapp', Surface: 'whatsapp', AccountId: 'test', SenderId: '+15550000001',
-        From: from, To: '+15550000002', MessageSid: requestId, SessionKey: 'agent:main:main', RawBody: 'בדיקה' };
+        From: from, To: '+15550000002', MessageSid: requestId, SessionKey: 'agent:main:main', RawBody: 'בדיקה', ...delta };
       const result: unknown = binding.createTurn({ ctx, replyOptions: {} });
       assert(isController(result));
       return { ctx, controller: result };
     },
   };
 }
+test('gateway_start observes only closed registration metadata and ignores event contents', () => {
+  const h = host(), messages: string[] = [];
+  h.api.logger = { warn(message) { messages.push(message); } };
+  assert.deepEqual(h.hookNames(), ['agent_end', 'before_message_write', 'before_tool_call', 'gateway_start']);
+  h.hook('gateway_start', { config: 'private-event', port: 12345 }, { workspaceDir: 'private-context' });
+  assert.deepEqual(messages, ['benson.native_registration_owner {"phase":"gateway_start","sameRegistryAsSelected":"unavailable","registry":"absent"}']);
+  h.api.logger = { warn() { throw new Error('private-logger-failure'); } };
+  assert.doesNotThrow(() => h.hook('gateway_start', {}, {}));
+  h.api.logger = { warn(message) { messages.push(message); } };
+  h.dispose();
+  h.hook('gateway_start', {}, {});
+  assert.equal(messages.length, 1, 'Disposed observation cannot retain or report its registration owner');
+});
+test('gateway_start observation is inactive after lifecycle abort', () => {
+  const h = host(); let logs = 0;
+  h.api.logger = { warn() { logs++; } };
+  h.abort.abort(); h.hook('gateway_start', {}, {});
+  assert.equal(logs, 0);
+});
 interface Controller {
   resolve(resolve: () => Promise<unknown>, handoff: unknown): Promise<unknown>;
   beforeNativeDeliver<T>(payload: T, info: { kind: string }): T | null;
@@ -118,6 +138,30 @@ const context = (): OpenClawPluginToolContext<2> => ({ agentId: 'main', sessionK
   assertInvocationCurrent() {} });
 const runContext = { agentId: 'main', sessionKey: 'agent:main:main', sessionId: 'session-main', runId: 'run-main' };
 const payload = () => ({ text: 'תשובה מבוקרת' });
+
+for (const delta of [{ Provider: 'foreign' }, { Surface: 'foreign' }, { AccountId: 'foreign' },
+  { SenderId: '+15550000003' }, { From: '+15550000003' }, { MessageSid: '' }, { SessionKey: '' },
+  { SessionKey: 'unscoped' }, { SessionKey: 'agent:jessica-vacuum:main' }, { RawBody: ' ' }]) {
+  test(`Request rejects invalid native admission before Main: ${Object.keys(delta)[0]}=${Object.values(delta)[0]}`, () => {
+    const h = host(); assert.throws(() => h.turn('request', '+15550000001', delta)); h.dispose();
+  });
+}
+for (const failure of ['oversized', 'source-changed', 'foreign-final', 'pre-aborted', 'disposed', 'replaced'] as const) {
+  test(`Request admission fails closed before the native Main resolver: ${failure}`, async () => {
+    const h = host(), turn = h.turn('request', '+15550000001', { RawBody: failure === 'oversized' ? 'א'.repeat(4097) : 'בדיקה' });
+    const abort = new AbortController(), final = { ...turn.ctx };
+    if (failure === 'source-changed') turn.ctx.RawBody = 'changed';
+    if (failure === 'foreign-final') final.SessionKey = 'agent:foreign:main';
+    if (failure === 'pre-aborted') abort.abort();
+    if (failure === 'disposed') h.dispose();
+    if (failure === 'replaced') h.replace({});
+    let main = 0;
+    await assert.rejects(turn.controller.resolve(async () => { main++; return payload(); }, Object.freeze({ ctx: final, abortSignal: abort.signal })));
+    assert.equal(main, 0); assert.equal(turn.controller.beforeNativeDeliver(payload(), { kind: 'final' }), null);
+    await assert.rejects(turn.controller.resolve(async () => { main++; return payload(); }, Object.freeze({ ctx: final, abortSignal: new AbortController().signal })));
+    assert.equal(main, 0); h.dispose();
+  });
+}
 
 for (const mode of ['original', 'missing', 'foreign-sender', 'repeated-identical'] as const) {
   test(`group current source requires its own original native sender: ${mode}`, async () => {
@@ -151,6 +195,90 @@ test('registration requires lifecycle and refuses another owner', () => {
     recipients: [{ id: 'x', type: 'person', channel: 'whatsapp', to: '+15550000001' }] })), /already_owned/);
   assert.throws(() => currentNativeTurn(h.api, context()), /source_unavailable/);
   h.dispose();
+});
+
+for (const reason of ['account_missing', 'binding_missing', 'binding_invalid', 'resolver_scope_missing', 'turn_invalid'] as const) {
+  test(`source refusal logs only its static branch and preserves the failure: ${reason}`, () => {
+    const h = host(), tool = context(), logs: string[] = [];
+    h.api.logger = { warn(message) { logs.push(message); } };
+    if (reason === 'account_missing') delete tool.deliveryContext;
+    if (reason === 'binding_missing') h.replace(undefined);
+    if (reason === 'binding_invalid') h.replace({ privateValue: 'must-not-be-logged' });
+    if (reason === 'turn_invalid') h.replace({ current() { return { privateValue: 'must-not-be-logged' }; } });
+    assert.throws(() => currentNativeTurn(h.api, tool), { name: 'TypeError', message: 'native_original_source_unavailable' });
+    assert.deepEqual(logs, [`benson.native_original_source_unavailable reason=${reason} registration_mode=unknown lifecycle=active`,
+      'benson.native_registry_selection {"phase":"source_refusal","scope":"absent","registry":"absent"}']);
+    h.dispose();
+  });
+}
+
+test('diagnostic logger failure cannot change source refusal', () => {
+  const h = host();
+  h.api.logger = { warn() { throw new Error('logger unavailable'); } };
+  assert.throws(() => currentNativeTurn(h.api, context()), { name: 'TypeError', message: 'native_original_source_unavailable' });
+  h.dispose();
+});
+
+for (const mode of ['full', 'tool-discovery', 'private-value-must-not-be-logged'] as const) {
+  test(`source diagnostics expose only a closed registration enum: ${mode === 'full' || mode === 'tool-discovery' ? mode : 'other'}`, () => {
+    const h = host(), logs: string[] = [];
+    Object.assign(h.api, { registrationMode: mode });
+    h.api.logger = { warn(message) { logs.push(message); } };
+    h.replace(undefined);
+    assert.throws(() => currentNativeTurn(h.api, context()), { name: 'TypeError', message: 'native_original_source_unavailable' });
+    assert.deepEqual(logs, [`benson.native_original_source_unavailable reason=binding_missing registration_mode=${mode === 'full' || mode === 'tool-discovery' ? mode : 'other'} lifecycle=active`,
+      'benson.native_registry_selection {"phase":"source_refusal","scope":"absent","registry":"absent"}']);
+    h.abort.abort();
+    h.dispose();
+    logs.length = 0;
+    assert.throws(() => currentNativeTurn(h.api, context()), { name: 'TypeError', message: 'native_original_source_unavailable' });
+    assert.deepEqual(logs, [`benson.native_original_source_unavailable reason=binding_missing registration_mode=${mode === 'full' || mode === 'tool-discovery' ? mode : 'other'} lifecycle=aborted`,
+      'benson.native_registry_selection {"phase":"source_refusal","scope":"absent","registry":"absent"}']);
+  });
+}
+
+test('registry diagnostic compares source and complete native declared identities without exposing them', () => {
+  const record = { id: 'benson-jessica-tool', status: 'loaded', enabled: true, source: '/private/module.js', secret: 'NEVER_EMIT' };
+  const first = { pluginId: record.id, names: ['jessica_task', 'jessica_read', 'jessica_task'], optional: true };
+  const second = { pluginId: record.id, names: ['jessica_execute'], optional: true };
+  const input = { plugins: [record], tools: [first, second], privateValue: 'NEVER_EMIT' };
+  const projection = projectNativeRegistrySelection(input);
+  assert.equal(projection.registry, 'present');
+  assert.deepEqual(projectNativeRegistrySelection({ plugins: [record], tools: [second, { ...first, names: ['jessica_read', 'jessica_task'] }] }), projection);
+  for (const tools of [[first], [first, first, second], [first, { ...second, optional: false }], [{ ...first, names: ['jessica_task'] }, second]]) {
+    assert.notDeepEqual(projectNativeRegistrySelection({ plugins: [record], tools }), projection);
+  }
+  assert.notDeepEqual(projectNativeRegistrySelection({ ...input, plugins: [{ ...record, source: '/different/module.js' }] }), projection);
+  assert.doesNotMatch(JSON.stringify(projection), /NEVER_EMIT|private|module|jessica_task/);
+});
+
+test('registry diagnostic rejects unnamed, foreign or malformed identities and distinguishes absent/duplicate owners', () => {
+  const record = { id: 'benson-jessica-tool', status: 'loaded', enabled: true, source: '/module.js' };
+  for (const names of [[], ['PRIVATE_NAME_NEVER_EMIT'], [17], Array(33).fill('jessica_task')]) {
+    const projected = projectNativeRegistrySelection({ plugins: [record], tools: [{ pluginId: record.id, names, optional: true }] });
+    assert.equal(projected.jessica?.tools, 'unavailable');
+    assert.doesNotMatch(JSON.stringify(projected), /PRIVATE_NAME_NEVER_EMIT/);
+  }
+  assert.deepEqual(projectNativeRegistrySelection(undefined), { registry: 'absent' });
+  assert.deepEqual(projectNativeRegistrySelection({ privateValue: 'NEVER_EMIT' }), { registry: 'unavailable' });
+  assert.equal(projectNativeRegistrySelection({ plugins: [], tools: [] }).jessica?.record, 'absent');
+  assert.equal(projectNativeRegistrySelection({ plugins: [record, record], tools: [] }).jessica?.record, 'multiple');
+});
+
+test('before-Main registry diagnostics cannot change admission or expose native input', async () => {
+  for (const loggerThrows of [false, true]) {
+    const h = host(), logs: string[] = [], turn = h.turn('private-request');
+    h.api.logger = { warn(message) { if (loggerThrows) throw Error('private logger exception'); logs.push(message); } };
+    let main = 0;
+    await turn.controller.resolve(async () => { main++; h.hook('agent_end', { success: true }, runContext); return payload(); },
+      Object.freeze({ ctx: { ...turn.ctx }, abortSignal: new AbortController().signal }));
+    assert.equal(main, 1);
+    assert.deepEqual(logs, loggerThrows ? [] : [
+      'benson.native_registry_selection {"phase":"before_main","scope":"absent","registry":"absent"}',
+      'benson.native_registration_owner {"phase":"before_main","sameRegistryAsSelected":"unavailable","registry":"absent"}',
+    ]);
+    h.dispose();
+  }
 });
 
 test('native metadata and discovery modes create no runtime registration or configuration reads', () => {

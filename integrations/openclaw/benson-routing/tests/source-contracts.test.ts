@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import test from 'node:test';
 import { type Static } from 'typebox';
-import { createSourceAdmissionController, createNativeDispatchRunAdmissionController, projectRequestAdmission } from '../core/request-control.js';
+import { createSourceAdmissionController, createNativeDispatchRunAdmissionController, createMainRequestAdmissionController, projectRequestAdmission } from '../core/request-control.js';
 import { createCompletionAuthority, acceptAgentCompletion, validateCompletion, reconstructCompletion } from '../core/completion.js';
 import { controlReadResponse, controlResponse } from '../core/response-control.js';
 import { createNoRunDomainResult, createCompletionDomainResult } from '../core/domain-result.js';
@@ -14,6 +14,35 @@ import { boundedCopy, decode, JsonSchema, jsonCopy, type JsonValue } from '../co
 import { formatUserDatetime, UserDatetimeError } from '../../../../shared/benson-datetime.js';
 
 const currentTime = Date.parse('2026-10-17T10:00:00Z');
+test('pre-Main admission enforces the bounded route, private ownership and retirement without a classifier', () => {
+  const events: string[] = [];
+  let live = true, requesterId = 'reader', targetAgentId = 'main';
+  const controller = createMainRequestAdmissionController({ assertCurrent() { events.push('current'); assert(live, 'native_retired'); },
+    authorize() { events.push('authorization'); return { requesterId, targetAgentId }; } });
+  const input = { schemaVersion: 1, kind: 'candidate', reason: null, requestId: 'native-input', sessionKey: 'agent:main:main', request: 'Read current status' };
+  targetAgentId = 'jessica-vacuum'; assert.throws(() => controller.admit(input), /route_unauthorized/);
+  targetAgentId = 'main'; const admission = controller.admit(input);
+  assert.deepEqual(events, ['current', 'authorization', 'current', 'authorization']);
+  assert.equal(admission.destination, 'main'); assert.equal(admission.requesterId, 'reader');
+  assert(Object.isFrozen(admission)); controller.assertCurrent(admission);
+  assert.throws(() => controller.assertCurrent({ ...admission }), /unowned/);
+  assert.throws(() => controller.admit(input), /duplicate/);
+  requesterId = 'other'; assert.throws(() => controller.assertCurrent(admission), /unauthorized/);
+  requesterId = 'reader'; live = false; assert.throws(() => controller.assertCurrent(admission), /native_retired/);
+  live = true; controller.retire(); assert.throws(() => controller.assertCurrent(admission), /retired/);
+});
+test('pre-Main admission rejects unqualified, malformed and oversized inputs before authorization', () => {
+  let authorized = 0;
+  const make = () => createMainRequestAdmissionController({ assertCurrent() {}, authorize() { authorized++; return { requesterId: 'reader', targetAgentId: 'main' }; } });
+  const input = { schemaVersion: 1, kind: 'candidate', reason: null, requestId: 'input', sessionKey: 'agent:main:main', request: 'בדיקה' };
+  for (const delta of [{ schemaVersion: 2 }, { kind: 'main_only', reason: 'unsupported_input', request: null },
+    { kind: 'bypass', reason: 'already_owned', request: null }, { requestId: '' }, { sessionKey: '' },
+    { request: ' ' }, { request: 'א'.repeat(4097) }, { modelPermission: true }]) assert.throws(() => make().admit({ ...input, ...delta }));
+  assert.equal(authorized, 0);
+  assert.equal(make().admit({ ...input, request: 'א'.repeat(4096) }).destination, 'main');
+  assert.throws(() => createMainRequestAdmissionController({ async assertCurrent() {},
+    authorize: () => ({ requesterId: 'reader', targetAgentId: 'main' }) }).admit(input), /synchronous/);
+});
 test('native dispatch Run v4 retains private read-only authority without becoming NoRun v3', async () => {
   let live = true, authorized = true;
   const deps = { nativeDispatch: { requestId: 'native-run-input', domain: 'jessica-vacuum', subject: 'reader' },

@@ -4,7 +4,8 @@
   "description": "Structured tool boundary for the existing deterministic Benson Reminder Service.",
   "version": "1.0.0",
   "activation": {
-    "onCapabilities": ["tool"]
+    "onCapabilities": ["tool"],
+    "onAgentHarnesses": ["openclaw"]
   },
   "contracts": {
     "tools": [

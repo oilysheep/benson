@@ -3,8 +3,9 @@ import { fileURLToPath } from 'node:url';
 // Isolated stand-in for the retained Python wrapper -> core subprocess chain.
 if (process.argv[2] === 'leaf') {
   process.on('SIGTERM', () => {});
-  if (!process.send) throw new Error('Fixture leaf requires readiness IPC');
-  process.send({ pid: process.pid }, () => process.disconnect());
+  const disconnect = process.disconnect?.bind(process);
+  if (!process.send || !disconnect) throw new Error('Fixture leaf requires readiness IPC');
+  process.send({ pid: process.pid }, () => disconnect());
   setInterval(() => {}, 1_000);
   setTimeout(() => process.exit(2), 15_000);
 } else {

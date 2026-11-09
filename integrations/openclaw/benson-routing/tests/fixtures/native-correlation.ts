@@ -22,6 +22,7 @@ import { createCompletionAuthority, acceptAgentCompletion, validateCompletion } 
 import type { Binding6, Completion6 } from '../../core/completion-contracts.js';
 import type { NativeDispatchRunAdmission } from '../../core/contracts.js';
 import { boundedCopy } from '../../core/value.js';
+import { validateStartupTargetMetadata } from './native-isolation.js';
 import { validateDomainResultEnvelope, createCompletionDomainResult } from '../../core/domain-result.js';
 import { createResponseV3Envelope } from '../../core/legacy-response.js';
 import { createMainResponseDelivery } from '../../core/response-control.js';
@@ -472,6 +473,11 @@ export async function worker(target: 'native-correlation' | 'main-interception' 
   const whatsappMonitorOnly = process.env.BENSON_NATIVE_WHATSAPP_MONITOR_ONLY === '1';
   const whatsappInstallerOnly = process.env.BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY === '1';
   const reminderProduct = process.env.BENSON_NATIVE_REMINDER_PRODUCT_ONLY === '1';
+  const startupRegistryOnly = process.env.BENSON_NATIVE_STARTUP_REGISTRY_ONLY === '1';
+  const targetMetadata = existsSync('/target-registration-metadata.json')
+    ? validateStartupTargetMetadata(JSON.parse(readFileSync('/target-registration-metadata.json', 'utf8'))) : undefined;
+  assert(!targetMetadata || startupRegistryOnly);
+  assert(!startupRegistryOnly || reminderProduct);
   assert(!reminderProduct || whatsappInstallerOnly);
   assert(!whatsappInstallerOnly || (whatsappMonitorOnly && target === 'whatsapp-response-delivery'));
   assert(!completionV6Only || correlation);
@@ -516,7 +522,7 @@ process.stdout.write(JSON.stringify(value));
     writeFileSync('/tmp/config.json', JSON.stringify({ gateway: { mode: 'local', bind: 'loopback', auth: { mode: 'none' } },
       plugins: { slots: { memory: 'none' } }, discovery: { mdns: { mode: 'off' } } }));
     const cli = '/repo/node_modules/openclaw/openclaw.mjs';
-    execFileSync('/usr/bin/node', [cli, 'plugins', 'install', 'npm:@openclaw/whatsapp@2026.10.4', '--pin'], {
+    execFileSync('/usr/bin/node', [cli, 'plugins', 'install', 'npm:@openclaw/whatsapp@2026.10.10', '--pin'], {
       encoding: 'utf8', timeout: 60_000, stdio: ['ignore', 'pipe', 'pipe'], maxBuffer: 1024 * 1024,
       env: { ...process.env, NPM_CONFIG_OFFLINE: 'true', NPM_CONFIG_USERCONFIG: '/tmp/user.npmrc',
         NPM_CONFIG_GLOBALCONFIG: '/tmp/global.npmrc', NPM_CONFIG_IGNORE_SCRIPTS: 'true',
@@ -540,8 +546,12 @@ process.stdout.write(JSON.stringify(value));
     const hash = () => createHash('sha256').update(readFileSync(`${root}/${manifest.target}`)).digest('hex');
     assert.equal(hash(), manifest.beforeSha256);
     execFileSync('/usr/bin/patch', ['--batch', '--fuzz=0', '--forward', '-p1', '-d', root,
-      '--input', '/whatsapp-response-controller/2026.10.4.patch'], { stdio: 'pipe' });
+      '--input', '/whatsapp-response-controller/2026.10.10.patch'], { stdio: 'pipe' });
     assert.equal(hash(), manifest.afterSha256);
+    if (targetMetadata) for (const [file, expected] of Object.entries(targetMetadata.whatsapp)) {
+      assert.equal(createHash('sha256').update(readFileSync(`${root}/${file}`)).digest('hex'), expected,
+        `Installed fixture differs from the current target WhatsApp artifact: ${file}`);
+    }
     writeFileSync('/tmp/native-install-evidence.json', JSON.stringify({ root, version: plugin.version,
       integrity: install.integrity, trustedOfficialInstall: true, trustReason: plugin.trust.reason, patchedSha256: hash() }));
     console.error('Isolated WhatsApp: native install and patch verified');
@@ -770,6 +780,15 @@ process.stdout.write(JSON.stringify(value));
     assert.deepEqual(JSON.parse(readFileSync(`${path}/package.json`, 'utf8')).openclaw.extensions, ['./src/index.js']);
     productEntries[id!] = { enabled: true, hooks: { allowConversationAccess: true } };
   }
+  if (targetMetadata) {
+    const relocated = targetMetadata.projection.pluginPaths.map(path =>
+      path.replace('/home/oa/projects/benson/output/typescript/', '/repo/output/typescript/'));
+    assert.deepEqual([...productPaths].sort(), [...relocated].sort());
+    productPaths.splice(0, productPaths.length, ...relocated);
+    for (const entry of targetMetadata.projection.benson) {
+      assert.deepEqual(productEntries[entry.id], { enabled: entry.enabled, hooks: { allowConversationAccess: entry.allowConversationAccess } });
+    }
+  }
   const config: OpenClawPluginApi['config'] = { gateway: { mode: 'local', bind: 'loopback', port: 19491, auth: { mode: 'none' }, controlUi: { enabled: false } },
     ...correlation ? {} : { diagnostics: { flags: ['reply.profiler'] }, logging: { consoleLevel: 'debug' as const } },
     ...supportedNativeOnly ? { tts: { auto: 'off' as const } } : {},
@@ -777,7 +796,8 @@ process.stdout.write(JSON.stringify(value));
     agents: { ...completionV6Only || whatsappInstallerOnly ? { ownership: 'explicit' as const } : {},
       defaults: { ...completionV6Only || whatsappInstallerOnly ? { systemAgent: { agentId: 'main' } } : {}, workspace: '/tmp/workspace', model: { primary: 'fixture-local/correlation',
       ...correlation ? {} : { fallbacks: ['fixture-local/secondary'] } }, skipBootstrap: true },
-      entries: completionV6Only || whatsappInstallerOnly ? { main: { workspace: '/tmp/workspace' }, 'jessica-vacuum': { workspace: '/tmp/workspace' },
+      entries: completionV6Only || whatsappInstallerOnly ? { main: { workspace: '/tmp/workspace',
+        ...targetMetadata ? { tools: targetMetadata.projection.mainTools } : {} }, 'jessica-vacuum': { workspace: '/tmp/workspace' },
         ...whatsappInstallerOnly ? { 'reminder-service': { workspace: '/tmp/workspace' } } : {} }
         : { [correlation ? 'jessica-vacuum' : 'main']: { workspace: '/tmp/workspace' } } },
     tools: { allow: exposedTools, toolSearch: false, codeMode: codeModeOnly ? { enabled: true, executor: 'node' } : false },
@@ -787,7 +807,7 @@ process.stdout.write(JSON.stringify(value));
         cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 }, contextWindow: 128000, maxTokens: 256 })) } } },
     ...whatsappMonitorOnly ? { channels: { whatsapp: { enabled: true, dmPolicy: 'allowlist' as const,
       allowFrom: ['+15550000001'], accounts: Object.fromEntries(Array.from({ length: whatsappInstallerOnly ? 25 : 8 }, (_, index) => [`fixture-${index}`, { authDir: `/tmp/empty-fixture-auth/fixture-${index}` }])), sendReadReceipts: false } } } : {},
-    plugins: { allow: [pluginId, ...Object.keys(productEntries), ...whatsappMonitorOnly ? ['whatsapp'] : []], slots: { memory: 'none' }, load: { paths: ['/tmp/plugin', ...productPaths, ...whatsappMonitorOnly && !whatsappInstallerOnly ? ['/whatsapp'] : []] }, entries: { ...productEntries, ...whatsappMonitorOnly ? { whatsapp: { enabled: true } } : {}, [pluginId]: { enabled: true,
+    plugins: { allow: [pluginId, ...Object.keys(productEntries), ...whatsappMonitorOnly ? ['whatsapp'] : []], slots: { memory: 'none' }, load: { paths: ['/tmp/plugin', ...productPaths, ...whatsappMonitorOnly && !whatsappInstallerOnly ? ['/whatsapp'] : []] }, entries: { ...productEntries, ...targetMetadata ? { codex: { enabled: targetMetadata.projection.codexEnabled } } : {}, ...whatsappMonitorOnly ? { whatsapp: { enabled: true } } : {}, [pluginId]: { enabled: true,
       ...completionV6Only || whatsappInstallerOnly ? { hooks: { allowConversationAccess: true } } : {} } } } };
   if (whatsappInstallerOnly) {
     // Preserve the native install's config metadata/last-good lineage. A raw
@@ -798,8 +818,13 @@ process.stdout.write(JSON.stringify(value));
     });
     console.error('Isolated WhatsApp: fixture config applied through native CLI');
   } else writeFileSync('/tmp/config.json', JSON.stringify(config));
+  if (targetMetadata) {
+    const mainTools: unknown = JSON.parse(execFileSync('/usr/bin/node', ['/repo/node_modules/openclaw/openclaw.mjs',
+      'config', 'get', 'agents.entries.main.tools', '--json'], { encoding: 'utf8', timeout: 30_000, maxBuffer: 65536 }));
+    assert.deepEqual(mainTools, targetMetadata.projection.mainTools);
+  }
   let coldToolInventory: unknown;
-  try { if (reminderProduct) {
+  try { if (reminderProduct && !startupRegistryOnly) {
     // A separate native process has no full-mode registry to reuse. Exercise
     // scoped tool-discovery before Gateway startup or any business input.
     execFileSync('/usr/bin/node', ['--input-type=module', '-e', `
@@ -836,8 +861,11 @@ process.stdout.write(JSON.stringify(value));
   let gateway = startGateway(), exited = once(gateway, 'exit');
   const stopGateway = async () => {
     gateway.kill('SIGTERM');
-    const kill = setTimeout(() => gateway.kill('SIGKILL'), 10_000);
-    try { await exited; } finally { clearTimeout(kill); }
+    const kill = setTimeout(() => gateway.kill('SIGKILL'), startupRegistryOnly ? 330_000 : 10_000);
+    try {
+      const [code, signal] = await exited;
+      if (startupRegistryOnly) { assert.equal(code, 0); assert.equal(signal, null); }
+    } finally { clearTimeout(kill); }
   };
   const watcher = watch('/tmp');
   const readReport = async () => {
@@ -858,7 +886,17 @@ process.stdout.write(JSON.stringify(value));
   };
   try {
     let result = await readReport();
-    if (reminderProduct) {
+    if (startupRegistryOnly) {
+      await stopGateway();
+      const final: unknown = JSON.parse(readFileSync('/tmp/startup-registry-final.json', 'utf8'));
+      assert.deepEqual(final, { agentRuns: 0, toolCalls: 0, socketAttempts: 0, observationCount: 1, haReads: 0, reminderTransactions: 0 });
+      assert.equal(requests, 0); assert.equal(mainReadCarriers.length, 0);
+      result = { ...result, final, naturalShutdown: true, ...targetMetadata ? {
+        targetMetadata: { mainTools: targetMetadata.projection.mainTools, taskRegistrationFlagsMatch: true,
+          pluginPathsMatchAfterExplicitRelocation: true, whatsappArtifactPinsMatch: Object.keys(targetMetadata.whatsapp).length,
+          operationalStateCopied: false, targetCredentialsMounted: false,
+          limits: 'Selected sanitized metadata and artifact equivalence only. Paths/workspace/model/identity/state and observer differ from the resident Gateway. Production registry identity and source-binding failure are not reproduced.' } } : {} };
+    } else if (reminderProduct) {
       const first = result;
       await stopGateway();
       unlinkSync(report); writeFileSync('/tmp/product-recovery-restart', 'same-artifact\n');
@@ -871,10 +909,12 @@ process.stdout.write(JSON.stringify(value));
         recovery: { ...first.recovery, coldRestart: true, restoredFreshRead: true, replayedInputs: 0 },
         restoredResourceUsage: restored.resourceUsage };
     }
-    if (mainHookSurfaceOnly) {
+    if (startupRegistryOnly) {
+      assert.equal(result.startupOnly, true);
+    } else if (mainHookSurfaceOnly) {
       assert.equal(requests, 0); assert.equal(mainReadCarriers.length, 0);
     } else if (target === 'whatsapp-response-delivery') {
-      assert.equal(result.whatsappPlugin, '2026.10.4');
+      assert.equal(result.whatsappPlugin, '2026.10.10');
       assert(Array.isArray(result.cases));
       assert(result.cases.length >= (reminderProduct ? 2 : whatsappMonitorOnly ? 8 : 10));
     } else if (!correlation) {

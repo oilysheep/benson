@@ -1,14 +1,56 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { runIsolatedFixture } from './fixtures/native-isolation.js';
+import { runIsolatedFixture, validateStartupTargetMetadata } from './fixtures/native-isolation.js';
 import { plain } from '../core/value.js';
 import { validateDomainResultEnvelope } from '../core/domain-result.js';
+
+test('startup target metadata rejects permission drift, unknown fields and artifact path injection', () => {
+  const ids = ['benson-routing', 'benson-jessica-tool', 'benson-reminder-tool'];
+  const valid = { projection: { codexEnabled: false, cronEnabled: false,
+    mainTools: { allow: ['jessica_task', 'reminder_task'], codeMode: false },
+    pluginPaths: ids.map(id => '/home/oa/projects/benson/output/typescript/integrations/openclaw/' + (id === 'benson-routing' ? id : 'plugins/' + id)),
+    benson: ids.map(id => ({ id, enabled: true, allowConversationAccess: true })), whatsappEnabled: true },
+    whatsapp: Object.fromEntries(['package.json', 'openclaw.plugin.json', 'dist/index.js', 'dist/.setup/monitor-B5qdng3U.mjs'].map(file => [file, 'a'.repeat(64)])) };
+  assert.deepEqual(validateStartupTargetMetadata(valid), valid);
+  for (const mutate of [
+    (v: typeof valid) => v.projection.mainTools.allow.push('jessica_read'),
+    (v: typeof valid) => { v.projection.cronEnabled = true; },
+    (v: typeof valid) => { v.projection.benson[0]!.allowConversationAccess = false; },
+    (v: typeof valid) => { v.projection.pluginPaths[0] = '/arbitrary/plugin'; },
+    (v: typeof valid) => { v.whatsapp['../../credentials.json'] = 'a'.repeat(64); },
+    (v: typeof valid) => { Object.assign(v, { token: 'unapproved-field' }); },
+    (v: typeof valid) => { v.whatsapp['dist/index.js'] = 'invalid'; },
+  ]) { const changed = structuredClone(valid); mutate(changed); assert.throws(() => validateStartupTargetMetadata(changed)); }
+});
+
+test('native startup observes the full registration owner without Main input or delivery', { timeout: 460_000 }, () => {
+  const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'startup-registry');
+  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.startupOnly, true);
+  assert.equal(result.mainInputs, 0); assert.equal(result.providerRequests, 0); assert.equal(result.naturalShutdown, true);
+  assert.deepEqual(result.final, { agentRuns: 0, toolCalls: 0, socketAttempts: 0, observationCount: 1, haReads: 0, reminderTransactions: 0 });
+  assert.deepEqual(result.isolation, { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false });
+  if (process.env.BENSON_NATIVE_STARTUP_TARGET_METADATA) {
+    assert(plain(result.targetMetadata)); assert.deepEqual(result.targetMetadata.mainTools, { allow: ['jessica_task', 'reminder_task'], codeMode: false });
+    assert.equal(result.targetMetadata.whatsappArtifactPinsMatch, 4);
+    assert.equal(result.targetMetadata.taskRegistrationFlagsMatch, true);
+    assert.equal(result.targetMetadata.pluginPathsMatchAfterExplicitRelocation, true);
+    assert.equal(result.targetMetadata.operationalStateCopied, false); assert.equal(result.targetMetadata.targetCredentialsMounted, false);
+  }
+  console.log(JSON.stringify(result));
+});
 
 test('isolated product entries preserve list and reject unsafe v1/v2 history before child or mutation', { timeout: 300_000 }, () => {
   const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'reminder-product');
   assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.reminderProduct, true);
   assert.equal(result.transactionCount, 2); assert.equal(result.providerRequests, 10);
   assert.equal(result.coreSdkPatched, false);
+  assert(Array.isArray(result.requestEvents)); assert.equal(result.requestEvents.length, 8);
+  for (let index = 0; index < 4; index++) {
+    assert.deepEqual(result.requestEvents.slice(index * 2, index * 2 + 2), [
+      { phase: 'admitted-main', requestId: `product-reminder-${index}`, sessionKey: 'agent:main:main', destination: 'main' },
+      { phase: 'main-started', requestId: `product-reminder-${index}`, sessionKey: 'agent:main:main' },
+    ]);
+  }
   assert.deepEqual(result.recovery, { retiredAuthorityRejected: true, retiredResolverCalls: 0,
     hotReloadBindingAvailable: false, sameArtifact: true, coldRestart: true, restoredFreshRead: true, replayedInputs: 0 });
   assert.deepEqual(result.isolation, { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false });
@@ -17,7 +59,7 @@ test('isolated product entries preserve list and reject unsafe v1/v2 history bef
 
 test('pinned WhatsApp patch enforces the Controller before native in-memory delivery', { timeout: 180_000 }, () => {
   const result = runIsolatedFixture('whatsapp-response-delivery');
-  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.whatsappPlugin, '2026.10.4');
+  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.whatsappPlugin, '2026.10.10');
   assert.deepEqual(result.isolation, { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false });
   assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 21);
   const negativeHandoffs = result.cases.filter((item: unknown) => plain(item) && item.injectedHandoffFault === true);
@@ -42,7 +84,7 @@ test('native npm installation establishes current WhatsApp authority and native 
   assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.monitorAssembly, true);
   assert.equal(result.trustedReadOwner, true); assert.equal(result.authorityRetired, true);
   assert(plain(result.nativeInstall)); assert.equal(result.nativeInstall.trustedOfficialInstall, true);
-  assert.equal(result.nativeInstall.version, '2026.10.4');
+  assert.equal(result.nativeInstall.version, '2026.10.10');
   assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 25);
   assert.equal(result.providerRequests, 30); assert.deepEqual(result.fallbackModels, ['correlation', 'secondary']);
   assert(plain(result.supportedTranscriptProbe));
