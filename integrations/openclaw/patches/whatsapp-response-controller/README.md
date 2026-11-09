@@ -1,17 +1,18 @@
-# Isolated WhatsApp Response Controller candidate
+# WhatsApp Response Controller exception
 
 This is an upstream WhatsApp Plugin patch, not an OpenClaw core/SDK patch or an
-unchanged supported extension. No production installation is approved.
+unchanged supported extension. The pinned2026.10.10 adaptation is approved for
+the bounded TS05 deployment. Jessica status and Reminder list passed real WhatsApp E2E on2026-11-09; the Gateway is stopped and any new activation needs approval (Plan §11.64).
 
 ## Complete patch inventory
 
 | Surface | Exact inventory / responsibility |
 | --- | --- |
-| Official package / host | `@openclaw/whatsapp@2026.10.4` / `openclaw@2026.10.10`; archive integrity and both artifact hashes are authoritative in `manifest.json`. The exact host combination is qualified for TS05's two no-Run reads; it does not extend the separate Core/SDK receipt patch. |
-| Modified upstream artifact | Only `dist/.setup/monitor-QPGSf7uJ.mjs`; two hunks: add `createBensonResponseDispatch` and wrap the existing monitor's `dispatchReplyFromConfig` assembly. |
+| Official package / host | `@openclaw/whatsapp@2026.10.10` / `openclaw@2026.10.10`; archive integrity and both artifact hashes are authoritative in `manifest.json`. The exact host combination is qualified for TS05's two no-Run reads; it does not extend the separate Core/SDK receipt patch. |
+| Modified upstream artifact | Only `dist/.setup/monitor-B5qdng3U.mjs`; two hunks: add `createBensonResponseDispatch` and wrap the existing monitor's `dispatchReplyFromConfig` assembly. |
 | Controller binding | Existing account-scoped `benson.response-controller.v1` runtime context; synchronous `createTurn`, resolver closure plus frozen final native context/signal handoff, synchronous final gate. |
 | Enforcement | Early deny gate plus final gate after native hook assembly; current binding/signal, one resolver, one approved terminal text, no streaming/progress/alternate payload; rejection, unauthorized fallback and duplicate attempts blocked. |
-| Unmodified upstream owners | Core and SDK; channel registration/account identity; monitor/listener/reconnect; lifecycle/queue; formatting/transport/receipts. No production install or runtime modification. |
+| Unmodified by this plugin diff | Channel registration/account identity, listener/reconnect, lifecycle/queue, formatting/transport/receipts. The separate approved two-owner Core workspace correction is inventoried in Plan §11.64; this row does not claim stock Core or authorize deployment. |
 | Benson consumer | Existing Response Controller owner and existing domain/admission/Completion owners. NativeDispatchReadAdmission v3 is Benson code; it adds no further plugin diff or native authority. |
 | Proof-only instrumentation | Ephemeral symbol visibility and synthetic socket loader in the isolated fixture, outside this patch; never deploy that instrumentation or fixture policy/backend/binding. |
 | Recovery / upgrade | Pin exact archive and before/after hashes, zero-fuzz apply, retain prior recovery; unknown bytes/version reject. Requalify the complete matrix after any approved upgrade; no auto-reapply. |
@@ -46,12 +47,22 @@ env -i PATH=/usr/bin HOME="$proof_seed/home" \
   npm install --prefix "$proof_seed/project" --cache "$proof_seed/cache" \
   --ignore-scripts --legacy-peer-deps --omit=dev --omit=peer --no-audit --no-fund \
   --fetch-retries=0 --fetch-timeout=30000 --registry=https://registry.npmjs.org \
-  @openclaw/whatsapp@2026.10.4
+  @openclaw/whatsapp@2026.10.10
 export BENSON_WHATSAPP_NPM_CACHE="$proof_seed/cache"
 ```
 
-With the matching OpenClaw dependency installed, build and run the emitted
-`whatsapp-response-delivery.test.js`. Missing cache/archive, offline misses or any
+With the matching OpenClaw dependency installed, build and run the bounded TS05
+product profile:
+
+```sh
+node --test --test-name-pattern='isolated product entries' \
+  output/typescript/integrations/openclaw/benson-routing/tests/whatsapp-response-delivery.test.js
+```
+
+The other historical profiles in that file include the separate Core/SDK receipt
+exception and agentic flows; they are not qualified for this no-Run release.
+Focused Controller/monitor/Request proofs use the isolated qualification harness
+recorded in Plan §11.62, with receipt injection disabled. Missing cache/archive, offline misses or any
 version/integrity mismatch fail; there is no online fallback inside the proof.
 Local defaults reuse the slice checkpoints. Only `_cacache` is mounted read-only;
 npm logs/settings are excluded. The installed profile uses the original native
@@ -95,4 +106,5 @@ assembly, preserve previous recovery, regenerate only the approved insertion,
 and repeat the isolated matrix plus independent review before requesting any
 deployment. Replace this patch with an official supported extension/upstream
 integration under the explicit Phase 2 backlog item. Restoring source or files
-cannot undo messages; this candidate sends no external messages.
+cannot undo messages. Qualification sends no external messages; production channel
+actions require separate action-time approval.

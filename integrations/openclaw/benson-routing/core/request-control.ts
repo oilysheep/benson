@@ -41,6 +41,41 @@ export function projectRequestAdmission(raw: unknown): ProjectedAdmission {
 function validRequest(value: unknown): value is string {
   return typeof value === 'string' && !!value.trim() && Buffer.byteLength(value, 'utf8') <= MAX_CLASSIFIER_REQUEST_BYTES;
 }
+/** Private pre-Main admission, not a serialized grant or a domain operation
+ * authorization. The native adapter owns source facts and the live callback;
+ * the existing domain owners still authorize each delegated task. */
+export function createMainRequestAdmissionController(deps: {
+  assertCurrent(): unknown;
+  authorize(): Readonly<{ requesterId: string; targetAgentId: string }>;
+}) {
+  let issued: Readonly<{ destination: 'main'; requesterId: string; requestId: string;
+    sessionKey: string; taskEnvelope: TaskEnvelope }> | undefined;
+  let retired = false;
+  const current = () => {
+    if (retired) fail('request_admission_retired');
+    assertion(deps.assertCurrent(), 'request_authority_must_be_synchronous');
+    const authority = synchronous(deps.authorize(), 'request_authority_must_be_synchronous');
+    if (!identifier(authority.requesterId) || authority.targetAgentId !== 'main' ||
+        issued && authority.requesterId !== issued.requesterId) fail('request_main_route_unauthorized');
+    return authority;
+  };
+  return Object.freeze({
+    admit(raw: unknown) {
+      if (issued) fail('request_admission_duplicate');
+      const projected = projectRequestAdmission(raw);
+      if (projected.kind !== 'candidate') fail('request_admission_not_external_candidate');
+      const authority = current();
+      issued = freeze({ destination: 'main' as const, requesterId: authority.requesterId,
+        ...projected.trusted, taskEnvelope: projected.taskEnvelope });
+      return issued;
+    },
+    assertCurrent(admission: unknown) {
+      if (!issued || admission !== issued) fail('request_admission_unowned');
+      current();
+    },
+    retire() { retired = true; },
+  });
+}
 /** Version 4 deliberately has no validateOutcome/NoRun entry. Serialized fields
  * correlate the request; only the retained native/domain callback grants use. */
 export function createNativeDispatchRunAdmissionController(deps: {

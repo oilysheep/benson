@@ -1,0 +1,37 @@
+--- a/dist/io.plugin-metadata-XHc3KOiJ.mjs
++++ b/dist/io.plugin-metadata-XHc3KOiJ.mjs
+@@ -166,6 +166,8 @@
+ 	const sumMetric = (key) => snapshots.reduce((total, snapshot) => total + snapshot.metrics[key], 0);
+ 	return restorePluginMetadataSnapshot(buildPluginMetadataSnapshot({
+ 		...firstSnapshot,
++		// Config-wide inventory has no single execution workspace. Keep registryIndex provenance.
++		workspaceDir: void 0,
+ 		index,
+ 		discovery,
+ 		manifestRegistry,
+--- a/dist/prepared-model-runtime.facts-CJ1YlUZA.mjs
++++ b/dist/prepared-model-runtime.facts-CJ1YlUZA.mjs
+@@ -197,18 +197,21 @@
+ }
+ /** Gateway-hosted prepared loads borrow unchanged instances from the live Gateway registry. */
+ function resolveLendingGatewayRegistry(input, metadataSnapshot) {
++	// Prepared inputs already carry the native-normalized admitted execution workspace.
++	if (input.workspaceDir !== void 0 && metadataSnapshot.workspaceDir !== void 0 && input.workspaceDir !== metadataSnapshot.workspaceDir) throw new Error("Prepared plugin metadata workspace conflicts with requested workspace");
+ 	if (input.allowGatewaySubagentBinding !== true || input.env !== void 0) return;
+ 	const requestRegistry = getPluginRuntimeGatewayRequestScope()?.pluginRegistry;
+ 	const registry = requestRegistry && getPluginRegistryGatewayOwner(requestRegistry)?.current();
+-	return registry && getPluginRuntimeLoadContext(registry)?.workspaceDir === metadataSnapshot.workspaceDir ? registry : void 0;
++	return registry && getPluginRuntimeLoadContext(registry)?.workspaceDir === (input.workspaceDir ?? metadataSnapshot.workspaceDir) ? registry : void 0;
+ }
+ /** Loads generic plugin facts without acquiring model, catalog, or credential state. */
+ function loadPreparedInboundPluginRegistry(input, metadataSnapshot = prepareOwnedPluginLoadContext(input, input.env ?? process.env, void 0), configuredHarnessRuntimes, onPrimaryRegistry) {
++	const workspaceDir = input.workspaceDir ?? metadataSnapshot.workspaceDir;
+ 	const gatewayRegistry = resolveLendingGatewayRegistry(input, metadataSnapshot);
+ 	const reusableGatewayRegistry = gatewayRegistry && getReusablePluginRuntimeActivation(gatewayRegistry, {
+ 		config: input.config,
+ 		env: process.env,
+-		workspaceDir: metadataSnapshot.workspaceDir,
++		workspaceDir,
+ 		metadataSnapshot
+ 	}) && listRuntimePluginIdsFromRegistry(gatewayRegistry).every(createRuntimePluginManifestLookup(gatewayRegistry, metadataSnapshot.manifestRegistry.plugins)) ? gatewayRegistry : void 0;
+ 	const registry = reusableGatewayRegistry ?? loadAgentRuntimePluginRegistryHandle({

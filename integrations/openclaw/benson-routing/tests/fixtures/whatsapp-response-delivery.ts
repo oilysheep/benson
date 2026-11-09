@@ -3,12 +3,12 @@ import { observeOpenClawToolExecution } from '../../adapters/openclaw/tool-execu
 import { acquireOriginalUserTurns, retainOriginalUserWrite } from '../../adapters/openclaw/conversation.js';
 import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
-import { EventEmitter } from 'node:events';
+import { EventEmitter, once } from 'node:events';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
-import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import type { OpenClawPluginApi } from 'openclaw/plugin-sdk/plugin-entry';
 import { copyReplyPayloadMetadata } from 'openclaw/plugin-sdk/reply-payload';
@@ -50,12 +50,48 @@ type NativeModule = {
 const monitorOnly = process.env.BENSON_NATIVE_WHATSAPP_MONITOR_ONLY === '1';
 const installerOnly = process.env.BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY === '1';
 const reminderProductOnly = process.env.BENSON_NATIVE_REMINDER_PRODUCT_ONLY === '1';
+const startupRegistryOnly = process.env.BENSON_NATIVE_STARTUP_REGISTRY_ONLY === '1';
+const startupEffects = { agentRuns: 0, toolCalls: 0, socketAttempts: 0 };
+const startupRegistryLog = () => '/tmp/openclaw/openclaw-' + new Date().toISOString().slice(0, 10) + '.log';
+function startupRegistryMessages(): unknown[] {
+  const marker = 'benson.native_registration_owner ', path = startupRegistryLog();
+  if (!existsSync(path)) return [];
+  return readFileSync(path, 'utf8').split('\n').filter(line => line.includes(marker)).map(line => {
+    const outer: unknown = JSON.parse(line); assert(plain(outer));
+    const message = Object.values(outer).find(value => typeof value === 'string' && value.includes(marker));
+    assert(typeof message === 'string');
+    const value: unknown = JSON.parse(message.slice(message.indexOf(marker) + marker.length)); assert(plain(value));
+    return value;
+  }).filter(value => value.phase === 'gateway_start');
+}
 const transportSlot = '__bensonIsolatedWhatsAppSocketFactory';
 const transportGlobal = globalThis as unknown as Record<string, unknown>;
+if (startupRegistryOnly) {
+  isolated();
+  assert.equal(process.env.OPENCLAW_SKIP_CHANNELS, '1');
+  assert.equal(process.env.OPENCLAW_SKIP_CRON, '1');
+  transportGlobal[transportSlot] = () => { startupEffects.socketAttempts++; throw new Error('Startup-only fixture forbids sockets'); };
+}
 if (monitorOnly && transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled !== true) {
   isolated();
   transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled = true;
   registerHooks({ load(url, context, nextLoad) {
+    if (reminderProductOnly && new URL(url).pathname.endsWith('/adapters/openclaw/request.js') && !new URL(url).searchParams.has('benson-original')) {
+      // Observe the real product controller after successful admission. This
+      // wrapper neither grants authority nor substitutes a fixture controller.
+      return { format: 'module', shortCircuit: true, source:
+        `export * from ${JSON.stringify(url + '?benson-original')};
+         import {createNativeMainRequestAdmission as actual} from ${JSON.stringify(url + '?benson-original')};
+         export function createNativeMainRequestAdmission(...args) {
+           const request = actual(...args);
+           return Object.freeze({...request, admit(ctx) {
+             const admitted = request.admit(ctx);
+             const events = globalThis.__bensonIsolatedRequestEvents ??= [];
+             events.push({phase:'admitted-main',requestId:admitted.requestId,sessionKey:admitted.sessionKey,destination:admitted.destination});
+             return admitted;
+           }});
+         }` };
+    }
     if (reminderProductOnly && new URL(url).pathname.endsWith('/ha-transport.js') && !new URL(url).searchParams.has('benson-original')) {
       return { format: 'module', shortCircuit: true, source:
         `export * from ${JSON.stringify(url + '?benson-original')};
@@ -71,9 +107,9 @@ if (monitorOnly && transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled !== t
            }
          }); }` };
     }
-    if (new URL(url).pathname.endsWith('/socket-close-DU7eerAa.mjs') && !new URL(url).searchParams.has('benson-original')) {
+    if (new URL(url).pathname.endsWith('/socket-close-BvdLXlbQ.mjs') && !new URL(url).searchParams.has('benson-original')) {
       const loaded = nextLoad(url, context);
-      assert.equal(createHash('sha256').update(String(loaded.source)).digest('hex'), 'c54b159b54b59812995e90a02bcd38f543fe54a82ccc0dcd43c988bc2eeb6c93');
+      assert.equal(createHash('sha256').update(String(loaded.source)).digest('hex'), 'cbaf38b5c0329b5696564950a5caeaecd4eed86666c29fc6aaaca85805cdaafd');
       return {
         format: 'module', shortCircuit: true,
         source: `export * from ${JSON.stringify(url + '?benson-original')};
@@ -615,7 +651,7 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     assert.equal(readAuthority?.(), false, 'Native plugin disable must retire previously captured authority');
     assert.notEqual(registration.captureReadAuthority()?.(), true, 'Retired entry must not mint live authority');
   }
-  writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.4', monitorAssembly: true,
+  writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.10', monitorAssembly: true,
     cases, supportedTranscriptProbe, trustedReadOwner: installerOnly ? true : readAuthority?.() === true,
     ...installerOnly ? { nativeInstall, authorityRetired: readAuthority?.() === false } : {},
     limits: 'Stock native plugin registration/monitor/listener with isolated socket only. No real server authentication or production authority.' });
@@ -630,6 +666,17 @@ function registerReminderProductObservations(api: OpenClawPluginApi) {
   const children: { sessionKey: string; success: boolean }[] = [];
   const settlements = new Map<string, { promise: Promise<void>; resolve(): void }>();
   const rejected: string[] = [], rejections = [Promise.withResolvers<void>(), Promise.withResolvers<void>()];
+  const requestEvents = () => {
+    const events = transportGlobal.__bensonIsolatedRequestEvents;
+    assert(Array.isArray(events)); return events;
+  };
+  api.on('before_agent_run', (_event, ctx) => {
+    if (ctx.agentId !== 'main') return;
+    const events = requestEvents(), admission: unknown = events.at(-1);
+    assert(plain(admission)); assert.equal(admission.phase, 'admitted-main');
+    assert.equal(admission.destination, 'main'); assert.equal(admission.sessionKey, ctx.sessionKey);
+    events.push({ phase: 'main-started', requestId: admission.requestId, sessionKey: ctx.sessionKey });
+  });
   api.on('before_tool_call', (event, ctx) => {
     if (event.toolName !== 'reminder_task' && !event.toolName.startsWith('jessica_') && !event.toolName.startsWith('benson_reminder_')) return;
     assert(ctx.toolCallId && ctx.runId && ctx.sessionKey);
@@ -650,7 +697,7 @@ function registerReminderProductObservations(api: OpenClawPluginApi) {
     if (ctx.agentId === 'main' && ctx.runId) settlements.get(ctx.runId)?.resolve();
     if (ctx.agentId === 'reminder-service' || ctx.agentId === 'jessica-vacuum') { assert(ctx.sessionKey); children.push({ sessionKey: ctx.sessionKey, success: event.success }); }
   });
-  return { calls, results, children, rejected, settlements, rejections: rejections.map(item => item.promise), failed: failed.promise };
+  return { calls, results, children, rejected, settlements, requestEvents, rejections: rejections.map(item => item.promise), failed: failed.promise };
 }
 async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType<typeof registerReminderProductObservations>) {
   isolated();
@@ -704,6 +751,11 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
         message: { conversation: text }, messageTimestamp: Math.floor(Date.now()/1000), pushName: 'Fixture sender' }] });
       await Promise.race([deadline, observed.failed, index === 1 || index === 2 ? observed.rejections[index - 1] : accepted.promise, monitor.then(() => { throw new Error('Monitor stopped before delivery'); })]);
       const mainCalls = calls.filter(call => call.name === 'reminder_task' || call.name === 'jessica_task');
+      const expectedId = restored ? 'product-restored' : `product-reminder-${index}`;
+      assert.deepEqual(observed.requestEvents().slice(index * 2, index * 2 + 2), [
+        { phase: 'admitted-main', requestId: expectedId, sessionKey: 'agent:main:main', destination: 'main' },
+        { phase: 'main-started', requestId: expectedId, sessionKey: 'agent:main:main' },
+      ], 'The actual Request Controller must admit and route this exact input before native Main');
       assert.equal(mainCalls.length, index + 1); const mainCall = mainCalls[index]!;
       const settlement = observed.settlements.get(mainCall.runId); assert(settlement);
       await Promise.race([deadline, observed.failed, settlement.promise]);
@@ -735,7 +787,7 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
     if (restored) {
       assert.equal(sends.length, 1); assert.equal(calls.length, 1); assert.deepEqual(errors, []);
       writeReport({ probe: 'PASS', cases, calls, children, transactionCount: 2,
-        resourceUsage: process.resourceUsage(), restoredFreshRead: true });
+        requestEvents: observed.requestEvents(), resourceUsage: process.resourceUsage(), restoredFreshRead: true });
       return;
     }
     assert.deepEqual(calls.map(call => call.name), ['reminder_task', 'reminder_task', 'reminder_task', 'jessica_task']);
@@ -764,8 +816,9 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
     const connection = channel.runtimeContexts.get({ ...responseKey, capability: 'connection-controller' }) as { getActiveListener(): { close(): Promise<void> } };
     assert(connection); await Promise.race([deadline, connection.getActiveListener().close()]);
     assert.equal(sends.length, 2); assert.deepEqual(errors, []);
-    writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.4', reminderProduct: true, cases, calls, children,
+    writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.10', reminderProduct: true, cases, calls, children,
       coreSdkPatched: false, resourceUsage: process.resourceUsage(),
+      requestEvents: observed.requestEvents(),
       productEntries: ['benson-routing', 'benson-reminder-tool', 'benson-jessica-tool'], haReads: transportGlobal.__bensonIsolatedHaReads,
       transactionCount: transactions.length, recovery: { retiredAuthorityRejected: true, retiredResolverCalls,
         hotReloadBindingAvailable: channel.runtimeContexts.get(responseKey) !== undefined, sameArtifact: true },
@@ -776,10 +829,63 @@ async function reminderProductProof(api: OpenClawPluginApi, observed: ReturnType
   }
 }
 
+/** Empty disposable state and absent credentials are prerequisites. Skip flags
+ * prevent channel startup/cron only; they do NOT suppress native recovery. */
+async function startupRegistryProof() {
+  const signal = AbortSignal.timeout(60_000), changes = watch('/tmp/openclaw');
+  const read = () => {
+    const messages = startupRegistryMessages();
+    if (messages.length) {
+      assert.equal(messages.length, 1); const value = messages[0]; assert(plain(value));
+      assert.deepEqual(Object.keys(value).sort(), ['phase', 'sameRegistryAsSelected', 'registry', 'jessica', 'reminder'].sort());
+      assert.equal(value.registry, 'present');
+      assert(value.sameRegistryAsSelected === true || value.sameRegistryAsSelected === 'unavailable');
+      for (const [name, tools] of [['jessica', 'd6114a3dc76f02a1dff017b731d76cde221108d67235ef1f805b619157cf5fea'],
+        ['reminder', '47a76111821e22e639a02e853801b36dda96352cc60c6ac1b3be52aa4ea45fe6']]) {
+        const owner: unknown = value[name!]; assert(plain(owner));
+        assert.deepEqual(Object.keys(owner).sort(), ['record', 'source', 'state', 'tools']);
+        assert.equal(owner.record, 'one'); assert.equal(owner.state, 'loaded_enabled');
+        assert.equal(owner.tools, tools); assert(typeof owner.source === 'string'); assert.match(owner.source, /^[0-9a-f]{64}$/);
+      }
+      return value;
+    }
+    return undefined;
+  };
+  try {
+    let observation = read();
+    while (!observation) {
+      const waiter = new AbortController();
+      try {
+        const changed = once(changes, 'change', { signal: AbortSignal.any([signal, waiter.signal]) });
+        observation = read();
+        if (!observation) { await changed; observation = read(); }
+        else { waiter.abort(); await Promise.allSettled([changed]); }
+      } finally { waiter.abort(); }
+    }
+    writeReport({ probe: 'PASS', startupOnly: true, observation, mainInputs: 0,
+      limits: 'Native full registration observation only; empty isolated state, no credentials or external network. Skip flags do not suppress recovery. No production root cause or WhatsApp E2E proven.' });
+  } finally { changes.close(); }
+}
 export default {
   id: reminderProductOnly ? 'benson-ts04-product-observer' : 'benson-jessica-tool',
   register(api: OpenClawPluginApi) {
     isolated();
+    if (startupRegistryOnly) {
+      api.on('before_agent_run', () => { startupEffects.agentRuns++; });
+      api.on('before_tool_call', () => { startupEffects.toolCalls++; });
+      process.once('exit', () => {
+        const reads = transportGlobal.__bensonIsolatedHaReads;
+        writeFileSync('/tmp/startup-registry-final.json', JSON.stringify({ ...startupEffects,
+          observationCount: startupRegistryMessages().length,
+          haReads: Array.isArray(reads) ? reads.length : 0,
+          reminderTransactions: existsSync('/tmp/reminder-transactions.jsonl') ? readFileSync('/tmp/reminder-transactions.jsonl', 'utf8').trim().split('\n').length : 0 }));
+      });
+      api.on('gateway_start', async () => {
+        try { await startupRegistryProof(); }
+        catch (error) { writeReport({ probe: 'FAIL', error: String(error) }); }
+      });
+      return;
+    }
     if (reminderProductOnly) {
       const observed = registerReminderProductObservations(api);
       api.on('gateway_start', async () => {
@@ -1122,11 +1228,11 @@ export default {
         // is mounted read-only; only private symbols are exported for this proof.
         registerHooks({ load(url, context, nextLoad) {
           const loaded = nextLoad(url, context);
-          if (url.endsWith('/monitor-QPGSf7uJ.mjs')) return { ...loaded,
+          if (url.endsWith('/monitor-B5qdng3U.mjs')) return { ...loaded,
             source: String(loaded.source) + '\nexport { createBensonResponseDispatch, deliverWebReply, normalizeWhatsAppSendResult };\n' };
           return loaded;
         } });
-        const moduleUrl = '/whatsapp/dist/.setup/monitor-QPGSf7uJ.mjs';
+        const moduleUrl = '/whatsapp/dist/.setup/monitor-B5qdng3U.mjs';
         const native = await import(moduleUrl) as NativeModule;
         const setterUrl = '/whatsapp/dist/runtime-setter-api.js';
         const setter = await import(setterUrl) as { setWhatsAppRuntime(runtime: OpenClawPluginApi['runtime']): void };
@@ -1268,7 +1374,7 @@ export default {
             errors, controller: delivery.snapshot(), nativeHandoffReceived: handoff !== undefined,
             originalArgumentsForwarded: forwarded, nativeGateCalls, injectedHandoffFault: name.startsWith('handoff-') });
         }
-        writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.4', cases,
+        writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.10', cases,
           limits: 'Actual pinned WhatsApp delivery implementation with synthetic in-memory transport receipts. No real WhatsApp server, credentials, listener, registration or production authority proven.' });
       } catch (error) { writeReport({ probe: 'FAIL', error: String(error), stack: error instanceof Error ? error.stack : null }); }
     });

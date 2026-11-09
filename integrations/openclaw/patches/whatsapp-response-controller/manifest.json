@@ -1,11 +1,11 @@
 {
   "package": "@openclaw/whatsapp",
-  "version": "2026.10.4",
+  "version": "2026.10.10",
   "hostVersion": "2026.10.10",
-  "integrity": "sha512-1kF4se963qOcX8VkUc/n+SaE7jYBMkjP5zqIVNNgGPsuGqXvu7nMOiMAdz5wBLYIjzddN6TbG8UjT13CRlyVbA==",
-  "target": "dist/.setup/monitor-QPGSf7uJ.mjs",
-  "beforeSha256": "8b0de14c8398f91657dc1b2118671aaeab973a1ba0b62fea49938fe567cbf57a",
-  "afterSha256": "4a750951dd8fe711f9095bd5b3de2a58e5b0472592994e923d3b2f159554b5c9",
+  "integrity": "sha512-IaIUJKULPB+s0CFbAkQh9xQz988+sU9cs6geoO4YWytgI7hqmPy3ASJAq/nCkjH916k7nmgmh31N8aS1aQCPXA==",
+  "target": "dist/.setup/monitor-B5qdng3U.mjs",
+  "beforeSha256": "68cba8d0d6570727440e03fc0ee37715634f4d6b290b770f9476e839489f9fa0",
+  "afterSha256": "5797e2a84d386affb41236963b31aee7f37691a26042e66f215a87f8115f88f3",
   "capability": "benson.response-controller.v1",
-  "scope": "Isolated candidate only; no production installation. Reject every unknown version/hash. Never auto-reapply after upgrade."
+  "scope": "Approved bounded TS05 WhatsApp plugin exception for the pinned host/cohort. Reject every unknown version/hash. Never auto-reapply after upgrade. Gateway/channel actions require separate approval."
 }
