@@ -95,7 +95,7 @@ export function createReminderTaskToolFactory(options: {
     if (context.agentId !== 'main' || typeof context.assertInvocationCurrent !== 'function') return null;
     let taskStarted = false;
     return {
-      name: 'reminder_task', label: 'Reminder task',
+      name: 'reminder_task', label: 'Reminder task', catalogMode: 'direct-only',
       description: options.task ? 'Delegate bounded Reminder intent to its domain; structured list executes deterministically.'
         : 'Delegate a full Reminder list to its deterministic domain entry. No mutation or child Run.',
       parameters: options.task ? REMINDER_TASK_ENTRY_SCHEMA : REMINDER_TASK_SCHEMA,

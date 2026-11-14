@@ -1,4 +1,5 @@
 import Type from 'typebox';
+import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { OpenClawPluginToolFactory, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
 import { executeJessicaStatusTask, bindJessicaTaskPending, JESSICA_TASK_SCHEMA, JESSICA_TASK_ENTRY_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/task.js';
@@ -19,6 +20,73 @@ import { validateTaskEnvelope } from '../../../benson-routing/core/task-envelope
 type Tool = Exclude<NonNullable<ReturnType<OpenClawPluginToolFactory<2>['create']>>, unknown[]>;
 type ToolResult = Awaited<ReturnType<Tool['execute']>>;
 type TaskDependencies = Parameters<typeof executeJessicaStatusTask>[2];
+/** K11's version-pinned SDK projection. Stock hosts lack these optional fields.
+ * Native handles are used in-process only; this is not an authority registry.
+ */
+type NativeRequesterContext = OpenClawPluginToolContext<2> & {
+  captureRequesterDelegation?: (scope: { agentId: string; tools: readonly string[]; signal: AbortSignal;
+    assertSourceCurrent(): void }) => unknown;
+  delegatedRequester?: {
+    contract: 'openclaw.requester-delegation.v1';
+    parent: { agentId: string; sessionKey: string; sessionId: string; runId: string; toolCallId: string; toolName: string };
+    child: { agentId: string; sessionKey: string; sessionId: string; runId: string };
+    requester: { senderId: string; deliveryContext: { channel: string; accountId: string; to: string } };
+    signal: AbortSignal; assertCurrent(): void;
+  };
+};
+type DelegatedReadSource = Pick<TaskDependencies, 'identity' | 'authority'> & {
+  observeRead?(callId: string, result: Pick<Result, 'operation' | 'status' | 'verified'>): void;
+};
+/** Call only after the existing Main task owner has authorized the original
+ * request. The host, rather than these arguments, determines the principal.
+ */
+export function captureJessicaRequesterDelegation(context: OpenClawPluginToolContext<2>, authority: TaskDependencies['authority']) {
+  assertInvocationCurrent(authority);
+  const native = context as NativeRequesterContext;
+  if (context.agentId !== 'main' || !context.sessionKey || !context.sessionId || typeof native.captureRequesterDelegation !== 'function')
+    throw new Error('jessica_native_requester_delegation_unavailable');
+  return native.captureRequesterDelegation({ agentId: 'jessica-vacuum', tools: ['jessica_read'], signal: authority.signal,
+    assertSourceCurrent() { assertInvocationCurrent(authority); synchronous(context.assertInvocationCurrent(), 'jessica_requester_authority_must_be_synchronous'); } });
+}
+/** Resolve the original requester through the host's exact child capability.
+ * Copies of these facts never replace its live native assertion.
+ */
+export function resolveJessicaRequesterDelegation(context: OpenClawPluginToolContext<2>, roster: FamilyRoutes,
+  log?: (message: string) => void): DelegatedReadSource | undefined {
+  const native = (context as NativeRequesterContext).delegatedRequester;
+  if (!native) return undefined;
+  if (native.contract !== 'openclaw.requester-delegation.v1' || context.agentId !== 'jessica-vacuum' ||
+    native.parent.agentId !== 'main' || native.parent.toolName !== 'jessica_task' || !native.parent.toolCallId ||
+    !native.parent.runId || native.child.agentId !== context.agentId || native.child.sessionKey !== context.sessionKey ||
+    native.child.sessionId !== context.sessionId || native.child.sessionId === native.parent.sessionId ||
+    native.child.runId === native.parent.runId || typeof native.assertCurrent !== 'function' || !(native.signal instanceof AbortSignal))
+    throw new Error('jessica_native_requester_binding_invalid');
+  const identity = resolveTrustedIdentity({ ...native.requester.deliveryContext, senderId: native.requester.senderId }, roster);
+  const authority = { signal: native.signal, assertCurrent() {
+    synchronous(context.assertInvocationCurrent(), 'jessica_requester_authority_must_be_synchronous');
+    synchronous(native.assertCurrent(), 'jessica_requester_authority_must_be_synchronous');
+  } };
+  return { identity, authority, observeRead(callId, result) {
+    // Owner-only diagnostic facts, never a grant, receipt or settlement seal.
+    // Recheck the live native scope before projecting its private binding.
+    // Missing/failed logging leaves proof unavailable; it cannot change access.
+    try {
+      assertInvocationCurrent(authority);
+      const fingerprint = (value: string) => createHash('sha256').update(value).digest('hex');
+      const execution = (value: typeof native.child) => ({ agentId: value.agentId,
+        sessionKeySha256: fingerprint(value.sessionKey), sessionIdSha256: fingerprint(value.sessionId),
+        runIdSha256: fingerprint(value.runId) });
+      log?.(`benson.jessica_g1b ${JSON.stringify({ version: 1, phase: 'read_validated',
+        parent: { ...execution(native.parent), toolName: native.parent.toolName, toolCallIdSha256: fingerprint(native.parent.toolCallId) },
+        child: { ...execution(native.child), toolName: 'jessica_read', toolCallIdSha256: fingerprint(callId) },
+        requester: { senderIdSha256: fingerprint(native.requester.senderId),
+          channel: native.requester.deliveryContext.channel, accountIdSha256: fingerprint(native.requester.deliveryContext.accountId),
+          toSha256: fingerprint(native.requester.deliveryContext.to) },
+        read: { operation: result.operation, status: result.status, verified: result.verified },
+      })}`);
+    } catch { /* No raw exception, context, authority handle or request content. */ }
+  } };
+}
 /** Candidate replacement for the existing domain-only raw read registration.
  * Transport and state remain injected through the existing domain reader.
  */
@@ -30,7 +98,7 @@ export function createJessicaReadToolFactory(options: {
   /** Adapter-private original source, using the existing domain task port.
    * A child invocation need not inherit the originating channel route.
    */
-  source?: Pick<TaskDependencies, 'identity' | 'authority'>;
+  source?: DelegatedReadSource;
 }): OpenClawPluginToolFactory<2>['create'] {
   assertRosterPolicyAgreement(options.roster, options.policy);
   const registry = loadRegistry(options.registryConfig);
@@ -40,7 +108,7 @@ export function createJessicaReadToolFactory(options: {
   const parameters = { allOf: [READ_REQUEST_SCHEMA, { type: 'object', properties: { operation: { enum: operations } } }] };
   return context => {
     if (context.agentId !== 'jessica-vacuum' || typeof context.assertInvocationCurrent !== 'function') return null;
-    return { name: 'jessica_read', label: 'Jessica read',
+    return { name: 'jessica_read', label: 'Jessica read', catalogMode: 'direct-only',
       description: 'Read Jessica status, rooms, accepted capabilities, maintenance, lifetime statistics, or an enabled known dispatch operation. No device action.',
       parameters, executionMode: 'sequential',
       async execute(callId, raw, signal) {
@@ -71,6 +139,9 @@ export function createJessicaReadToolFactory(options: {
           if (!isDeepStrictEqual(boundedCopy(parseReadRequest(args)), capturedRequest) ||
             !isDeepStrictEqual(boundedCopy(value), captured)) fail('jessica_read_evidence_mismatch');
         }), 'jessica_read_serialization_must_be_synchronous');
+        // Only a validated/serialized result can produce this diagnostic. The
+        // final live guard still owns release, including observer side effects.
+        try { options.source?.observeRead?.(callId, result); } catch { /* Observation is not authorization. */ }
         assertInvocationCurrent(authority);
         return serialized;
       },
@@ -98,7 +169,7 @@ export function createJessicaTaskToolFactory(options: {
     if (context.agentId !== 'main' || typeof context.assertInvocationCurrent !== 'function') return null;
     let taskStarted = false;
     return {
-      name: 'jessica_task', label: 'Jessica task',
+      name: 'jessica_task', label: 'Jessica task', catalogMode: 'direct-only',
       description: options.task ? 'Delegate self-contained Jessica intent to its domain; structured status executes deterministically.'
         : 'Delegate a Jessica status task to its deterministic domain entry. No device action or child Run.',
       parameters: options.task ? JESSICA_TASK_ENTRY_SCHEMA : JESSICA_TASK_SCHEMA,

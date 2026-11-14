@@ -1,0 +1,295 @@
+--- a/dist/host-private-capabilities-eTr803c9.mjs
++++ b/dist/host-private-capabilities-eTr803c9.mjs
+@@ -3,6 +3,110 @@
+ import "./user-profile-constants-DfyZS95p.mjs";
+ import { t as warnPluginSdkDeprecation } from "./sdk-deprecation-DjTmOhOX.mjs";
+ import { AsyncLocalStorage } from "node:async_hooks";
++// Version-pinned G1(b): capabilities remain in this existing private owner.
++const requesterDelegations = new WeakMap();
++const childRequesterScope = new AsyncLocalStorage();
++const requesterInvocationScope = new AsyncLocalStorage();
++const requesterToolContexts = new WeakMap();
++function createPluginRequesterDelegationContext({ pluginId, context, assertInvocationCurrent, readCaller, readTool }) {
++	const identity = Object.freeze({ agentId: context.agentId, sessionId: context.sessionId, sessionKey: context.sessionKey,
++		requesterSenderId: context.requesterSenderId, deliveryContext: context.deliveryContext && Object.freeze({ ...context.deliveryContext }) });
++	const child = childRequesterScope.getStore();
++	const delegatedRequester = child && child.pluginId === pluginId && child.child.agentId === identity.agentId &&
++		child.child.sessionId === identity.sessionId && child.child.sessionKey === identity.sessionKey ? Object.freeze({
++		contract: "openclaw.requester-delegation.v1", parent: child.parent, child: child.child, requester: child.requester,
++		signal: child.signal,
++		assertCurrent() {
++			child.assertCurrent(); assertInvocationCurrent();
++			const caller = readCaller(), tool = readTool()?.toolCall;
++			const invocation = requesterInvocationScope.getStore();
++			if (!invocation || !invocation.active || invocation.context !== binding || invocation.toolCallId !== tool?.id)
++				throw new Error("delegated requester tool invocation retired");
++			if (!child.admitted || caller?.operationalRunInstance !== child.admitted.operationalRunInstance ||
++				caller.agentId !== child.child.agentId || caller.sessionKey !== child.child.sessionKey ||
++				!tool?.id || !child.tools.includes(tool.name)) throw new Error("delegated requester child invocation mismatch");
++		}
++	}) : void 0;
++	const binding = {
++		pluginId,
++		assertNativeCall(toolName, toolCallId) {
++			const call = readTool()?.toolCall;
++			if (!call?.id || call.id !== toolCallId || call.name !== toolName) throw new Error("requester child tool call mismatch");
++		},
++		delegatedRequester,
++		captureRequesterDelegation(options) {
++			assertInvocationCurrent();
++			const invocation = requesterInvocationScope.getStore();
++			if (!invocation || invocation.context !== binding || !invocation.active) throw new Error("requester delegation requires an active tool callback");
++			const caller = readCaller(), call = readTool()?.toolCall;
++			if (child || !caller?.operationalRunInstance || caller.agentId !== identity.agentId || caller.sessionKey !== identity.sessionKey ||
++				!identity.sessionId || !identity.requesterSenderId || !identity.deliveryContext?.channel ||
++				!identity.deliveryContext.accountId || !identity.deliveryContext.to || !call?.id || !call.name ||
++				call.id !== invocation.toolCallId || call.name !== invocation.toolName ||
++				typeof caller.receiptAuthority !== "function" || caller.receiptAuthority() === false)
++				throw new Error("requester delegation requires a native requester-bound tool invocation");
++			if (!options || typeof options.agentId !== "string" || !options.agentId.trim() || options.agentId === identity.agentId ||
++				!Array.isArray(options.tools) || !options.tools.length || options.tools.length > 16 ||
++				options.tools.some(name => typeof name !== "string" || !/^[a-z][a-z0-9_]*$/.test(name)) ||
++				new Set(options.tools).size !== options.tools.length || typeof options.assertSourceCurrent !== "function" ||
++				!(options.signal instanceof AbortSignal)) throw new Error("invalid requester delegation scope");
++			const parent = Object.freeze({ agentId: identity.agentId, sessionKey: identity.sessionKey, sessionId: identity.sessionId,
++				runId: caller.operationalRunInstance.runId, toolCallId: call.id, toolName: call.name });
++			const signals = [...caller.approvalSignals ?? [], options.signal, ...invocation.signal ? [invocation.signal] : []];
++			const signal = AbortSignal.any(signals), source = options.assertSourceCurrent;
++			let failed, revoked = false;
++			const assertCurrent = () => {
++				if (revoked) throw failed;
++				try { if (!invocation.active) throw new Error("requester parent tool invocation retired"); signal.throwIfAborted(); assertInvocationCurrent();
++					if (caller.receiptAuthority() === false) throw new Error("requester parent admission retired");
++					const value = source(); if (value !== void 0) throw new Error("requester source assertion must synchronously allow or throw");
++					signal.throwIfAborted();
++				} catch (error) { revoked = true; failed = error; throw error; }
++			};
++			assertCurrent();
++			const grant = Object.freeze(Object.create(null));
++			requesterDelegations.set(grant, { pluginId, parent, requester: Object.freeze({ senderId: identity.requesterSenderId,
++				deliveryContext: identity.deliveryContext }), agentId: options.agentId, tools: Object.freeze([...options.tools]), signal, assertCurrent });
++			return grant;
++		}
++	};
++	requesterToolContexts.set(context, binding);
++	return binding;
++}
++async function runPluginRequesterInvocation(context, pluginId, toolName, toolCallId, signal, run) {
++	const binding = requesterToolContexts.get(context);
++	const child = childRequesterScope.getStore();
++	if (child) {
++		child.assertCurrent();
++		if (!binding || child.pluginId !== pluginId || !child.tools.includes(toolName)) throw new Error("requester delegation tool is outside its scope");
++		binding.assertNativeCall(toolName, toolCallId);
++	}
++	if (!binding) return run();
++	const invocation = { context: binding, active: true, signal, toolName, toolCallId };
++	try { return await requesterInvocationScope.run(invocation, run); }
++	finally { invocation.active = false; }
++}
++function consumePluginRequesterDelegation(grant, pluginId, params) {
++	const source = requesterDelegations.get(grant);
++	if (!source) throw new Error("requester delegation is missing, foreign or already consumed");
++	requesterDelegations.delete(grant);
++	source.assertCurrent();
++	const agentId = params.sessionTarget?.agentId ?? params.agentId;
++	if (source.pluginId !== pluginId || agentId !== source.agentId || params.sessionTarget ||
++		params.sessionPersistence !== "detached" || typeof params.sessionId !== "string" || !params.sessionId ||
++		params.sessionId === source.parent.sessionId || typeof params.runId !== "string" || !params.runId || params.runId === source.parent.runId ||
++		typeof params.sessionKey !== "string" || !params.sessionKey.startsWith(`agent:${agentId}:subagent:`) || params.sessionKey === source.parent.sessionKey)
++		throw new Error("requester delegation child binding mismatch");
++	let active = true;
++	const binding = { ...source, signal: AbortSignal.any([source.signal, ...params.abortSignal ? [params.abortSignal] : []]),
++		child: Object.freeze({ agentId, sessionKey: params.sessionKey, sessionId: params.sessionId, runId: params.runId }),
++		admitted: void 0,
++		assertCurrent() { if (!active) throw new Error("requester child scope retired"); source.assertCurrent(); params.abortSignal?.throwIfAborted(); },
++		close() { active = false; },
++		run(run) { binding.assertCurrent(); return childRequesterScope.run(binding, run); } };
++	return binding;
++}
++export { createPluginRequesterDelegationContext, consumePluginRequesterDelegation, runPluginRequesterInvocation };
+ //#region src/agents/harness/host-private-capabilities.ts
+ const replyInputChannel = resolveGlobalSingleton(Symbol.for("openclaw.replyInputChannel"), () => Symbol("replyInputChannel"));
+ function bindReplyInputChannel(input, channel) {
+--- a/dist/tools-C0JjCKqm.mjs
++++ b/dist/tools-C0JjCKqm.mjs
+@@ -1,4 +1,7 @@
+ import { o as runWithTrackedCancellation } from "./async-work-scope-BH2yUdBz.mjs";
++import { createPluginRequesterDelegationContext, runPluginRequesterInvocation } from "./host-private-capabilities-eTr803c9.mjs";
++import { o as getGatewayToolCallerIdentity } from "./gateway-caller-context-4PMKhr4G.mjs";
++import { n as getAgentToolExecutionContext } from "./tool-execution-context-BwYF5HLu.mjs";
+ import { c as isRecord } from "./record-coerce-TIsquoVR.mjs";
+ import { o as racePromiseWithAbortSignal } from "./src-Bzfi3cQM.mjs";
+ import "./abort-signal-C9DFO3n5.mjs";
+@@ -64,7 +67,7 @@
+ 		continuation?.assertCurrent();
+ 		assertMemoryAudienceCurrent?.();
+ 	};
+-	return {
++	const factoryContext = {
+ 		...context,
+ 		...continuation ? {
+ 			requesterSenderId: continuation.senderId,
+@@ -76,6 +79,13 @@
+ 		},
+ 		assertInvocationCurrent
+ 	};
++	if (entry.contextVersion === 2) {
++		const requester = createPluginRequesterDelegationContext({ pluginId: entry.pluginId, context: factoryContext,
++			assertInvocationCurrent, readCaller: getGatewayToolCallerIdentity, readTool: getAgentToolExecutionContext });
++		factoryContext.captureRequesterDelegation = requester.captureRequesterDelegation;
++		factoryContext.delegatedRequester = requester.delegatedRequester;
++	}
++	return factoryContext;
+ }
+ //#endregion
+ //#region src/plugins/tool-factory-runtime.ts
+@@ -101,7 +111,7 @@
+ 	}, run, registry);
+ }
+ /** Callback availability is captured once; missing records must never become a fallback after removal. */
+-function bindPluginToolCallbacks(entry, registry, tool, assertInvocationCurrent, memoryAudience) {
++function bindPluginToolCallbacks(entry, registry, tool, assertInvocationCurrent, memoryAudience, factoryContext) {
+ 	const record = registry.plugins.find((candidate) => candidate.id === entry.pluginId);
+ 	const authority = capturePluginLifecycleAuthority(registry, record, { scopedRuntime: true });
+ 	const invoke = (run) => {
+@@ -122,7 +132,8 @@
+ 			const pending = memoryAudience && resolveMemoryCapabilityRegistration(registry.memoryCapabilities)?.pluginId === entry.pluginId ? prepareMemoryAudienceRead(memoryAudience) : void 0;
+ 			if (pending) await racePromiseWithAbortSignal(pending, signal);
+ 			return invoke(() => {
+-				const execute = (executionSignal) => tool.execute(toolCallId, params, executionSignal, onUpdate);
++				const execute = (executionSignal) => runPluginRequesterInvocation(factoryContext, entry.pluginId, tool.name, toolCallId, executionSignal,
++					() => tool.execute(toolCallId, params, executionSignal, onUpdate));
+ 				return signal ? runWithTrackedCancellation(signal, execute) : execute();
+ 			});
+ 		},
+@@ -232,14 +243,14 @@
+ function denylistBlocksPlugin(params) {
+ 	return denylistBlocksName(params.pluginId, params.denylist) || matchesAnyGlobPattern("group:plugins", params.denylist);
+ }
+-function inspectPluginTool(tool, name, clientCaps, entry, registry, assertInvocationCurrent, memoryAudience) {
++function inspectPluginTool(tool, name, clientCaps, entry, registry, assertInvocationCurrent, memoryAudience, factoryContext) {
+ 	try {
+ 		if (!isRecord(tool)) return { error: "tool must be an object" };
+ 		const requiredClientCaps = tool.requiredClientCaps;
+ 		const validCaps = Array.isArray(requiredClientCaps) && requiredClientCaps.every((requiredCap) => typeof requiredCap === "string");
+ 		if (validCaps && requiredClientCaps.some((requiredCap) => !clientCaps.has(requiredCap))) return null;
+ 		const error = !name ? "missing non-empty name" : typeof tool.execute !== "function" ? `${name} missing execute function` : !isRecord(tool.parameters) ? `${name} missing parameters object` : requiredClientCaps !== void 0 && !validCaps ? `${name} requiredClientCaps must be an array of strings` : void 0;
+-		return error ? { error } : { tool: bindPluginToolCallbacks(entry, registry, tool, assertInvocationCurrent, memoryAudience) };
++		return error ? { error } : { tool: bindPluginToolCallbacks(entry, registry, tool, assertInvocationCurrent, memoryAudience, factoryContext) };
+ 	} catch (error) {
+ 		return { error: formatErrorMessage(error) };
+ 	}
+@@ -542,7 +553,7 @@
+ 					pluginId: entry.pluginId,
+ 					toolName
+ 				})) continue;
+-				const inspected = inspectPluginTool(toolRaw, toolName, clientCaps, entry, owner.registry, factoryContext.assertInvocationCurrent, factoryContext.memoryAudience);
++				const inspected = inspectPluginTool(toolRaw, toolName, clientCaps, entry, owner.registry, factoryContext.assertInvocationCurrent, factoryContext.memoryAudience, factoryContext);
+ 				if (!inspected) continue;
+ 				if ("error" in inspected) {
+ 					reportError(entry, `plugin tool is malformed (${entry.pluginId}): ${inspected.error}`);
+--- a/dist/runtime-embedded-agent.runtime-DXtEzTGU.mjs
++++ b/dist/runtime-embedded-agent.runtime-DXtEzTGU.mjs
+@@ -10,6 +10,7 @@
+ import { a as drainAgentRunTerminalWrites } from "./agent-run-terminal-writes-D8ukhGF_.mjs";
+ import { t as runEmbeddedAgent } from "./embedded-agent-BgECZgbU.mjs";
+ import { randomUUID } from "node:crypto";
++import { consumePluginRequesterDelegation } from "./host-private-capabilities-eTr803c9.mjs";
+ //#region src/plugins/runtime/runtime-embedded-agent.runtime.ts
+ const runPluginEmbeddedAgent = async (params) => {
+ 	const pluginId = getPluginRuntimeGatewayRequestScope()?.pluginId;
+@@ -17,6 +18,12 @@
+ 	if ("admittedRunContext" in params || "preparedRunAdmission" in params || "compactionCountOwner" in params || "onCompactionAccounting" in params || "onContextAccountingEvent" in params || "onDeferredLifecycleOwner" in params || "onDeferredLifecycleAbort" in params || "onRetryWait" in params) throw new Error("Plugin embedded-agent execution cannot supply host run authority.");
+ 	if (params.memoryAudience && !isHostMemoryAudience(params.memoryAudience)) throw new Error("Plugin embedded-agent memory audience must be host-minted.");
+ 	params.abortSignal?.throwIfAborted();
++	const requesterDelegation = params.requesterDelegation === void 0 ? void 0 : consumePluginRequesterDelegation(params.requesterDelegation, pluginId, params);
++	if (requesterDelegation) {
++		params = { ...params, abortSignal: requesterDelegation.signal, toolsAllow: [...requesterDelegation.tools],
++			lane: "subagent", spawnedBy: requesterDelegation.parent.sessionKey };
++		delete params.requesterDelegation;
++	}
+ 	const config = params.config ?? readRuntimeConfig();
+ 	const delegated = params.memoryAudience ? await delegateMemoryAudience(params.memoryAudience, {
+ 		sessionKey: params.sessionKey?.trim() ?? params.sessionTarget?.sessionKey ?? "",
+@@ -30,6 +37,7 @@
+ 	try {
+ 		preparedRunAdmission = prepareAgentRunAdmission({
+ 			cfg: config,
++			assertSourceCurrent: requesterDelegation?.assertCurrent,
+ 			operationalRunInstance: createOperationalRunInstanceRef(params.runId),
+ 			facts: {
+ 				runId: params.runId,
+@@ -43,6 +51,7 @@
+ 			},
+ 			onAdmitted: (context) => {
+ 				admittedRunContext = context;
++				if (requesterDelegation) requesterDelegation.admitted = context;
+ 				const token = context.executionIdentityToken;
+ 				recordRuntimeActionDecision({
+ 					token,
+@@ -67,6 +76,7 @@
+ 		});
+ 	} catch (error) {
+ 		delegated?.release();
++		requesterDelegation?.close();
+ 		throw error;
+ 	}
+ 	let closed = false;
+@@ -77,6 +87,7 @@
+ 			closed = true;
+ 			legacyReplyCustodyIndex = -1;
+ 			preparedRunAdmission.close();
++			requesterDelegation?.close();
+ 			delegated?.release();
+ 		}
+ 	};
+@@ -97,12 +108,14 @@
+ 				return !closed && legacyReplyCustodyIndex >= minimumReplyMessageIndex ? "pending" : "missing";
+ 			};
+ 		}
+-		const result = await runEmbeddedAgent({
++		const execute = () => runEmbeddedAgent({
+ 			...runParams,
+ 			memoryAudience: delegated?.audience,
+ 			config,
+ 			preparedRunAdmission
+ 		});
++		const result = await (requesterDelegation ? requesterDelegation.run(execute) : execute());
++		requesterDelegation?.assertCurrent();
+ 		if (admittedRunContext && getAdmittedRunDelegatedAuthority(admittedRunContext)) recordRuntimeActionDecision({
+ 			token: admittedRunContext.executionIdentityToken,
+ 			family: "plugin",
+--- a/dist/config-contracts-CaROPwlH.d.ts
++++ b/dist/config-contracts-CaROPwlH.d.ts
+@@ -48562,7 +48562,21 @@
+ /** Version 1 is the source-compatible direct-turn context; version 2 requires final-effect authority. */
+ type OpenClawPluginToolContext<Version extends 1 | 2 = 1> = Version extends 2 ? OpenClawPluginToolContextBase & {
+   assertInvocationCurrent: () => void;
++  /** K11/2026.10.10 only. Minted only inside this actual native tool execute. */
++  captureRequesterDelegation?: (scope: { agentId: string; tools: readonly string[]; signal: AbortSignal; assertSourceCurrent(): void }) => PluginRequesterDelegation;
++  /** Parent authority independently verified by the host; never toolBindings/model input. */
++  delegatedRequester?: {
++    readonly contract: "openclaw.requester-delegation.v1";
++    readonly parent: Readonly<{ agentId: string; sessionKey: string; sessionId: string; runId: string; toolCallId: string; toolName: string }>;
++    readonly child: Readonly<{ agentId: string; sessionKey: string; sessionId: string; runId: string }>;
++    readonly requester: Readonly<{ senderId: string; deliveryContext: Readonly<{ channel: string; accountId: string; to: string }> }>;
++    readonly signal: AbortSignal;
++    assertCurrent(): void;
++  };
+ } : OpenClawPluginToolContextBase;
++declare const pluginRequesterDelegationBrand: unique symbol;
++/** Opaque, single-use handle. Cloning or reconstructing it grants no authority. */
++type PluginRequesterDelegation = { readonly [pluginRequesterDelegationBrand]: true };
+ /** A version 2 descriptor explicitly opts into owner-authorized continuations. */
+ type OpenClawPluginToolFactory<Version extends 1 | 2 = 1> = Version extends 2 ? {
+   contextVersion: 2;
+@@ -50102,6 +50116,8 @@
+   };
+ };
+ type RuntimeRunEmbeddedAgentParams = Omit<RunEmbeddedAgentParams, "admittedRunContext" | "preparedRunAdmission"> & {
++  /** K11/2026.10.10 only. Same plugin; fresh detached child; live parent tool scope. */
++  requesterDelegation?: PluginRequesterDelegation;
+   /** @deprecated Ignored; the host derives availability. Retained until the next Plugin SDK major. */
+   githubPublicationAvailable?: boolean;
+ };

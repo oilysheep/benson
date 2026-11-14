@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { retainToolExecutionEvidence, readToolExecutionEvidence, type ToolExecutionCoverage } from '../core/tool-execution-evidence.js';
+import { retainToolExecutionEvidence, readToolExecutionEvidence, receiptDomainValue, type ToolExecutionCoverage } from '../core/tool-execution-evidence.js';
 import { runIsolatedFixture } from './fixtures/native-isolation.js';
 const identity = { runId: 'run', sessionKey: 'session', sessionId: 'session-id', agentId: 'agent' };
 test('untrusted DTO, incomplete/missing/duplicate/foreign receipts never establish coverage', () => {
@@ -32,13 +32,20 @@ test('pinned isolated OpenClaw proves complete multi-tool native receipts and ne
 
 import { createOpenClawDomainRunCollector } from '../adapters/openclaw/tool-execution-evidence.js';
 
-function collectionHost() {
+function collectionHost(readOnly = false, nativeSeal = false) {
   const hooks = new Map<string, unknown>(), disposals: (() => unknown)[] = [], abort = new AbortController();
   const api: Parameters<typeof createOpenClawDomainRunCollector>[0] = {
     on(name, handler) { assert(!hooks.has(name)); hooks.set(name, handler); },
     lifecycle: { signal: abort.signal, onDispose(callback) { disposals.push(callback); return () => {}; } },
   };
-  const collector = createOpenClawDomainRunCollector(api, { agentId: 'reminder-service', tools: ['domain_read'] });
+  const collector = createOpenClawDomainRunCollector(api, { agentId: 'reminder-service', tools: ['domain_read'],
+    ...nativeSeal ? { terminalSource: 'native-seal' as const } : {},
+    ...readOnly ? { readOnly: { name: 'domain_read', validate(receipt: Readonly<import('../core/tool-execution-evidence.js').ToolExecutionReceipt>) {
+      assert.deepEqual(receipt.executionArgs, receipt.originalArgs);
+      const value = receiptDomainValue(receipt);
+      assert.deepEqual(JSON.parse(JSON.stringify(value)), JSON.parse(JSON.stringify(receipt.executionArgs)));
+      return value;
+    } } } : {} });
   return { collector, abort, dispose() { disposals.forEach(callback => callback()); },
     emit(name: string, event: unknown, context: unknown) {
       const handler = hooks.get(name); assert.equal(typeof handler, 'function');
@@ -157,3 +164,80 @@ test('native collection rejects mutable observation substitution and asynchronou
     r.scope.release(); h.dispose();
   }
 });
+
+// Pure-read evidence is an explicit domain validation profile. It does not
+// substitute for the existing factory witness on mutations/default collectors.
+for (const fault of ['none', 'arguments', 'result', 'error', 'not-executed', 'after', 'foreign', 'source'] as const) {
+  test('explicit read profile validates native originals and retains custody: ' + fault, () => {
+    const h = collectionHost(true), r = collectionRun(h, 'read-' + fault, 1), call = r.calls[0]!;
+    r.before(call.id);
+    if (fault !== 'after') r.after(call.id);
+    r.terminal();
+    const receipt = r.coverage.receipts[0]!;
+    if (fault === 'arguments') Reflect.set(receipt, 'executionArgs', { index: 99 });
+    if (fault === 'result') Reflect.set(receipt, 'originalResult', { content: [], details: { index: 99 } });
+    if (fault === 'error') Reflect.set(receipt, 'isError', true);
+    if (fault === 'not-executed') Reflect.set(receipt, 'executionStarted', false);
+    if (fault === 'foreign') Reflect.set(receipt, 'name', 'domain_execute');
+    if (fault === 'source') r.state.current = false;
+    if (fault !== 'none') assert.throws(() => r.scope.complete(r.identity, r.evidence));
+    else {
+      const result = r.scope.complete(r.identity, r.evidence), observation = result.observations[0]!;
+      result.validateTool(observation.tool, receipt);
+      assert.throws(() => result.validateTool({ ...observation.tool, value: { index: 99 } }, receipt));
+      r.scope.release(); result.custody.assertCurrent();
+      r.state.current = false; assert.throws(() => result.validateTool(observation.tool, receipt));
+    }
+    r.scope.discard(); h.dispose();
+  });
+}
+
+for (const fault of ['none', 'missing', 'foreign-run', 'foreign-session', 'failed', 'oversized', 'mixed-hook'] as const) {
+  test('seal terminal profile requires exact bounded native terminal: ' + fault, () => {
+    const h = collectionHost(false, true), r = collectionRun(h, 'seal-' + fault, 1), call = r.calls[0]!;
+    r.before(call.id); r.record(call); r.after(call.id);
+    const terminal = { runId: r.identity.runId, sessionKey: r.identity.sessionKey, sessionId: r.identity.sessionId, success: true, messages: [] as unknown[] };
+    if (fault === 'foreign-run') terminal.runId = 'foreign';
+    if (fault === 'foreign-session') terminal.sessionId = 'foreign';
+    if (fault === 'failed') terminal.success = false;
+    if (fault === 'oversized') terminal.messages = Array.from({ length: 1025 }, () => ({}));
+    if (fault === 'mixed-hook') r.terminal();
+    if (fault !== 'none') assert.throws(() => r.scope.complete(r.identity, r.evidence, fault === 'missing' ? undefined : terminal));
+    else {
+      const result = r.scope.complete(r.identity, r.evidence, terminal);
+      assert.deepEqual(result.terminal, terminal);
+      r.scope.release(); result.custody.assertCurrent();
+      r.state.current = false; assert.throws(() => result.custody.assertCurrent());
+    }
+    r.scope.discard(); h.dispose();
+  });
+}
+
+for (const fault of ['none', 'foreign', 'missing', 'duplicate', 'incomplete', 'attempts', 'arguments', 'result', 'error', 'not-executed', 'source', 'cancelled', 'disposed'] as const) {
+  test('sealed pure-read profile uses actual receipts without optional plugin hooks: ' + fault, () => {
+    const h = collectionHost(true, true), r = collectionRun(h, 'sealed-read-' + fault, 3);
+    const terminal = { runId: r.identity.runId, sessionKey: r.identity.sessionKey,
+      sessionId: r.identity.sessionId, success: true, messages: [] };
+    if (fault === 'foreign') Reflect.set(r.coverage.receipts[0]!, 'name', 'domain_execute');
+    if (fault === 'missing') Reflect.set(r.coverage, 'receipts', r.coverage.receipts.slice(0, -1));
+    if (fault === 'duplicate') Reflect.set(r.coverage.receipts[1]!, 'callId', r.calls[0]!.id);
+    if (fault === 'incomplete') Reflect.set(r.coverage.seal, 'complete', false);
+    if (fault === 'attempts') Reflect.set(r.coverage.seal, 'attempts', 2);
+    if (fault === 'arguments') Reflect.set(r.coverage.receipts[0]!, 'executionArgs', { index: 99 });
+    if (fault === 'result') Reflect.set(r.coverage.receipts[0]!, 'originalResult', { content: [], details: { index: 99 } });
+    if (fault === 'error') Reflect.set(r.coverage.receipts[0]!, 'isError', true);
+    if (fault === 'not-executed') Reflect.set(r.coverage.receipts[0]!, 'executionStarted', false);
+    if (fault === 'source') r.state.current = false;
+    if (fault === 'cancelled') h.abort.abort();
+    if (fault === 'disposed') h.dispose();
+    if (fault !== 'none') assert.throws(() => r.scope.complete(r.identity, r.evidence, terminal));
+    else {
+      const result = r.scope.complete(r.identity, r.evidence, terminal);
+      assert.equal(result.observations.length, 3);
+      result.observations.forEach((observation, index) => result.validateTool(observation.tool, r.coverage.receipts[index]));
+      r.scope.release(); result.custody.assertCurrent();
+      r.state.current = false; assert.throws(() => result.custody.assertCurrent());
+    }
+    r.scope.discard(); h.dispose();
+  });
+}

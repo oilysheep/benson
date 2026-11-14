@@ -63,6 +63,8 @@ test('Reminder tool-discovery registers schemas without Domain Run hooks or reso
   const context: OpenClawPluginToolContext<2> = { agentId: 'main', assertInvocationCurrent() {} };
   const tool = create(context), fullTool = fullCreate(context); assert(tool && !Array.isArray(tool) && fullTool && !Array.isArray(fullTool));
   assert.deepEqual(tool.parameters, fullTool.parameters);
+  assert.equal(tool.catalogMode, 'direct-only');
+  assert.equal(fullTool.catalogMode, 'direct-only');
   await assert.rejects(tool.execute('call', { operation: 'list' }), /native_original_source_unavailable/);
   assert.deepEqual(f.resources, ['../../../../agents/reminder-service/config/recipients.json',
     '../../../../agents/reminder-service/tools/reminder-service', '../../patches/tool-execution-receipts/manifest.json']);

@@ -1,0 +1,35 @@
+{
+  "id": "K11",
+  "version": "2026.10.10",
+  "contract": "openclaw.requester-delegation.v1",
+  "status": "isolated-candidate; not installed",
+  "openclawSourceCommit": "7dc3350cb9f08fcf9a0af5c4845a20d5b2f1a8be",
+  "bensonBaseCommit": "88a29f05d31beaf7734cc0de0b1c0371861f0248",
+  "patchSha256": "53305a0026277bd841418b88f20f506f439c41f17f25706e8b02ec4d6c520eab",
+  "files": [
+    {
+      "path": "dist/host-private-capabilities-eTr803c9.mjs",
+      "beforeSha256": "d96bdbbee4117f5ebac34ac6488a814269faa12833b2cb155b8452033c9a886b",
+      "afterSha256": "4ab2b5cf724d71361b20363803e7963b8259280b94128203c7e06baa159c64da",
+      "mode": 436
+    },
+    {
+      "path": "dist/tools-C0JjCKqm.mjs",
+      "beforeSha256": "9d696a8601fd7f8cce075d6598204e1295a4cb896460b744139cade232661526",
+      "afterSha256": "f397eaab31154f9ce947b9c70ac5c6825c7cc9789efb1d420e00f29bb0d88285",
+      "mode": 436
+    },
+    {
+      "path": "dist/runtime-embedded-agent.runtime-DXtEzTGU.mjs",
+      "beforeSha256": "1d75177e1d431e89c8ec125532c7c5d8bcb8de17938ba4f244cb0bf751c381c2",
+      "afterSha256": "59e6c5e1c3986c2bf3f4ca9c1afa20f00d413c248713d481dd38e3522b913398",
+      "mode": 436
+    },
+    {
+      "path": "dist/config-contracts-CaROPwlH.d.ts",
+      "beforeSha256": "9f1374e4661eeeb8f04297c65daa65db0320512734917d06a0ceba344b6e0246",
+      "afterSha256": "88ee8e33390ad107725d2d12c6a7108000ac922a1ba9a7836317dc580bcae581",
+      "mode": 436
+    }
+  ]
+}

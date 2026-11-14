@@ -96,6 +96,7 @@ export function normalizeJessicaCompletion(input: Omit<NativeDomainCompletionInp
     if (observed.status !== 'success' && facts.status === 'success') fail('jessica_domain_outcome_omitted');
     if (observed.warnings.some(warning => !facts.warnings.some(retained => same(boundedCopy(warning), boundedCopy(retained))))) fail('jessica_domain_warning_omitted');
     if (request.operation !== observed.operation) fail('jessica_native_arguments_mismatch');
+    if (tool.name === 'jessica_read' && input.validateTool) assertion(input.validateTool(tool, receipt), 'jessica_read_evidence_async');
     if (tool.name === 'jessica_execute') {
       if (!input.validateTool) fail('jessica_operation_evidence_missing');
       assertion(input.validateTool(tool, receipt), 'jessica_operation_evidence_async');

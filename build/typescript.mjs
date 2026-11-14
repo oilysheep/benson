@@ -87,6 +87,8 @@ generate(join(overlay, 'tsconfig.json'), JSON.stringify({
       'openclaw/plugin-sdk/reply-payload': ['./dist/plugin-sdk/reply-payload.d.ts'],
       'openclaw/plugin-sdk/routing': ['./dist/plugin-sdk/routing.d.ts'],
       'openclaw/plugin-sdk/tool-results': ['./dist/plugin-sdk/tool-results.d.ts'],
+      'openclaw/plugin-sdk/runtime-config-snapshot': ['./dist/plugin-sdk/runtime-config-snapshot.d.ts'],
+      'openclaw/plugin-sdk/agent-runtime': ['./dist/plugin-sdk/agent-runtime.d.ts'],
     },
     rootDirs: ['./dist', '../../node_modules/openclaw/dist'],
   },

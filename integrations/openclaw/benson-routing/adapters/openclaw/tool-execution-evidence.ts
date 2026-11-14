@@ -17,11 +17,21 @@ type Watch = (sessionKey: string, receive: (event: unknown) => void) => () => vo
 export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['on'];
   lifecycle: Pick<OpenClawPluginApi['lifecycle'], 'signal' | 'onDispose'> }, options: {
   agentId: 'reminder-service' | 'jessica-vacuum'; tools: readonly string[];
+  /** Explicit pure-read profile. The domain validates the original native
+   * result and exact execution arguments; mutations retain factory witnesses. */
+  readOnly?: { name: string; validate(receipt: Readonly<ToolExecutionReceipt>): unknown };
+  terminalSource?: 'native-seal';
 }) {
   const signal = api.lifecycle.signal;
   if (!signal || !api.lifecycle.onDispose) fail('native_plugin_lifecycle_unavailable');
   const tools = new Set(options.tools), agentId = options.agentId;
   if (!tools.size || tools.size !== options.tools.length || [...tools].some(name => !identifier(name))) fail('native_domain_tools_invalid');
+  const readOnly = options.readOnly;
+  if (readOnly && (tools.size !== 1 || !tools.has(readOnly.name) || typeof readOnly.validate !== 'function')) fail('native_domain_tools_invalid');
+  // Detached child Runs need not emit plugin hooks. For this explicit pure-read
+  // profile, complete native receipts own call identity/outcomes and the native
+  // seal owns terminality. Mutations still require the existing hook/witness join.
+  const sealedRead = readOnly !== undefined && options.terminalSource === 'native-seal';
   type Call = { runId: string; sessionId: string; name: string; captured: boolean; value?: unknown;
     verify?: (args: unknown, value: unknown) => unknown; after?: NativeToolObservation['after'] };
   type Scope = { sessionKey: string; sourceCurrent(): unknown; invalid: boolean; completed: boolean;
@@ -45,7 +55,18 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
       scope.sessionId !== undefined && scope.sessionId !== context.sessionId) fail('native_domain_identity_mismatch');
     scope.runId = context.runId; scope.sessionId = context.sessionId;
   };
+  const record = (scope: Scope, context: { agentId?: string; sessionKey?: string; sessionId?: string },
+    callId: string, name: string, value: unknown, verify: (args: unknown, value: unknown) => unknown) => {
+    try {
+      executing(scope);
+      const call = scope.calls.get(callId);
+      if (scope.terminal || !call || call.captured || context.agentId !== agentId || context.sessionKey !== scope.sessionKey ||
+        context.sessionId !== call.sessionId || call.name !== name || typeof verify !== 'function') fail('native_domain_witness_unverified');
+      call.value = boundedCopy(value); call.verify = verify; call.captured = true;
+    } catch (error) { scope.invalid = true; throw error; }
+  };
   api.on('before_tool_call', (event, context) => {
+    if (sealedRead) return;
     const scope = context.sessionKey ? scopes.get(context.sessionKey) : undefined;
     if (!scope) return;
     try {
@@ -63,6 +84,7 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
     }
   });
   api.on('after_tool_call', (event, context) => {
+    if (sealedRead) return;
     const scope = context.sessionKey ? scopes.get(context.sessionKey) : undefined;
     if (!scope) return;
     try {
@@ -75,6 +97,7 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
     } catch { scope.invalid = true; }
   });
   api.on('agent_end', (event, context) => {
+    if (sealedRead) return;
     const scope = context.sessionKey ? scopes.get(context.sessionKey) : undefined;
     if (!scope) return;
     try {
@@ -88,7 +111,8 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
     } catch { scope.invalid = true; }
   });
   api.lifecycle.onDispose(() => { live = false; scopes.clear(); });
-  return Object.freeze({ begin(sessionKey: string, sourceCurrent: () => unknown) {
+  return Object.freeze({
+    begin(sessionKey: string, sourceCurrent: () => unknown) {
     signal.throwIfAborted();
     if (!live || !sessionKey.startsWith(`agent:${agentId}:subagent:`) || scopes.has(sessionKey) || scopes.size >= 8) fail('native_domain_scope_unavailable');
     const scope: Scope = { sessionKey, sourceCurrent, invalid: false, completed: false, released: false, calls: new Map() };
@@ -97,23 +121,46 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
       assertExecuting() { executing(scope); },
       record(context: { agentId?: string; sessionKey?: string; sessionId?: string }, callId: string, name: string,
         value: unknown, verify: (args: unknown, value: unknown) => unknown) {
-        try {
-          executing(scope);
-          const call = scope.calls.get(callId);
-          if (scope.terminal || !call || call.captured || context.agentId !== agentId || context.sessionKey !== sessionKey ||
-            context.sessionId !== call.sessionId || call.name !== name || typeof verify !== 'function') fail('native_domain_witness_unverified');
-          call.value = boundedCopy(value); call.verify = verify; call.captured = true;
-        } catch (error) { scope.invalid = true; throw error; }
+        record(scope, context, callId, name, value, verify);
       },
-      complete(identity: ToolExecutionCoverage['identity'], evidence: ToolExecutionEvidence) {
+      complete(identity: ToolExecutionCoverage['identity'], evidence: ToolExecutionEvidence,
+        nativeTerminal?: NativeDomainCompletionInput['terminal']) {
         executing(scope);
+        const coverage = readToolExecutionEvidence(evidence, identity);
+        if (sealedRead) {
+          if (coverage.seal.attempts !== 1) fail('native_domain_terminal_unverified');
+          pin(scope, coverage.identity);
+          for (const receipt of coverage.receipts) {
+            if (!tools.has(receipt.name) || scope.calls.has(receipt.callId) ||
+              scope.calls.size >= MAX_NATIVE_TOOL_CALLS) fail('native_domain_call_unverified');
+            if (!receipt.executionStarted || receipt.originalIsError || receipt.isError) fail('native_domain_read_unverified');
+            scope.calls.set(receipt.callId, { runId: scope.runId!, sessionId: scope.sessionId!,
+              name: receipt.name, captured: false,
+              // Completion's outcome correlation projection comes from the
+              // actual final receipt here, not an invented plugin hook event.
+              after: { runId: scope.runId!, callId: receipt.callId,
+                error: receipt.isError ? 'native_tool_error' : undefined, value: undefined } });
+          }
+        }
+        if (options.terminalSource === 'native-seal') {
+          if (scope.terminal) fail('native_domain_terminal_duplicate');
+          if (!nativeTerminal || nativeTerminal.runId !== identity.runId ||
+            nativeTerminal.sessionKey !== sessionKey || nativeTerminal.sessionId !== identity.sessionId ||
+            nativeTerminal.success !== true || !Array.isArray(nativeTerminal.messages) ||
+            nativeTerminal.messages.length > MAX_TRANSCRIPT_HYDRATION_EVENTS) fail('native_domain_terminal_unverified');
+          scope.terminal = nativeTerminal;
+        } else if (nativeTerminal) fail('native_domain_terminal_unverified');
+        if (scope.runId === undefined || scope.sessionId === undefined) fail('native_domain_hook_identity_missing');
         if (!scope.terminal || identity.runId !== scope.runId || identity.sessionId !== scope.sessionId ||
           identity.agentId !== agentId || identity.sessionKey !== sessionKey) fail('native_domain_terminal_unverified');
-        const coverage = readToolExecutionEvidence(evidence, identity);
         if (coverage.receipts.length !== scope.calls.size) fail('native_domain_calls_omitted');
         const observations = coverage.receipts.map(receipt => {
           const call = scope.calls.get(receipt.callId);
-          if (!call || !call.captured || !call.after || call.name !== receipt.name) fail('native_domain_witness_unverified');
+          if (!call || !call.after || call.name !== receipt.name) fail('native_domain_witness_unverified');
+          if (readOnly) {
+            if (call.captured || receipt.name !== readOnly.name || !receipt.executionStarted || receipt.originalIsError || receipt.isError) fail('native_domain_read_unverified');
+            call.value = boundedCopy(readOnly.validate(receipt));
+          } else if (!call.captured) fail('native_domain_witness_unverified');
           return { tool: { runId: call.runId, sessionKey, sessionId: call.sessionId, callId: receipt.callId,
             name: call.name, value: boundedCopy(call.value) }, after: { ...call.after } };
         });
@@ -122,10 +169,16 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
           validateTool(tool: Readonly<NativeToolObservation['tool']>, receipt?: Readonly<ToolExecutionReceipt>) {
             current(scope);
             const call = scope.calls.get(tool.callId);
-            if (!receipt || !call?.verify || tool.runId !== scope.runId || tool.sessionKey !== sessionKey ||
+            if (!receipt || !call || tool.runId !== scope.runId || tool.sessionKey !== sessionKey ||
               tool.sessionId !== scope.sessionId || tool.name !== call.name || receipt.callId !== tool.callId || receipt.name !== tool.name ||
               !isDeepStrictEqual(boundedCopy(tool.value), call.value)) fail('native_domain_witness_unverified');
-            assertion(call.verify(receipt.executionArgs, tool.value), 'native_domain_witness_async');
+            if (readOnly) {
+              if (receipt.name !== readOnly.name || !receipt.executionStarted || receipt.originalIsError || receipt.isError ||
+                !isDeepStrictEqual(boundedCopy(readOnly.validate(receipt)), call.value)) fail('native_domain_read_unverified');
+            } else {
+              if (!call.verify) fail('native_domain_witness_unverified');
+              assertion(call.verify(receipt.executionArgs, tool.value), 'native_domain_witness_async');
+            }
           } };
       },
       release() {
@@ -140,12 +193,12 @@ export function createOpenClawDomainRunCollector(api: { on: OpenClawPluginApi['o
 }
 /** The sole patch-specific adapter. Replace Watch with an official provider here. */
 export async function observeOpenClawToolExecution(sessionKey: string, assertCurrent: () => unknown, manifestUrl: URL) {
-  // This public SDK entry has no declarations on 2026.10.4. Validate at runtime;
+  // This public SDK entry has no receipt declarations. Validate at runtime;
   // no imports of hashed internals or ambient declarations.
   const entry = 'openclaw/plugin-sdk/agent-core';
   const root = new URL('../../', import.meta.resolve(entry));
   const manifest: unknown = JSON.parse(readFileSync(manifestUrl, 'utf8'));
-  if (!plain(manifest) || manifest.package !== 'openclaw' || manifest.version !== '2026.10.4' || manifest.contract !== contract || !Array.isArray(manifest.files) || manifest.files.length !== 5) fail('native_receipt_pin_invalid');
+  if (!plain(manifest) || manifest.package !== 'openclaw' || !['2026.10.4', '2026.10.10'].includes(String(manifest.version)) || manifest.contract !== contract || !Array.isArray(manifest.files) || manifest.files.length !== (manifest.version === '2026.10.10' ? 6 : 5)) fail('native_receipt_pin_invalid');
   const installed: unknown = JSON.parse(readFileSync(new URL('package.json', root), 'utf8'));
   if (!plain(installed) || installed.version !== manifest.version) fail('native_receipt_version_mismatch');
   for (const file of manifest.files) {
@@ -155,11 +208,11 @@ export async function observeOpenClawToolExecution(sessionKey: string, assertCur
   const sdk: unknown = await import(entry);
   if (!plain(sdk) && (typeof sdk !== 'object' || sdk === null)) fail('native_receipt_extension_missing');
   const provider: unknown = Reflect.get(sdk, 'toolExecutionEvidenceProvider');
-  if (!plain(provider) || provider.contract !== contract || provider.version !== '2026.10.4') fail('native_receipt_version_mismatch');
+  if (!plain(provider) || provider.contract !== contract || provider.version !== manifest.version) fail('native_receipt_version_mismatch');
   const watch: unknown = Reflect.get(sdk, 'observeToolExecutionEvidence');
   if (typeof watch !== 'function' || !identifier(sessionKey)) fail('native_receipt_extension_missing');
   const runs = new Map<object, { identity: ToolExecutionCoverage['identity']; receipts: ToolExecutionReceipt[];
-    seal: ToolExecutionCoverage['seal'] | null; current: (() => unknown) | null; invalid: boolean }>();
+    seal: ToolExecutionCoverage['seal'] | null; terminals?: unknown; current: (() => unknown) | null; invalid: boolean }>();
   let disposed = false;
   const lifetime = new AbortController();
   const waiters = new Map<string, Set<() => void>>();
@@ -182,6 +235,7 @@ export async function observeOpenClawToolExecution(sessionKey: string, assertCur
     } else if (raw.type === 'seal' && typeof raw.complete === 'boolean' && typeof raw.count === 'number' && typeof raw.attempts === 'number' && typeof raw.isCurrent === 'function') {
       run.receipts.sort((a, b) => a.ordinal - b.ordinal);
       run.seal = { complete: raw.complete, count: raw.count, attempts: raw.attempts };
+      if (raw.terminals !== undefined) run.terminals = boundedCopy(raw.terminals);
       run.current = raw.isCurrent as () => unknown;
       for (const resolve of waiters.get(run.identity.runId) ?? []) resolve();
     } else { run.invalid = true; fail('native_receipt_event_invalid'); }
@@ -217,6 +271,20 @@ export async function observeOpenClawToolExecution(sessionKey: string, assertCur
         if (run.seal.complete) assertion(run.current?.(), 'native_receipt_retired');
         return { version: 1, identity: run.identity, receipts: run.receipts, seal: run.seal };
       }, assertCurrent);
+    },
+    /** Exact native Agent messages are a projection. Only the complete live
+     * logical-Run seal establishes settlement, including awaited listeners and
+     * SDK terminal-write drain. This bounded consumer admits one attempt. */
+    terminal(runId: string): NativeDomainCompletionInput['terminal'] {
+      const identity = this.inspectIdentity(runId);
+      const coverage = readToolExecutionEvidence(this.evidence(runId), identity);
+      const run = [...runs.values()].find(value => value.identity.runId === runId)!;
+      if (!Array.isArray(run.terminals) || run.terminals.length !== 1 || coverage.seal.attempts !== 1) fail('native_receipt_terminal_unverified');
+      const terminal: unknown = run.terminals[0];
+      if (!plain(terminal) || terminal.attempt !== 1 || !Array.isArray(terminal.messages) ||
+        terminal.messages.length > MAX_TRANSCRIPT_HYDRATION_EVENTS) fail('native_receipt_terminal_unverified');
+      return { runId, sessionKey: identity.sessionKey, sessionId: identity.sessionId,
+        success: true, messages: boundedCopy(terminal.messages) as unknown[] };
     },
     /** Release the native subscription after settlement. Sealed read-only
      * custody remains source-guarded and collectable with its consumer; no new

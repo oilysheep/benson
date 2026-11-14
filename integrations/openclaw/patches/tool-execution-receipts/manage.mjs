@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { existsSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { execFileSync } from 'node:child_process';
@@ -12,10 +12,10 @@ export function manageReceiptPatch(action, root) {
   assert(['preflight', 'apply', 'verify', 'rollback'].includes(action), 'Unknown patch action');
   const target = realpathSync(root);
   const pkg = JSON.parse(readFileSync(join(target, 'package.json'), 'utf8'));
-  assert.equal(pkg.name, 'openclaw'); assert.equal(pkg.version, '2026.10.4');
+  assert.equal(pkg.name, 'openclaw'); assert(['2026.10.4', '2026.10.10'].includes(pkg.version), 'Unsupported release');
   assert.equal(manifest.version, pkg.version);
   assert.equal(manifest.contract, 'openclaw.tool-execution-evidence.v1');
-  const patch = join(owner, '2026.10.4.patch');
+  const patch = join(owner, `${manifest.version}.patch`);
   assert.equal(hash(readFileSync(patch)), manifest.patchSha256, 'Patch drift');
   const after = action === 'verify' || action === 'rollback';
   const check = patched => {
@@ -24,7 +24,13 @@ export function manageReceiptPatch(action, root) {
       const expected = patched ? file.afterSha256 : file.beforeSha256;
       const path = join(target, file.path);
       if (expected === null) assert(!existsSync(path), 'Unexpected added target');
-      else assert.equal(hash(readFileSync(path)), expected, `Unsupported bytes: ${file.path}`);
+      else {
+        assert.equal(hash(readFileSync(path)), expected, `Unsupported bytes: ${file.path}`);
+        if (pkg.version === '2026.10.10') {
+          assert.equal(file.mode, 0o664, 'Unsupported target mode');
+          assert.equal(statSync(path).mode & 0o777, file.mode, `Unsupported mode: ${file.path}`);
+        }
+      }
     }
   };
   check(after);
