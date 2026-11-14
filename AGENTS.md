@@ -97,7 +97,7 @@ Escalate persistent unavailability or real architecture/security disagreement. R
 
 Normally one SIGNIFICANT stage/branch/PR. Branch from accepted synchronized `main`, commit only the scoped files, protect unrelated work.
 
-Before push: accepted evidence, required review, Plan closure and a concise Hebrew brief on working E2E, remaining gaps, risks and rollback.
+Before push: accepted evidence, required review, Plan closure and a concise brief on working E2E, remaining gaps, risks and rollback.
 
 **Push requires explicit approval; Codex never merges.**
 
@@ -137,7 +137,7 @@ Check full file bytes (not just `BENSON_AGENTS_EOF_V1`) within native budgets. I
 
 For operator-run Pi steps, provide one focused command/block, reason, read-only or state-changing classification, expected validation and rollback; inspect the result.
 
-Speak Hebrew; write prompts, engineering policies, technical artifacts, commits/PRs in English.
+Use English for all coding-agent communication and written artifacts, including responses, progress updates, questions, explanations, reviews, plans, implementation summaries, prompts, engineering policies, technical artifacts, and commits/PRs.
 
 New tests/scripts use existing JS/TS/Node owners; preserve working Python until a separately approved migration.
 

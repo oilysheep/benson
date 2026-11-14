@@ -1,29 +1,37 @@
 # Isolated Tool Execution Receipt / Run Settlement Seal
 
-Temporary OpenClaw **Core/SDK** exception approved 2026-11-02, Plan §11.48.
+Temporary OpenClaw **Core/SDK** exception, Plan §11.48; the operator approved
+source/isolated qualification for 2026.10.10 on 2026-11-14 (§11.65).
 Only disposable isolated acceptance is authorized. No production installation,
-Gateway changes, plugin registration, messages or device actions are authorized.
+Gateway changes, production registration, messages or device actions are authorized.
 The separate WhatsApp Plugin patch remains byte-identical and separately owned.
 
-`manifest.json` is the sole version/hash/file inventory; `2026.10.4.patch` is the
-single canonical patch. No layered patch, fuzzy application, automatic rebase or
-compatibility fallback is supported. Upstream: npm `openclaw@2026.10.4`, matching
-the locked installed dependency. Exact pre/post SHA-256s and patch SHA-256 are in
+`manifest.json` is the sole active version/hash/file inventory;
+`2026.10.10.patch` is the current canonical patch. The unchanged `2026.10.4.patch`
+is retained historical evidence, not permission to apply it to another release. No layered patch, fuzzy application, automatic rebase or
+compatibility fallback is supported. Target: npm `openclaw@2026.10.10`, source commit
+`7dc3350cb9f08fcf9a0af5c4845a20d5b2f1a8be`; checkout dependencies may still be
+2026.10.4 and do not qualify this target. K11 remains independently pinned. Exact pre/post SHA-256s and patch SHA-256 are in
 the manifest, not duplicated here.
 
 ## Boundary and contract
 
-Five existing native files change:
+Six existing native files change:
 
-- `dist/run-entry-gnb95g__.mjs`: observe the actual logical Run identity; seal
+- `dist/run-entry-Cb2bxd3B.mjs`: observe the actual logical Run identity; seal
   after the original requester settlement path; track each dispatched candidate.
-- `dist/selection-lyiH3_Xg.mjs`: identify supported builtin harness dispatch by
+- `dist/runtime-embedded-agent.runtime-DXtEzTGU.mjs`: observe the separate public SDK
+  child entry; seal after terminal-write draining and requester cleanup. This file
+  requires the exact K11 preimage: apply K11 first and roll back receipts first.
+- `dist/selection-BSj0bLZy.mjs`: identify supported builtin harness dispatch by
   native provenance, never its name or a model assertion.
-- `dist/agent-core-RzJjRVA2.mjs`: bounded in-memory observations at native batch
+- `dist/agent-core-BucXfq8L.mjs`: bounded in-memory observations at native batch
   admission, validated/prepared arguments, original execution outcome, final
-  outcome, assistant messages and Agent lifecycle. It also holds the observer
+  outcome, assistant messages and Agent lifecycle. Each attempt captures the
+  actual `agent_end.messages` projection; no plugin `agent_end` hook is assumed
+  for detached children. It also holds the observer
   implementation, avoiding added dist files that native postinstall prunes.
-- `dist/builtin-openclaw-qVsnLx0N.mjs`: nested execution makes coverage incomplete.
+- `dist/builtin-openclaw-4RNo5CR8.mjs`: nested execution makes coverage incomplete.
 - `dist/plugin-sdk/agent-core.js`: additive read-only observer and provider
   metadata exports. No public declarations, execution API or tool is added.
 
@@ -39,7 +47,10 @@ Original arguments mean native message/batch input, not provider network bytes.
 
 A complete seal requires every dispatched candidate to cross the supported
 harness/Agent boundaries, no active attempt/candidate, all observed native calls
-to have exactly one outcome, and exact message/batch identity/argument coverage.
+to have exactly one outcome, one bounded terminal projection per attempt, and
+exact message/batch identity/argument coverage. The adapter's terminal consumer
+admits exactly one attempt and only after the complete live logical seal;
+the Agent terminal event alone never establishes settlement.
 Duplicate identities, unsupported harnesses, nested calls, overflow, capture or
 observer failure, aborted/failed lifecycle, missing outcome or unsettled work
 cannot establish complete coverage. Completion also checks the retained native
@@ -66,6 +77,11 @@ per-call domain verifier retained by the existing tool factory: Jessica captures
 read-only matching request history/active state within its executor; Reminder
 retains its already verified canonical transaction. Parent/source custody remains
 mandatory after child tool custody retires. Model reports remain proposals.
+The explicit pure-read/native-seal profile validates the original receipt's
+execution arguments and domain DTO without requiring optional plugin hooks;
+its Completion outcome correlation fields are projections of native receipts,
+not claims that a plugin hook fired. Default mutation/witness collectors retain
+their existing hook requirements. This is an explicit profile, never a fallback.
 `after_tool_call` payloads are sanitized/truncated observational projections;
 Completion correlates their identity/errors but obtains original and final
 outcomes only from native receipts. Domain verification matches the original
@@ -98,9 +114,13 @@ state or incompatible contract rejects. No mutation command accepts a host
 installation. A filesystem/process failure during application is not atomic:
 discard that disposable namespace; do not try to repair/reapply a partial tree.
 Rollback is hash-guarded and requires the exact complete post-image. It restores
-all five original files. It cannot undo messages, device effects or domain state;
-none are authorized by this exception. Source rollback uses the existing TS04
-checkpoint and preserves the prior candidate, policies and WhatsApp patch.
+all six original files. It cannot undo messages, device effects or domain state;
+none are authorized by this exception. Source rollback uses
+`.checkpoints/domain-run-g1b-g2-20261109/g2-native-evidence-20261114-TD2DTp/`
+verified beforeimages (including the separately saved Completion/test owners),
+restoring only this slice's changes and preserving preexisting dirty state,
+K11, policies, runtime history and the WhatsApp patch. The historical TS04
+checkpoint remains required evidence; it is not a current-tree rewind target.
 
 For any future upgrade: keep this candidate and its recoverable pin; inspect
 current official hooks/transcript/Core APIs first. Compare original native

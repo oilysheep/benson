@@ -1,0 +1,382 @@
+--- a/dist/run-entry-Cb2bxd3B.mjs
++++ b/dist/run-entry-Cb2bxd3B.mjs
+@@ -1,3 +1,4 @@
++import { withToolExecutionEvidence, withToolEvidenceCandidate } from "./agent-core-BucXfq8L.mjs";
+ import "./model-ref-shared-BRJ3VRZV.mjs";
+ import { t as createSubsystemLogger } from "./subsystem-ChoY_Ru5.mjs";
+ import { l as getActiveAgentRunDelegatedAuthority, u as getAgentRunContext } from "./agent-run-registry-Dvv4_0by.mjs";
+@@ -309,6 +310,9 @@
+ //#region src/agents/embedded-agent-runner/run-entry.ts
+ /** Runs one logical turn across model candidates and advances only the accepted winner. */
+ async function runEmbeddedAgentEntry(params) {
++	return await withToolExecutionEvidence(params.identity, () => runEmbeddedAgentEntryWithEvidence(params));
++}
++async function runEmbeddedAgentEntryWithEvidence(params) {
+ 	const admission = params.preparedRunAdmission;
+ 	const requester = {
+ 		...params.identity,
+@@ -522,7 +526,7 @@
+ 					return classified.value;
+ 				};
+ 				try {
+-					const result = await params.runCandidate(provider, model, {
++					const result = await withToolEvidenceCandidate(() => params.runCandidate(provider, model, {
+ 						resolvedModelSelection,
+ 						modelFallbacksOverride: selection.fallbacksOverride,
+ 						agentHarnessRuntimeOverride: resolveRuntimeOverride(provider, model),
+@@ -541,7 +545,7 @@
+ 						onContextEngineTurnCandidate: (facts) => {
+ 							contextEngineTurnCandidate = facts;
+ 						}
+-					});
++					}));
+ 					return {
+ 						result,
+ 						classification: classifyResult(result),
+--- a/dist/runtime-embedded-agent.runtime-DXtEzTGU.mjs
++++ b/dist/runtime-embedded-agent.runtime-DXtEzTGU.mjs
+@@ -1,3 +1,4 @@
++import { withToolExecutionEvidence, withToolEvidenceCandidate } from "./agent-core-BucXfq8L.mjs";
+ import { o as getPluginRuntimeGatewayRequestScope } from "./gateway-request-scope-1BXD1G3l.mjs";
+ import { g as readRuntimeConfig } from "./runtime-snapshot-vj1MIh8M.mjs";
+ import { c as resolveSessionStorePathCore } from "./paths-Bprr747h.mjs";
+@@ -12,7 +13,8 @@
+ import { randomUUID } from "node:crypto";
+ import { consumePluginRequesterDelegation } from "./host-private-capabilities-eTr803c9.mjs";
+ //#region src/plugins/runtime/runtime-embedded-agent.runtime.ts
+-const runPluginEmbeddedAgent = async (params) => {
++const runPluginEmbeddedAgent = async (params) => withToolExecutionEvidence(params, () => withToolEvidenceCandidate(() => runPluginEmbeddedAgentWithEvidence(params)));
++const runPluginEmbeddedAgentWithEvidence = async (params) => {
+ 	const pluginId = getPluginRuntimeGatewayRequestScope()?.pluginId;
+ 	if (!pluginId) throw new Error("Plugin embedded-agent execution requires an active plugin runtime scope.");
+ 	if ("admittedRunContext" in params || "preparedRunAdmission" in params || "compactionCountOwner" in params || "onCompactionAccounting" in params || "onContextAccountingEvent" in params || "onDeferredLifecycleOwner" in params || "onDeferredLifecycleAbort" in params || "onRetryWait" in params) throw new Error("Plugin embedded-agent execution cannot supply host run authority.");
+--- a/dist/agent-core-BucXfq8L.mjs
++++ b/dist/agent-core-BucXfq8L.mjs
+@@ -1,3 +1,4 @@
++import { AsyncLocalStorage } from "node:async_hooks";
+ import { C as parseStrictNonNegativeInteger, P as resolvePositiveTimerTimeoutMs } from "./number-coercion-CkhMiRw8.mjs";
+ import { f as toStringifiedError, n as coerceErrorMessage } from "./error-coercion-BwMr25F8.mjs";
+ import { n as estimateStringChars } from "./cjk-chars-D02XG87t.mjs";
+@@ -636,6 +637,7 @@
+ //#endregion
+ //#region packages/agent-core/src/tool-call-outcome.ts
+ async function finalizeToolCallOutcome(batch, finalized, args) {
++	recordToolEvidenceOriginalOutcome(batch.evidence, finalized);
+ 	const outcome = await applyToolOutcomeHook(batch, finalized, args);
+ 	if (batch.lifecycle?.observeOutcome) outcome.loopOutcome = {
+ 		toolCall: outcome.toolCall,
+@@ -644,10 +646,12 @@
+ 		isError: outcome.isError
+ 	};
+ 	const warning = batch.warnings?.find((entry) => entry.toolCallId === outcome.toolCall.id);
+-	return warning ? {
++	const final = warning ? {
+ 		...outcome,
+ 		result: appendToolLoopWarning(outcome.result, warning)
+ 	} : outcome;
++	recordToolEvidenceOutcome(batch.evidence, final);
++	return final;
+ }
+ async function applyToolOutcomeHook(batch, finalized, args) {
+ 	if (!batch.config.afterToolOutcome) return finalized;
+@@ -994,6 +998,7 @@
+ 		config,
+ 		signal,
+ 		emit,
++		evidence: registerToolEvidenceBatch(toolCalls),
+ 		resolved: /* @__PURE__ */ new Map(),
+ 		validated: /* @__PURE__ */ new Map(),
+ 		onParallelStarted: scheduling?.onParallelStarted,
+@@ -1166,7 +1171,7 @@
+ 		assistantMessage: batch.assistantMessage,
+ 		toolCall: preparation.toolCall,
+ 		hasUnobservedAsyncToolResults: batch.hasUnobservedAsyncToolResults || batch.assistantMessage.content.slice(0, batch.assistantMessage.content.indexOf(toolCall)).some((item) => item.type === "toolCall" && item.async === true)
+-	}, batch.signal, batch.emit);
++	}, batch.signal, batch.emit, batch.evidence);
+ 	return execution.kind === "immediate" ? await finalizeExecutedToolCall(batch, preparation, execution.outcome, preparation.args) : {
+ 		...preparation,
+ 		execution
+@@ -1324,6 +1329,7 @@
+ 			errorKind: "argument-validation"
+ 		};
+ 	}
++	recordToolEvidenceArguments(batch.evidence, toolCall, "validatedArgs", validatedArgs);
+ 	return {
+ 		kind: "prepared",
+ 		toolCall,
+@@ -1331,7 +1337,7 @@
+ 		args: validatedArgs
+ 	};
+ }
+-async function prepareToolCallExecution(prepared, executionContext, signal, emit) {
++async function prepareToolCallExecution(prepared, executionContext, signal, emit, evidence) {
+ 	const updateEvents = [];
+ 	let acceptingUpdates = true;
+ 	const onUpdate = (partialResult) => {
+@@ -1361,6 +1367,7 @@
+ 		};
+ 	};
+ 	const readyExecution = (args, run, disposeSource = () => {}) => {
++		recordToolEvidenceArguments(evidence, prepared.toolCall, "executionArgs", args);
+ 		let disposed = false;
+ 		const dispose = () => {
+ 			if (!disposed) {
+@@ -1453,6 +1460,7 @@
+ 	return readyExecution(readyPreparation.args, (onImplementationStart) => runWithAgentToolExecutionContext(executionContext, () => readyPreparation.execute(onImplementationStart)), readyPreparation.dispose);
+ }
+ async function finalizeExecutedToolCall(batch, prepared, executed, finalArgs) {
++	recordToolEvidenceOriginalOutcome(batch.evidence, { ...executed, toolCall: prepared.toolCall });
+ 	let result = executed.result;
+ 	let isError = executed.isError;
+ 	if (executed.executionStarted && batch.config.afterToolCall) try {
+@@ -1943,12 +1951,16 @@
+ 		this.mutableState.isStreaming = true;
+ 		this.mutableState.streamingMessage = void 0;
+ 		this.mutableState.errorMessage = void 0;
++		const finishEvidence = beginToolEvidenceAttempt();
++		let evidenceFailed = false;
+ 		try {
+ 			await executor(abortController.signal);
+ 		} catch (error) {
++			evidenceFailed = true;
+ 			if (this.runtime?.isLocalError?.(error)) throw error;
+ 			await this.handleRunFailure(error, abortController.signal.aborted);
+ 		} finally {
++			finishEvidence(evidenceFailed || abortController.signal.aborted);
+ 			this.finishRun();
+ 		}
+ 	}
+@@ -1991,6 +2003,8 @@
+ 	* and `finishRun()` clears runtime-owned state.
+ 	*/
+ 	async processEvents(event) {
++		if (event.type === "message_end") observeToolEvidenceMessage(event.message);
++		if (event.type === "agent_end") observeToolEvidenceTerminal(event.messages);
+ 		let publishedToolResult = event.type === "message_end" && event.message.role === "toolResult" ? event.message : void 0;
+ 		const messageIndex = this.mutableState.messages.length;
+ 		switch (event.type) {
+@@ -3497,3 +3511,187 @@
+ };
+ //#endregion
+ export { formatFileOperations as A, generateBranchSummary as C, extractCompactionMessageText as D, computeFileLists as E, appendTextDeltaToAssistantMessage as F, parseCommandArgs as M, substituteArgs as N, extractCurrentCompactionUserRequest as O, runAgentLoop as P, collectEntriesForBranchSummaryFromBranches as S, MAX_FILE_OPS_SECTION_CHARS as T, generateSummary as _, IMAGE_BLOCK_TOKENS as a, shouldCompact as b, calculateContextTokens as c, compactWithoutSummary as d, estimateContextTokens as f, fitCompactionSummary as g, findTurnStartIndex as h, DEFAULT_COMPACTION_SETTINGS as i, serializeConversation as j, formatCompactionUserLabel as k, capCompactionSummary as l, findCutPoint as m, openClawAgentCoreRuntime as n, MAX_COMPACTION_SUMMARY_CHARS as o, estimateTokens as p, streamProxy as r, SUMMARY_TRUNCATED_MARKER as s, Agent as t, compact as u, getLastAssistantUsage as v, prepareBranchEntries as w, formatRequiredAskContext as x, prepareCompaction as y };
++
++// Temporary 2026.10.10 observation only. Native execution/lifecycle remain owners.
++const storage = new AsyncLocalStorage(), candidates = new AsyncLocalStorage();
++const observers = new Set();
++const contract = "openclaw.tool-execution-evidence.v1";
++const MAX_CALLS = 64;
++function snapshot(value) {
++	let bytes = 0, nodes = 0;
++	const seen = new Set();
++	const copy = (input, depth = 0) => {
++		if (++nodes > 32768 || depth > 32) throw new Error("receipt_limit");
++		if (input === null || typeof input === "boolean") return input;
++		if (typeof input === "number" && Number.isFinite(input)) return input;
++		if (typeof input === "string") {
++			bytes += Buffer.byteLength(input);
++			if (bytes > 1048576) throw new Error("receipt_limit");
++			return input;
++		}
++		if (typeof input !== "object" || seen.has(input)) throw new Error("receipt_value");
++		const array = Array.isArray(input), keys = Reflect.ownKeys(input);
++		if (array ? keys.length !== input.length + 1 || input.length > 32768 :
++			Object.getPrototypeOf(input) !== Object.prototype && Object.getPrototypeOf(input) !== null) throw new Error("receipt_value");
++		seen.add(input);
++		const result = array ? [] : Object.create(null);
++		for (const key of keys) {
++			if (array && key === "length") continue;
++			const field = Object.getOwnPropertyDescriptor(input, key);
++			if (typeof key !== "string" || !field || !("value" in field) || !field.enumerable ||
++				array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= input.length)) throw new Error("receipt_value");
++			bytes += Buffer.byteLength(key);
++			if (bytes > 1048576) throw new Error("receipt_limit");
++			Object.defineProperty(result, key, { value: copy(field.value, depth + 1), enumerable: true });
++		}
++		seen.delete(input);
++		return Object.freeze(result);
++	};
++	return copy(value);
++}
++// Select only the native public result carrier, never internal metadata/callbacks.
++function resultCarrier(result) {
++	const content = Object.getOwnPropertyDescriptor(result, "content"), details = Object.getOwnPropertyDescriptor(result, "details");
++	if (!content || !("value" in content) || details && !("value" in details)) throw new Error("receipt_result");
++	return snapshot({ content: content.value, ...details && details.value !== undefined ? { details: details.value } : {} });
++}
++function publish(scope, event) {
++	if (scope.closed) { scope.valid = false; return; }
++	try {
++		const frozen = Object.freeze({ contract, token: scope.token, identity: scope.identity, ...event });
++		for (const observer of scope.observers) {
++			if (!observers.has(observer)) { scope.valid = false; continue; }
++			try {
++				const value = observer.receive(frozen);
++				if (value && typeof value.then === "function") { scope.valid = false; Promise.resolve(value).catch(() => {}); }
++			} catch { scope.valid = false; }
++		}
++	} catch { scope.valid = false; }
++}
++export const toolExecutionEvidenceProvider = Object.freeze({ contract, version: "2026.10.10" });
++export function observeToolExecutionEvidence(sessionKey, receive) {
++	if (typeof sessionKey !== "string" || !sessionKey || typeof receive !== "function") throw new Error("receipt_observer");
++	const observer = { sessionKey, receive };
++	observers.add(observer);
++	return () => { observers.delete(observer); };
++}
++export async function withToolExecutionEvidence(identity, execute) {
++	const selected = [...observers].filter(observer => observer.sessionKey === identity.sessionKey);
++	if (!selected.length) return await storage.run(undefined, execute);
++	let runIdentity;
++	try { runIdentity = snapshot({ runId: identity.runId, sessionId: identity.sessionId, sessionKey: identity.sessionKey, agentId: identity.agentId }); } catch { return await storage.run(undefined, execute); }
++	const scope = { token: Object.freeze({}), identity: runIdentity, observers: selected, calls: [],
++		attempts: 0, active: 0, currentAttempt: 0, terminals: [], valid: true, closed: false, modelCalls: [], candidateCount: 0, candidateActive: 0 };
++	return await storage.run(scope, async () => {
++		publish(scope, { type: "begin" });
++		let returned = false;
++		try { const result = await execute(); returned = true; return result; }
++		finally {
++			const complete = returned && scope.valid && scope.candidateCount > 0 && scope.candidateActive === 0 && scope.attempts > 0 && scope.active === 0 &&
++				scope.terminals.length === scope.attempts && scope.calls.every(call => call.done) && scope.modelCalls.length === scope.calls.length && scope.modelCalls.every(call =>
++					scope.calls.filter(candidate => candidate.attempt === call.attempt && candidate.callId === call.callId && candidate.name === call.name && JSON.stringify(candidate.originalArgs) === JSON.stringify(call.arguments)).length === 1);
++			publish(scope, { type: "seal", complete, count: scope.calls.length, attempts: scope.attempts, terminals: Object.freeze([...scope.terminals]), isCurrent: () => scope.closed && scope.valid && complete });
++			scope.closed = true;
++		}
++	});
++}
++export async function withToolEvidenceCandidate(execute) {
++	const scope = storage.getStore();
++	if (!scope) return await execute();
++	const frame = { scope, supported: 0, attempts: 0 };
++	scope.candidateCount++; scope.candidateActive++; if (scope.closed) scope.valid = false;
++	return await candidates.run(frame, async () => {
++		try { return await execute(); }
++		finally { scope.candidateActive--; if (!frame.supported || !frame.attempts) scope.valid = false; }
++	});
++}
++export function observeToolEvidenceHarness(builtIn) {
++	const scope = storage.getStore(), frame = candidates.getStore();
++	if (!scope) return;
++	if (!builtIn || !frame || frame.scope !== scope || scope.closed) scope.valid = false;
++	else frame.supported++;
++}
++export function beginToolEvidenceAttempt() {
++	const scope = storage.getStore(), frame = candidates.getStore();
++	if (!scope) return () => {};
++	if (scope.active || scope.closed || !frame || frame.scope !== scope || !frame.supported) scope.valid = false;
++	if (frame) frame.attempts++;
++	scope.active++; scope.currentAttempt = ++scope.attempts;
++	return failed => { scope.active--; if (failed) scope.valid = false; };
++}
++export function observeToolEvidenceMessage(message) {
++	const scope = storage.getStore();
++	if (!scope) return;
++	try {
++		if (message.role !== "assistant") return;
++		if (message.stopReason === "error" || message.stopReason === "aborted" || message.errorMessage) scope.valid = false;
++		for (const call of message.content ?? []) if (call.type === "toolCall") {
++			if (scope.modelCalls.length >= MAX_CALLS || scope.closed) { scope.valid = false; return; }
++			scope.modelCalls.push(snapshot({ attempt: scope.currentAttempt, callId: call.id, name: call.name, arguments: call.arguments }));
++		}
++	} catch { scope.valid = false; }
++}
++export function registerToolEvidenceBatch(calls) {
++	const scope = storage.getStore();
++	if (!scope) return;
++	const batch = new WeakMap();
++	try { for (const call of calls) {
++		if (scope.calls.length >= MAX_CALLS || scope.closed) { scope.valid = false; break; }
++		const entry = { ordinal: scope.calls.length, attempt: scope.currentAttempt, callId: call.id, name: call.name, done: false };
++		if (batch.has(call) || scope.calls.some(prior => prior.attempt === entry.attempt && prior.callId === entry.callId)) scope.valid = false;
++		scope.calls.push(entry);
++		entry.originalArgs = snapshot(call.arguments);
++		batch.set(call, entry);
++	} } catch { scope.valid = false; }
++	return { scope, batch };
++}
++export function recordToolEvidenceArguments(evidence, call, kind, args) {
++	if (!evidence) return;
++	try {
++		const entry = evidence.batch.get(call);
++		if (!entry || entry.done || evidence.scope.closed) { evidence.scope.valid = false; return; }
++		entry[kind] = snapshot(args);
++	} catch { evidence.scope.valid = false; }
++}
++export function recordToolEvidenceOriginalOutcome(evidence, outcome) {
++	if (!evidence) return;
++	try {
++		const entry = evidence.batch.get(outcome.toolCall);
++		if (!entry || entry.done || evidence.scope.closed) { evidence.scope.valid = false; return; }
++		if (!Object.hasOwn(entry, "originalResult")) { entry.originalResult = resultCarrier(outcome.result); entry.originalIsError = outcome.isError; }
++	} catch { evidence.scope.valid = false; }
++}
++export function recordToolEvidenceOutcome(evidence, outcome) {
++	if (!evidence) return;
++	const { scope, batch } = evidence;
++	try {
++		const entry = batch.get(outcome.toolCall);
++		if (!entry || entry.done || scope.closed) { scope.valid = false; return; }
++		entry.done = true;
++		const { done, ...identity } = entry;
++		publish(scope, { type: "receipt", receipt: snapshot({ ...identity,
++			executionStarted: outcome.executionStarted, isError: outcome.isError, result: resultCarrier(outcome.result) }) });
++	} catch { scope.valid = false; }
++}
++export function invalidateNestedToolEvidence() {
++	const scope = storage.getStore();
++	if (scope) scope.valid = false;
++}
++
++// Exact native Agent projection only; terminal listeners/Run drain settle later.
++export function observeToolEvidenceTerminal(messages) {
++ const scope=storage.getStore(); if(!scope)return;
++ try {
++  if(scope.closed||scope.active!==1||!scope.currentAttempt||scope.terminals.some(t=>t.attempt===scope.currentAttempt)||!Array.isArray(messages)||messages.length>1024)throw Error("receipt_terminal");
++  const fields=(value,keys)=>Object.fromEntries(keys.flatMap(key=>{
++   const field=Object.getOwnPropertyDescriptor(value,key);
++   if(!field)return []; if(!("value" in field))throw Error("receipt_terminal");
++   return field.value===undefined?[]:[[key,field.value]];
++  }));
++  const projection=messages.map(message=>({
++   ...fields(message,["role","stopReason","toolCallId","toolName","isError"]),
++   ...(Array.isArray(message.content)?{content:message.content.map(part=>fields(part,["type","id","name","text"]))}:{})
++  }));
++  scope.terminals.push(snapshot({attempt:scope.currentAttempt,messages:projection}));
++ }catch{scope.valid=false;}
++}
+--- a/dist/builtin-openclaw-4RNo5CR8.mjs
++++ b/dist/builtin-openclaw-4RNo5CR8.mjs
+@@ -1,3 +1,4 @@
++import { invalidateNestedToolEvidence } from "./agent-core-BucXfq8L.mjs";
+ import { c as normalizeOptionalLowercaseString, l as normalizeOptionalString, n as localeLowercasePreservingWhitespace, o as normalizeLowercaseStringOrEmpty, t as hasNonEmptyString } from "./string-coerce-1VuiLaaR.mjs";
+ import { D as resolveExpiresAtMsFromDurationMs, F as resolveTimerTimeoutMs, g as isFutureDateTimestampMs, h as finiteSecondsToTimerSafeMilliseconds, m as clampTimerTimeoutMs, o as asDateTimestampMs, u as asPositiveFiniteNumber, y as parseDateStringTimestampMs } from "./number-coercion-CkhMiRw8.mjs";
+ import { c as readErrorCauses, d as toErrorObject, r as collectErrorGraphCandidates } from "./error-coercion-BwMr25F8.mjs";
+@@ -4416,6 +4417,7 @@
+ 	const { scopeId: activityScope } = params.nestedToolActivityState;
+ 	let nestedStartOrder = 0;
+ 	return async (toolParams) => {
++		invalidateNestedToolEvidence();
+ 		const runSignal = params.runSignal;
+ 		const signal = AbortSignal.any([toolParams.signal ?? runSignal, runSignal]);
+ 		let input = toolParams.input;
+--- a/dist/selection-BSj0bLZy.mjs
++++ b/dist/selection-BSj0bLZy.mjs
+@@ -1,3 +1,4 @@
++import { observeToolEvidenceHarness } from "./agent-core-BucXfq8L.mjs";
+ import { t as formatErrorMessage } from "./errors-CQHIobuu.mjs";
+ import { O as freezeDiagnosticTraceContext, P as runWithDiagnosticTraceContext, T as createDiagnosticTraceContext, c as emitTrustedDiagnosticEventWithPrivateData, k as getActiveDiagnosticTraceContext, s as emitTrustedDiagnosticEvent, w as createChildDiagnosticTraceContext } from "./diagnostic-events-C91J-XX8.mjs";
+ import { t as createSubsystemLogger } from "./subsystem-ChoY_Ru5.mjs";
+@@ -594,6 +595,7 @@
+ 	});
+ }
+ async function runAgentHarnessOperation(harness, params, execute) {
++	observeToolEvidenceHarness(isBuiltInOpenClawAgentHarness(harness));
+ 	await prepareActiveNodeContext(readRunOperatorAuthority(params)?.profileId);
+ 	resolveAdmittedRunActiveAssertion(params.admittedRunContext, params.abortSignal)?.();
+ 	const activeTrace = getActiveDiagnosticTraceContext();
+--- a/dist/plugin-sdk/agent-core.js
++++ b/dist/plugin-sdk/agent-core.js
+@@ -1,3 +1,4 @@
++export { observeToolExecutionEvidence, toolExecutionEvidenceProvider } from "../agent-core-BucXfq8L.mjs";
+ import { t as buildSessionContext } from "../session-U0pkFt-u.mjs";
+ import { a as bashExecutionToText, i as COMPACTION_SUMMARY_SUFFIX, n as BRANCH_SUMMARY_SUFFIX, o as convertToLlm, r as COMPACTION_SUMMARY_PREFIX, t as BRANCH_SUMMARY_PREFIX } from "../messages-Cdi_z_94.mjs";
+ import { C as generateBranchSummary, P as runAgentLoop, S as collectEntriesForBranchSummaryFromBranches, _ as generateSummary, a as IMAGE_BLOCK_TOKENS, b as shouldCompact, c as calculateContextTokens, f as estimateContextTokens, h as findTurnStartIndex, i as DEFAULT_COMPACTION_SETTINGS, j as serializeConversation, m as findCutPoint, n as openClawAgentCoreRuntime, p as estimateTokens, r as streamProxy, t as Agent, u as compact, v as getLastAssistantUsage, w as prepareBranchEntries, y as prepareCompaction } from "../agent-core-BucXfq8L.mjs";

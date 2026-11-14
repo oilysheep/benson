@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { plain } from '../../../benson-routing/core/value.js';
 import type { OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
-import { createJessicaTaskToolFactory, createJessicaReadToolFactory } from '../src/tool.js';
+import { createJessicaTaskToolFactory, createJessicaReadToolFactory, resolveJessicaRequesterDelegation } from '../src/tool.js';
 import { fixture as domainFixture } from './fixtures/domain-state.js';
 import { Compile } from 'typebox/compile';
 import { loadPolicy } from '../../../../../agents/jessica-vacuum/lib/policy.js';
@@ -224,5 +225,63 @@ for (const mode of ['success', 'foreign-agent', 'foreign-route', 'forged-input',
       retainedCompletion(request, result); sourceAbort.abort(); assert.throws(() => retainedCompletion!(request, result));
     } else assert.throws(() => retainedCompletion!(request, result));
     assert.equal(reads, 1);
+  });
+}
+
+for (const mode of ['success', 'missing-log', 'throwing-log', 'retired', 'cancelled', 'invalid-result', 'logger-revocation'] as const) {
+  test(`delegated read diagnostic preserves privacy and live guards (unit mock): ${mode}`, async () => {
+    const f = domainFixture(), abort = new AbortController(), messages: string[] = [];
+    let live = true, reads = 0;
+    const current = () => assert(live, 'mock native scope retired');
+    const context = { agentId: 'jessica-vacuum', sessionKey: 'actual-child-key', sessionId: 'actual-child-session',
+      assertInvocationCurrent: current,
+      delegatedRequester: { contract: 'openclaw.requester-delegation.v1' as const,
+        parent: { agentId: 'main', sessionKey: 'actual-parent-key', sessionId: 'actual-parent-session',
+          runId: 'actual-parent-run', toolName: 'jessica_task', toolCallId: 'actual-parent-call' },
+        child: { agentId: 'jessica-vacuum', sessionKey: 'actual-child-key', sessionId: 'actual-child-session', runId: 'actual-child-run' },
+        requester: { senderId: 'fixture-private', deliveryContext: { channel: 'whatsapp', accountId: 'fixture-account', to: 'fixture-private' } },
+        signal: abort.signal, assertCurrent: current } };
+    const roster = { accountId: 'fixture-account', approvedIds: [...new Set(loadPolicy(f.policy).rules.map(rule => rule.subject))],
+      subjectForRoute: (route: string) => route === 'fixture-private' ? 'oren' : null };
+    const source = resolveJessicaRequesterDelegation(context, roster, mode === 'missing-log' ? undefined : message => {
+      if (mode === 'throwing-log') throw Error('sensitive logger failure must not escape');
+      messages.push(message); if (mode === 'logger-revocation') live = false;
+    });
+    assert(source);
+    const tool = createJessicaReadToolFactory({ roster, source, registryConfig: f.registry, policy: loadPolicy(f.policy), clock: f.clock,
+      async read(_request, _identity, authority) {
+        authority.assertCurrent(); reads++;
+        const at = f.clock().toISOString();
+        return validateResult({ schemaVersion: '1', domain: 'jessica-vacuum', operation: 'status', status: 'success', verified: true,
+          data: { kind: 'status', observedAt: at, sourceUpdatedAt: at, freshness: 'fresh', state: 'docked', batteryLevel: 90,
+            activeSegments: [], currentSegment: null }, warnings: [], error: null, pendingContext: null }, null, f.clock());
+      }, jsonResult(value) {
+        if (mode === 'invalid-result') throw Error('serialization refused');
+        return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+      } })(context);
+    assert(tool && !Array.isArray(tool));
+    if (mode === 'retired') live = false;
+    if (mode === 'cancelled') abort.abort();
+    const output = tool.execute('actual-child-call', { operation: 'status' });
+    if (['retired', 'cancelled', 'invalid-result', 'logger-revocation'].includes(mode)) await assert.rejects(output);
+    else assert.equal(validateResult((await output).details, null, f.clock()).status, 'success');
+    assert.equal(reads, ['retired', 'cancelled'].includes(mode) ? 0 : 1);
+    assert.equal(messages.length, ['success', 'logger-revocation'].includes(mode) ? 1 : 0);
+    if (messages.length) {
+      const line = messages[0]!;
+      for (const sensitive of ['fixture-private', 'fixture-account', 'actual-parent', 'actual-child', 'batteryLevel', 'docked', 'assertCurrent', 'signal'])
+        assert(!line.includes(sensitive), 'no raw identifiers, result content or handles');
+      const observation: unknown = JSON.parse(line.slice('benson.jessica_g1b '.length));
+      assert(plain(observation) && plain(observation.parent) && plain(observation.child));
+      const hash = (v: string) => createHash('sha256').update(v).digest('hex');
+      assert.equal(observation.parent.toolCallIdSha256, hash('actual-parent-call'));
+      assert.equal(observation.child.runIdSha256, hash('actual-child-run'));
+      assert.deepEqual(observation.read, { operation: 'status', status: 'success', verified: true });
+      assert.equal(observation.phase, 'read_validated');
+    }
+    live = false;
+    const count = messages.length;
+    source.observeRead?.('retired-projection', { operation: 'status', status: 'success', verified: true });
+    assert.equal(messages.length, count, 'retired source cannot emit new binding evidence');
   });
 }

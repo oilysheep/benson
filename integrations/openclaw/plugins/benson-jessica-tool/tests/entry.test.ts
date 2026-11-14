@@ -48,7 +48,7 @@ function fixture(registrationMode: 'full' | 'tool-discovery' = 'full') {
   const register: unknown = entry.register; assert.equal(typeof register, 'function');
   if (typeof register !== 'function') assert.fail('Missing entry');
   const resources: string[] = [];
-  register({ registrationMode, resolvePath: (p: string) => {
+  register({ registrationMode, on() {}, lifecycle: { signal: new AbortController().signal, onDispose() {} }, resolvePath: (p: string) => {
     resources.push(p); return resolve('output/typescript/integrations/openclaw/plugins/benson-jessica-tool', p);
   },
     runtime: { channel: { runtimeContexts: { get() { return state.bound ? { current(received: unknown) {
@@ -66,7 +66,7 @@ function fixture(registrationMode: 'full' | 'tool-discovery' = 'full') {
       assert(!tools.has(options.name)); tools.set(options.name, factory.create);
     } });
   assert.deepEqual(resources, ['../../../../agents/reminder-service/config/recipients.json',
-    '../../../../agents/jessica-vacuum/config/policy.v1.json', '../../../../agents/jessica-vacuum/config/registry.v1.json']);
+    '../../../../agents/jessica-vacuum/config/policy.v1.json', '../../../../agents/jessica-vacuum/config/registry.v1.json', '../../patches/tool-execution-receipts/manifest.json']);
   const create = tools.get('jessica_task'); assert(create);
   const tool = create(context); assert(tool && !Array.isArray(tool));
   return { state, context, tools, tool };
@@ -90,6 +90,8 @@ test('Jessica tool-discovery registers inert schemas and retains live Response a
   const f = fixture('tool-discovery');
   assert.equal(f.state.credentials, 0); assert.equal(f.state.reads, 0);
   assert.deepEqual(f.tool.parameters, fixture().tool.parameters);
+  assert.equal(f.tool.catalogMode, 'direct-only');
+  assert.equal(fixture().tool.catalogMode, 'direct-only');
   f.state.bound = false;
   await assert.rejects(f.tool.execute('status-call', { operation: 'status' }), /native_original_source_unavailable/);
   assert.equal(f.state.credentials, 0); assert.equal(f.state.reads, 0);
