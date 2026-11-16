@@ -215,8 +215,16 @@ for (const mode of ['success', 'foreign-agent', 'foreign-route', 'forged-input',
     const request = mode === 'forged-input' ? { operation: 'status', requesterId: 'oren' } : mode === 'disabled-operation' ? { operation: 'room_settings', room: 'living_room' } : { operation: 'status' };
     const output = tool.execute('raw-read', request);
     if (mode !== 'success' && mode !== 'source-without-route') { await assert.rejects(output); assert.equal(reads, ['retired-after-read', 'retired-at-serialization', 'foreign-result'].includes(mode) ? 1 : 0); return; }
-    const result = validateResult((await output).details, null, f.clock());
+    const released = await output;
+    const result = validateResult(released.details, null, f.clock());
     assert.equal(result.schemaVersion, '1'); assert.equal(result.operation, 'status'); assert.equal(result.verified, true); assert.equal(reads, 1);
+    const text = released.content[0]; assert(text?.type === 'text' && typeof text.text === 'string');
+    const view: unknown = JSON.parse(text.text);
+    assert(plain(view) && plain(view.facts));
+    assert.deepEqual(Object.keys(view).sort(), ['facts', 'schemaVersion']); assert.equal(view.schemaVersion, 2);
+    assert.deepEqual(view.facts.verificationScope, ['status_read']); assert.deepEqual(view.facts.uncertainty, []);
+    assert.equal(view.facts.domainSchemaVersion, result.schemaVersion); assert.deepEqual(view.facts.data, result.data);
+    assert(!Object.hasOwn(view.facts, 'binding')); assert(!Object.hasOwn(result, 'facts'));
     assert(retainedCompletion); retainedCompletion(request, result);
     assert.throws(() => retainedCompletion!({ operation: 'rooms' }, result), /jessica_read_evidence_mismatch/);
     assert.throws(() => retainedCompletion!(request, { ...result, verified: false }), /jessica_read_evidence_mismatch/);
@@ -227,6 +235,27 @@ for (const mode of ['success', 'foreign-agent', 'foreign-route', 'forged-input',
     assert.equal(reads, 1);
   });
 }
+
+test('domain read presentation preserves raw v1 for other reads and failures', async () => {
+  for (const operation of ['capabilities', 'status'] as const) {
+    const f = domainFixture(), policy = loadPolicy(f.policy);
+    const raw = validateResult({ schemaVersion: '1', domain: 'jessica-vacuum', operation,
+      status: operation === 'status' ? 'failure' : 'success', verified: operation !== 'status',
+      data: operation === 'status' ? null : { kind: 'capabilities', observedAt: f.clock().toISOString(), sourceUpdatedAt: null,
+        freshness: 'fresh', capabilities: [], inventoryScope: 'accepted_registry_only', liveAvailability: 'not_checked' },
+      warnings: [], error: operation === 'status' ? { code: 'SOURCE_UNAVAILABLE', stage: 'verification', retryable: false,
+        retryMode: 'none', sideEffects: 'none', message: 'Synthetic read failure' } : null, pendingContext: null }, null, f.clock());
+    const create = createJessicaReadToolFactory({ registryConfig: f.registry, policy, clock: f.clock,
+      roster: { accountId: 'fixture-account', approvedIds: [...new Set(policy.rules.map(rule => rule.subject))],
+        subjectForRoute: route => route === 'fixture-private' ? 'oren' : null },
+      async read() { return raw; }, jsonResult(value) { return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value }; } });
+    const tool = create({ agentId: 'jessica-vacuum', requesterSenderId: 'fixture-private',
+      deliveryContext: { channel: 'whatsapp', accountId: 'fixture-account', to: 'fixture-private' }, assertInvocationCurrent() {} });
+    assert(tool && !Array.isArray(tool)); const result = await tool.execute('read', { operation });
+    const text = result.content[0]; assert(text?.type === 'text' && typeof text.text === 'string');
+    assert.deepEqual(JSON.parse(text.text), raw); assert.deepEqual(result.details, raw);
+  }
+});
 
 for (const mode of ['success', 'missing-log', 'throwing-log', 'retired', 'cancelled', 'invalid-result', 'logger-revocation'] as const) {
   test(`delegated read diagnostic preserves privacy and live guards (unit mock): ${mode}`, async () => {

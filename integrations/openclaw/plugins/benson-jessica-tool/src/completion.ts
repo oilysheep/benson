@@ -1,5 +1,6 @@
 import { parseReadRequest, parseExecuteRequest, EXECUTE_OPERATIONS } from '../../../../../agents/jessica-vacuum/lib/schemas.js';
-import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.js';
+import { validateResult, type Result } from '../../../../../agents/jessica-vacuum/lib/results.js';
+import type { Facts } from '../../../benson-routing/core/contracts.js';
 import type { CurrentRequestProjection } from '../../../benson-routing/core/conversation-context.js';
 import { isDeepStrictEqual as same } from 'node:util';
 import type { OpenClawPluginToolFactory, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
@@ -7,6 +8,18 @@ import { settleNativeDomainCompletion, type NativeDomainCompletionInput } from '
 import { createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
 import { normalizeLegacyTaskResult } from '../../../benson-routing/core/legacy-response.js';
 import { boundedCopy, synchronous, decode, object, IdentifierSchema, fail, plain, assertion } from '../../../benson-routing/core/value.js';
+
+/** The enabled read-only G2 slice. Call only with the validated raw Result.
+ * Both child-visible read facts and host knownFacts use this projection;
+ * this is neither requester authority nor evidence of native settlement.
+ * Other reads/outcomes retain their existing contracts, not inferred scopes.
+ */
+export function projectJessicaReadFacts(value: Result): Facts | null {
+  if (value.operation !== 'status' || value.status !== 'success' || !value.verified || value.pendingContext !== null) return null;
+  return structuredClone({ domain: value.domain, domainSchemaVersion: value.schemaVersion, operation: value.operation,
+    status: value.status, verified: value.verified, verificationScope: ['status_read'],
+    data: value.data, warnings: value.warnings, error: value.error, pendingContext: null, effects: [], uncertainty: [] });
+}
 
 /** Domain normalization and effect ownership stay here; the existing Completion
  * owner validates native observations and reconstructs failed reporting.

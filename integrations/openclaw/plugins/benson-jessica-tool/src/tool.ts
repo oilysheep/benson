@@ -16,6 +16,7 @@ import { READ_REQUEST_SCHEMA, parseReadRequest } from '../../../../../agents/jes
 import { loadRegistry } from '../../../../../agents/jessica-vacuum/lib/registry.js';
 import { validateResult, type Result } from '../../../../../agents/jessica-vacuum/lib/results.js';
 import { validateTaskEnvelope } from '../../../benson-routing/core/task-envelope.js';
+import { projectJessicaReadFacts } from './completion.js';
 
 type Tool = Exclude<NonNullable<ReturnType<OpenClawPluginToolFactory<2>['create']>>, unknown[]>;
 type ToolResult = Awaited<ReturnType<Tool['execute']>>;
@@ -139,11 +140,17 @@ export function createJessicaReadToolFactory(options: {
           if (!isDeepStrictEqual(boundedCopy(parseReadRequest(args)), capturedRequest) ||
             !isDeepStrictEqual(boundedCopy(value), captured)) fail('jessica_read_evidence_mismatch');
         }), 'jessica_read_serialization_must_be_synchronous');
+        const facts = projectJessicaReadFacts(result);
+        // Version 2 is the model-visible status view only. Preserve native
+        // details and receipt custody of the exact raw Result v1. Other reads
+        // and failures keep their existing raw v1 output and G2 restrictions.
+        const output: ToolResult = facts ? { ...serialized,
+          content: [{ type: 'text', text: JSON.stringify({ schemaVersion: 2, facts }) }] } : serialized;
         // Only a validated/serialized result can produce this diagnostic. The
         // final live guard still owns release, including observer side effects.
         try { options.source?.observeRead?.(callId, result); } catch { /* Observation is not authorization. */ }
         assertInvocationCurrent(authority);
-        return serialized;
+        return output;
       },
     };
   };

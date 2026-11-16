@@ -1,0 +1,591 @@
+--- a/dist/.setup/socket-close-BvdLXlbQ.mjs
++++ b/dist/.setup/socket-close-BvdLXlbQ.mjs
+@@ -15,6 +15,155 @@
+ import { FILE_LOCK_STALE_ERROR_CODE, FILE_LOCK_TIMEOUT_ERROR_CODE, acquireFileLock } from "openclaw/plugin-sdk/file-lock";
+ import { captureEffectAuthority, createNodeProxyAgent } from "openclaw/plugin-sdk/fetch-runtime";
+ import { randomUUID } from "node:crypto";
++// Temporary connection capture, pinned to @openclaw/whatsapp@2026.10.10.
++// Diagnostic correlation is not authorization or execution/settlement evidence.
++const BENSON_CONNECTION_SOCKET_LIMIT = 1;
++const bensonCaptureState = { reservations: 0, entered: 0, returned: 0, attempts: 0, records: 0, sequence: 0, incomplete: false };
++const bensonCaptureContexts = new WeakSet();
++const bensonSocketDiagnostics = new WeakMap();
++const bensonCaptureStages = new Set(['monitor', 'ownership', 'pending-cleanup', 'previous-close', 'factory', 'path-check', 'credential-barrier', 'credential-queue', 'auth-bootstrap', 'version', 'signal-store', 'constructor', 'wait-open', 'inbox-attach', 'ready', 'cleanup', 'stopped', 'transport', 'connection', 'retry']);
++const bensonCaptureEvents = new Set(['setup-entered', 'stage-entered', 'stage-finished', 'failure', 'cleanup-failure', 'reserved', 'admission-denied', 'constructor-entered', 'constructor-returned', 'transport-open', 'transport-close', 'transport-error', 'stream-end', 'stream-error', 'connection-open', 'connection-close', 'local-close-intent', 'listeners-removed', 'retry-scheduled', 'retry-wait-finished', 'retry-aborted', 'queue-barrier-entered', 'queue-barrier-finished', 'summary', 'overflow']);
++function bensonOwn(value, key) {
++	try { return value && (typeof value === 'object' || typeof value === 'function') ? Object.getOwnPropertyDescriptor(value, key)?.value : void 0; } catch { return void 0; }
++}
++const bensonFrameModules = new Set([
++ '@openclaw/whatsapp/dist/.setup/socket-close-BvdLXlbQ.mjs',
++ '@openclaw/whatsapp/dist/.setup/connection-controller-g_8-U3na.mjs',
++ '@openclaw/whatsapp/dist/.setup/monitor-B5qdng3U.mjs',
++ 'baileys/lib/Socket/socket.js', 'baileys/lib/Socket/Client/websocket.js',
++ 'baileys/lib/Utils/generics.js', 'ws/lib/websocket.js'
++]);
++const bensonNativeStackGetter = Object.getOwnPropertyDescriptor(new Error(), 'stack')?.get;
++function bensonErrorStack(error) {
++ try {
++  const descriptor = Object.getOwnPropertyDescriptor(error, 'stack');
++  if (descriptor && 'value' in descriptor) return descriptor.value;
++  if (bensonNativeStackGetter && descriptor?.get === bensonNativeStackGetter) return descriptor.get.call(error);
++ } catch {}
++}
++function bensonDiagnosticError(error, depth = 0, seen = new Set()) {
++	const result = { type: 'WITHHELD' };
++	try {
++		if (!error || typeof error !== 'object' || seen.has(error)) return { ...result, truncated: true };
++		seen.add(error);
++		const name = bensonOwn(error, 'name');
++		const prototype = Object.getPrototypeOf(error);
++		const inheritedName = bensonOwn(prototype, 'name');
++		const allowedTypes = ['Error', 'TypeError', 'RangeError', 'AggregateError', 'AbortError', 'TimeoutError', 'Boom'];
++		if (allowedTypes.includes(name)) result.type = name;
++		else if (allowedTypes.includes(inheritedName)) result.type = inheritedName;
++		const message = bensonOwn(error, 'message');
++		result.category = new Map([['Connection Closed', 'CONNECTION_CLOSED'], ['Connection was lost', 'CONNECTION_LOST'], ['Timed Out', 'TIMED_OUT'], ['Socket connection timeout', 'SOCKET_TIMEOUT'], ['WhatsApp connection controller is shutting down', 'CONTROLLER_STOPPED'], ['DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED', 'SOCKET_BUDGET']]).get(message) ?? 'WITHHELD';
++		const output = bensonOwn(error, 'output');
++		const status = bensonOwn(output, 'statusCode') ?? bensonOwn(error, 'statusCode');
++		if (Number.isInteger(status) && status >= 100 && status <= 999) result.status = status;
++		const code = bensonOwn(error, 'code');
++		if (['ECONNRESET', 'ECONNREFUSED', 'ETIMEDOUT', 'ENETUNREACH', 'EHOSTUNREACH', 'EPIPE', 'ABORT_ERR', 'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'].includes(code)) result.code = code;
++		const stack = bensonErrorStack(error);
++		result.frames = [];
++		if (typeof stack === 'string') for (const line of stack.slice(0, 8192).split('\n').slice(1, 33)) {
++			const match = /(?:\/node_modules\/)((?:@openclaw\/whatsapp|baileys|ws|openclaw)\/(?:dist|lib)\/[A-Za-z0-9_./-]{1,180}):(\d{1,7}):(\d{1,5})(?:\)|$)/.exec(line);
++			if (match && bensonFrameModules.has(match[1])) result.frames.push({ module: match[1], line: Number(match[2]), column: Number(match[3]) });
++   else {
++    const local = /\/(socket-close-BvdLXlbQ|connection-controller-g_8-U3na|monitor-B5qdng3U)\.mjs:(\d{1,7}):(\d{1,5})(?:\)|$)/.exec(line);
++    if (local) result.frames.push({ module: '@openclaw/whatsapp/dist/.setup/' + local[1] + '.mjs', line: Number(local[2]), column: Number(local[3]) });
++   }
++			if (result.frames.length === 4) break;
++		}
++		const cause = bensonOwn(error, 'cause'), errors = bensonOwn(error, 'errors');
++		if (cause !== void 0) {
++			if (depth < 2) result.cause = bensonDiagnosticError(cause, depth + 1, seen);
++			else result.truncated = true;
++		}
++		if (Array.isArray(errors)) {
++			if (depth < 2) result.errors = Array.from({ length: Math.min(bensonOwn(errors, 'length') ?? 0, 2) }, (_, index) => bensonDiagnosticError(bensonOwn(errors, String(index)), depth + 1, seen));
++			if (depth >= 2 || bensonOwn(errors, 'length') > 2) result.truncated = true;
++		}
++	} catch { result.truncated = true; }
++	if (result.cause?.truncated || result.errors?.some(child => child.truncated)) result.truncated = true;
++	return result;
++}
++function bensonCloseProjection(code, reason) {
++	const result = { closeCode: Number.isInteger(code) && code >= 0 && code <= 65535 ? code : null, closeReason: 'WITHHELD', closeReasonBytes: null };
++	try {
++		if (typeof reason === 'string') { result.closeReasonBytes = Math.min(Buffer.byteLength(reason), 65536); if (reason === '') result.closeReason = 'EMPTY'; }
++		else if (Buffer.isBuffer(reason)) { result.closeReasonBytes = Math.min(reason.byteLength, 65536); if (reason.byteLength === 0) result.closeReason = 'EMPTY'; }
++	} catch {}
++	return result;
++}
++function bensonCreateConnectionDiagnostic(input = {}) {
++	const started = performance.now(), attemptOrdinal = ++bensonCaptureState.attempts;
++	const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value) ? value : null;
++	const runId = uuid(input.runId), connectionId = uuid(input.connectionId);
++	const seen = new Set(); let stage = 'monitor', logger, failureRecorded = false;
++	const event = (kind, nextStage = stage, error, details = {}) => {
++		try {
++			if (!bensonCaptureEvents.has(kind) || !bensonCaptureStages.has(nextStage)) { bensonCaptureState.incomplete = true; return; }
++			if (kind === 'stage-entered' || kind === 'setup-entered') stage = nextStage;
++			const key = kind + ':' + nextStage + (kind.startsWith('queue-barrier-') ? ':' + bensonOwn(details, 'barrierId') : '');
++			if (seen.has(key)) return;
++			if (bensonCaptureState.records >= 62 && kind !== 'summary') {
++				bensonCaptureState.incomplete = true;
++				if (bensonCaptureState.records >= 63) return;
++				kind = 'overflow';
++			}
++			if (bensonCaptureState.records >= 64) { bensonCaptureState.incomplete = true; return; }
++			seen.add(key);
++			const record = { schemaVersion: 1, event: kind, stage: nextStage, runId, connectionId, correlation: runId && connectionId ? 'PRESENT' : 'MISSING', pid: process.pid,
++				sequence: ++bensonCaptureState.sequence, at: new Date().toISOString(), elapsedMs: Math.round(performance.now() - started), attemptOrdinal,
++				reservations: bensonCaptureState.reservations, constructorEntered: bensonCaptureState.entered, constructorReturned: bensonCaptureState.returned,
++				captureComplete: !bensonCaptureState.incomplete };
++			for (const key of ['delayMs', 'reconnectAttempts', 'precedingRetryAttempt', ...(kind.startsWith('queue-barrier-') ? ['barrierId', 'tailSaveId', 'activeSaveId', 'predecessorSaveId', 'pendingSaves', 'stageAgeMs', 'activeAgeMs', 'tailAgeMs', 'barrierElapsedMs'] : [])]) {
++				const value = bensonOwn(details, key);
++				if (Number.isSafeInteger(value) && value >= 0) record[key] = value;
++			}
++            const saveStages = ['queued','save-task','backup-read','backup-validate','backup-before-persistence','backup-path-check','backup-atomic-publication','backup-before-rename','backup-published','current-before-persistence','current-import','current-serialize','current-path-check','current-atomic-publication','current-before-rename','current-published','settled'];
++            for (const [key, values] of (kind.startsWith('queue-barrier-') ? [['saveStage', saveStages], ['saveState', ['queued','running','drained']], ['barrierOutcome', ['waiting','drained','timed_out']]] : [])) {
++             const value = bensonOwn(details, key); if (values.includes(value)) record[key] = value;
++            }
++			if (bensonOwn(details, 'closeObserved') === false) record.closeMetadata = 'UNAVAILABLE';
++			if (bensonOwn(details, 'synchronousConstructorFailure') === true) record.transportCreation = 'UNKNOWN';
++			if (kind === 'transport-close') Object.assign(record, bensonCloseProjection(bensonOwn(details, 'closeCode'), bensonOwn(details, 'closeReason')));
++			if (error !== void 0) { record.error = bensonDiagnosticError(error); if (record.error.truncated) { bensonCaptureState.incomplete = true; record.captureComplete = false; } }
++			if (Buffer.byteLength(JSON.stringify(record)) > 2048) {
++				bensonCaptureState.incomplete = true; record.error = { type: 'WITHHELD', truncated: true }; record.captureComplete = false;
++			}
++			bensonCaptureState.records++;
++			logger ??= getChildLogger({ module: 'web-connection-diagnostic' });
++			logger.info(record, 'benson.connection_diagnostic');
++		} catch { bensonCaptureState.incomplete = true; }
++	};
++	const context = Object.freeze({ attemptOrdinal, event, failure(error, details) { if (!failureRecorded) { failureRecorded = true; event('failure', stage, error, details); } }, summary: () => event('summary', 'stopped') });
++	bensonCaptureContexts.add(context);
++	return context;
++}
++function bensonObserveSocket(sock, diagnostic) {
++	try {
++	const listeners = []; let closeObserved = false;
++	const on = (emitter, name, listener) => { try { if (typeof emitter?.on === 'function') { listeners.push([emitter, name, listener]); emitter.on(name, listener); } } catch { bensonCaptureState.incomplete = true; } };
++	bensonSocketDiagnostics.set(sock, { diagnostic, dispose() {
++		for (const [emitter, name, listener] of listeners.splice(0)) { try { emitter.off?.(name, listener); } catch { bensonCaptureState.incomplete = true; } }
++		diagnostic.event('listeners-removed', 'cleanup');
++	} });
++	on(sock.ws, 'open', () => diagnostic.event('transport-open', 'transport'));
++	on(sock.ws, 'close', (code, reason) => { closeObserved = true; diagnostic.event('transport-close', 'transport', void 0, { closeCode: code, closeReason: reason }); });
++	on(sock.ws, 'error', error => diagnostic.event('transport-error', 'transport', error));
++	on(sock.ws, 'CB:xmlstreamend', () => diagnostic.event('stream-end', 'transport'));
++	on(sock.ws, 'CB:stream:error', () => diagnostic.event('stream-error', 'transport'));
++	on(sock.ev, 'connection.update', update => {
++		const state = bensonOwn(update, 'connection');
++		if (state === 'open') diagnostic.event('connection-open', 'connection');
++		else if (state === 'close') diagnostic.event('connection-close', 'connection', bensonOwn(bensonOwn(update, 'lastDisconnect'), 'error'), { closeObserved });
++	});
++	} catch { bensonCaptureState.incomplete = true; }
++}
++function bensonDiagnosticSocketClose(sock) {
++	try { bensonSocketDiagnostics.get(sock)?.diagnostic.event('local-close-intent', 'cleanup'); } catch {}
++}
++function bensonDiagnosticSocketCleanup(sock) {
++	try { bensonSocketDiagnostics.get(sock)?.dispose(); bensonSocketDiagnostics.delete(sock); } catch { bensonCaptureState.incomplete = true; }
++}
++
+ // extensions/whatsapp/src/connection-owner.ts
+ const WHATSAPP_CONNECTION_OWNER_BUSY_CODE = "whatsapp_connection_owner_busy";
+ var WhatsAppConnectionOwnerBusyError = class extends Error {
+@@ -239,12 +388,14 @@
+ 	await assertWebCredsPathRegularFileOrMissing(resolveWebCredsPath(authDir));
+ }
+ async function safeSaveCreds(params) {
++	params.bensonObserve?.("backup-read");
+ 	let backup;
+ 	try {
+ 		const credsPath = resolveWebCredsPath(params.authDir);
+ 		const backupPath = resolveWebCredsBackupPath(params.authDir);
+ 		const raw = readWebCredsJsonRawSync(credsPath);
+ 		if (raw) try {
++			params.bensonObserve?.("backup-validate");
+ 			JSON.parse(raw);
+ 			backup = {
+ 				content: raw,
+@@ -253,15 +404,18 @@
+ 		} catch {}
+ 	} catch {}
+ 	if (backup) {
++		params.bensonObserve?.("backup-before-persistence");
+ 		await params.beforeCredentialPersistence?.();
+ 		try {
+ 			await writeWebCredsRawAtomically({
+ 				filePath: backup.filePath,
+ 				content: backup.content,
+-				tempPrefix: ".creds.backup"
++				tempPrefix: ".creds.backup",
++			bensonObserve: stage => params.bensonObserve?.("backup-" + stage)
+ 			});
+ 		} catch {}
+ 	}
++	params.bensonObserve?.("current-before-persistence");
+ 	await params.beforeCredentialPersistence?.();
+ 	try {
+ 		await Promise.resolve(params.saveCreds());
+@@ -271,6 +425,7 @@
+ 	}
+ }
+ function abortSocketAfterCredentialPersistenceFailure(sock, error) {
++	bensonDiagnosticSocketClose(sock);
+ 	const failure = error instanceof Error ? error : /* @__PURE__ */ new Error("WhatsApp credential persistence rejected");
+ 	const closeWebSocket = () => {
+ 		try {
+@@ -307,12 +462,25 @@
+ 	return await createWaSocketInternal(printQr, verbose, opts, "normal");
+ }
+ async function createWaSocketInternal(printQr, verbose, opts, receiveMode) {
++	const diagnostic = bensonCaptureContexts.has(opts.bensonDiagnostic) ? opts.bensonDiagnostic : bensonCreateConnectionDiagnostic();
++	try {
++	diagnostic.event('stage-entered', 'factory');
++	if (bensonCaptureState.reservations >= BENSON_CONNECTION_SOCKET_LIMIT) {
++		diagnostic.event('admission-denied', 'factory');
++		throw Object.assign(new Error('DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'), { code: 'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED' });
++	}
++	bensonCaptureState.reservations++;
++	diagnostic.event('reserved', 'factory');
++	opts.bensonDiagnosticAbortSignal?.throwIfAborted();
++	diagnostic.event('stage-entered', 'path-check');
+ 	const baseLogger = getChildLogger({ module: "baileys" }, { level: verbose ? "info" : "silent" });
+ 	const logger = toPinoLikeLogger(baseLogger, verbose ? "info" : "silent");
+ 	const authDir = resolveUserPath(opts.authDir ?? resolveDefaultWebAuthDir());
+ 	await rejectUnsafeWebCredsPath(authDir);
++	diagnostic.event('stage-entered', 'credential-barrier');
+ 	await opts.beforeCredentialPersistence?.();
+ 	await ensureDir(authDir);
++	diagnostic.event('stage-entered', 'credential-queue');
+ 	const sessionLogger = getChildLogger({ module: "web-session" });
+ 	if (await waitForCredsSaveQueueWithTimeout(authDir) === "timed_out") sessionLogger.warn({ authDir }, CREDS_FLUSH_TIMEOUT_MESSAGE);
+ 	else {
+@@ -320,10 +488,12 @@
+ 		await restoreCredsFromBackupIfNeeded(authDir, { beforeCredentialPersistence: opts.beforeCredentialPersistence });
+ 	}
+ 	await rejectUnsafeWebCredsPath(authDir);
++	diagnostic.event('stage-entered', 'auth-bootstrap');
+ 	const { state } = await useMultiFileAuthState(authDir);
+-	const saveCreds = async () => {
+-		await writeCredsJsonAtomically(authDir, state.creds);
++	const saveCreds = async (bensonObserve) => {
++		await writeCredsJsonAtomically(authDir, state.creds, bensonObserve);
+ 	};
++	diagnostic.event('stage-entered', 'version');
+ 	const { version } = await fetchLatestBaileysVersion();
+ 	const waWebSocketUrl = resolveWaWebSocketUrl(opts.waWebSocketUrl) ?? resolveEnvWaWebSocketUrl();
+ 	const fetchAgent = createNodeProxyAgent({
+@@ -355,6 +525,7 @@
+ 			await state.keys.set(data);
+ 		}
+ 	} : state.keys;
++	diagnostic.event('stage-entered', 'signal-store');
+ 	const cachedSignalKeys = makeCacheableSignalKeyStore(persistedSignalKeys, logger);
+ 	const signalKeys = opts.beforeCredentialPersistence ? {
+ 		...cachedSignalKeys,
+@@ -381,7 +552,12 @@
+ 		repository.migrateSession = (...migrateArgs) => observeCredentialPersistence(migrateSession(...migrateArgs), true);
+ 		return repository;
+ 	} : void 0;
+-	const sock = makeWASocket({
++	opts.bensonDiagnosticAbortSignal?.throwIfAborted();
++	diagnostic.event('stage-entered', 'constructor');
++	bensonCaptureState.entered++;
++	diagnostic.event('constructor-entered', 'constructor');
++	let sock;
++	try { sock = makeWASocket({
+ 		auth: {
+ 			creds: state.creds,
+ 			keys: signalKeys
+@@ -404,7 +580,10 @@
+ 		...waWebSocketUrl ? { waWebSocketUrl } : {},
+ 		...opts.getMessage ? { getMessage: opts.getMessage } : {},
+ 		...opts.cachedGroupMetadata ? { cachedGroupMetadata: opts.cachedGroupMetadata } : {}
+-	});
++	}); } catch (error) { diagnostic.failure(error, { synchronousConstructorFailure: true }); throw error; }
++	bensonCaptureState.returned++;
++	diagnostic.event('constructor-returned', 'constructor');
++	bensonObserveSocket(sock, diagnostic);
+ 	if (receiveMode === "directory") for (const event of [
+ 		"CB:message",
+ 		"CB:call",
+@@ -420,15 +599,16 @@
+ 	]) sock.ws.removeAllListeners(event);
+ 	socketRef.current = sock;
+ 	if (pendingSocketAbort) abortSocketAfterCredentialPersistenceFailure(sock, pendingSocketAbort.error);
+-	sock.ev.on("creds.update", () => enqueueCredsSave(authDir, () => safeSaveCreds({
++	sock.ev.on("creds.update", () => enqueueCredsSave(authDir, (bensonObserve) => safeSaveCreds({
++		bensonObserve,
+ 		authDir,
+-		saveCreds,
++		saveCreds: () => saveCreds(bensonObserve),
+ 		logger: sessionLogger,
+ 		beforeCredentialPersistence: opts.beforeCredentialPersistence
+ 	}), (err) => {
+ 		sessionLogger.warn({ error: String(err) }, "WhatsApp creds save queue error");
+ 		reportCredentialPersistenceError(err);
+-	}));
++	}, diagnostic));
+ 	sock.ev.on("connection.update", (update) => {
+ 		try {
+ 			const { connection, lastDisconnect, qr } = update;
+@@ -448,13 +628,14 @@
+ 			}
+ 			if (connection === "open" && verbose) console.log(success("WhatsApp Web connected."));
+ 		} catch (err) {
+-			sessionLogger.error({ error: String(err) }, "connection.update handler error");
++			sessionLogger.error({ error: bensonDiagnosticError(err) }, "connection.update handler error");
+ 		}
+ 	});
+ 	if (sock.ws && typeof sock.ws.on === "function") sock.ws.on("error", (err) => {
+-		sessionLogger.error({ error: String(err) }, "WebSocket error");
++		sessionLogger.error({ error: bensonDiagnosticError(err) }, "WebSocket error");
+ 	});
+ 	return sock;
++	} catch (error) { diagnostic.failure(error); throw error; }
+ }
+ async function createWaDirectorySocket(authDir) {
+ 	return await createWaSocketInternal(false, false, { authDir }, "directory");
+@@ -548,3 +729,5 @@
+ 	throw new AggregateError(errors, "WhatsApp socket close could not be confirmed");
+ }
+ export { renderQrTerminal as _, DEFAULT_RECONNECT_POLICY as a, acquireWhatsAppStandaloneConnectionOwner as b, resolveHeartbeatSeconds as c, DEFAULT_WHATSAPP_SOCKET_TIMING as d, createWhatsAppSocketOperationTimeoutAdapter as f, withWhatsAppSocketOperationTimeout as g, resolveWhatsAppSocketTiming as h, waitForWaConnection as i, resolveReconnectPolicy as l, resolveWhatsAppSocketOperationTimeoutMs as m, createWaDirectorySocket as n, computeBackoff as o, isWhatsAppSocketOperationTimeoutError as p, createWaSocket as r, newConnectionId as s, closeWhatsAppSocketAndWait as t, sleepWithAbort$1 as u, WhatsAppConnectionOwnerBusyError as v, acquireWhatsAppGatewayConnectionOwner as y };
++
++export { bensonCreateConnectionDiagnostic, bensonDiagnosticError, bensonDiagnosticSocketClose, bensonDiagnosticSocketCleanup };
+--- a/dist/.setup/connection-controller-g_8-U3na.mjs
++++ b/dist/.setup/connection-controller-g_8-U3na.mjs
+@@ -1,7 +1,7 @@
+ import { r as getWhatsAppChannelRuntime } from "./runtime-C5kM4SuW.mjs";
+ import { n as WHATSAPP_CONNECTION_OWNER_PENDING_CAPABILITY, t as WHATSAPP_CONNECTION_CONTROLLER_CAPABILITY } from "./connection-controller-runtime-context-BnT2FwBQ.mjs";
+ import { O as resolveComparableIdentity, c as logoutWeb, d as readWebAuthExistsForDecision, j as waitForCredsSaveQueueWithTimeout, r as WhatsAppAuthUnstableError } from "./auth-store-DMOniiuA.mjs";
+-import { d as DEFAULT_WHATSAPP_SOCKET_TIMING, i as waitForWaConnection, o as computeBackoff, r as createWaSocket, t as closeWhatsAppSocketAndWait, u as sleepWithAbort$1, y as acquireWhatsAppGatewayConnectionOwner } from "./socket-close-BvdLXlbQ.mjs";
++import { bensonDiagnosticSocketClose, bensonDiagnosticSocketCleanup, d as DEFAULT_WHATSAPP_SOCKET_TIMING, i as waitForWaConnection, o as computeBackoff, r as createWaSocket, t as closeWhatsAppSocketAndWait, u as sleepWithAbort$1, y as acquireWhatsAppGatewayConnectionOwner } from "./socket-close-BvdLXlbQ.mjs";
+ import { n as getStatusCode, t as formatError } from "./session-errors-DrPDsEQy.mjs";
+ import { info } from "openclaw/plugin-sdk/runtime-env";
+ import { registerChannelRuntimeContext } from "openclaw/plugin-sdk/channel-runtime-context";
+@@ -28,6 +28,7 @@
+ 	} catch {}
+ }
+ function closeWaSocket(sock) {
++	bensonDiagnosticSocketClose(sock);
+ 	try {
+ 		if (typeof sock?.end === "function") {
+ 			Promise.resolve(sock.end(/* @__PURE__ */ new Error("OpenClaw WhatsApp socket close"))).catch(async () => await closeWebSocketBestEffort(sock));
+@@ -261,6 +262,7 @@
+ 		this.current.unregisterUnhandled = unregister;
+ 	}
+ 	async openConnection(params) {
++		try {
+ 		if (this.shuttingDown) throw stoppedControllerError();
+ 		if (this.connectionSetupPromise) throw new Error("WhatsApp connection setup is already in progress");
+ 		const setupPromise = this.openConnectionOwned(params);
+@@ -270,24 +272,32 @@
+ 		} finally {
+ 			if (this.connectionSetupPromise === setupPromise) this.connectionSetupPromise = null;
+ 		}
++		} catch (error) { params.bensonDiagnostic?.failure(error); throw error; }
+ 	}
+ 	async openConnectionOwned(params) {
++		params.bensonDiagnostic?.event('stage-entered', 'ownership');
+ 		await this.ensureConnectionOwnership();
+ 		this.throwIfSetupStopped();
++		params.bensonDiagnostic?.event('stage-entered', 'pending-cleanup');
+ 		await this.finishPendingSocketCleanup();
+ 		this.throwIfSetupStopped();
++		params.bensonDiagnostic?.event('stage-entered', 'previous-close');
+ 		if (this.current) await this.closeCurrentConnection();
+ 		this.throwIfSetupStopped();
+ 		let sock = null;
+ 		let connection = null;
+ 		try {
++			params.bensonDiagnostic?.event('stage-entered', 'factory');
+ 			sock = await createWaSocket(false, this.params.verbose, {
++				bensonDiagnostic: params.bensonDiagnostic,
++				bensonDiagnosticAbortSignal: this.setupAbortController.signal,
+ 				authDir: this.authDir,
+ 				...this.socketTiming,
+ 				...params.getMessage ? { getMessage: params.getMessage } : {},
+ 				...params.cachedGroupMetadata ? { cachedGroupMetadata: params.cachedGroupMetadata } : {}
+ 			});
+ 			this.throwIfSetupStopped();
++			params.bensonDiagnostic?.event('stage-entered', 'wait-open');
+ 			await this.waitForSetupStep(waitForWaConnection(sock, { timeoutMs: this.socketTiming.connectTimeoutMs }));
+ 			this.throwIfSetupStopped();
+ 			this.socketRef.current = sock;
+@@ -312,6 +322,7 @@
+ 				resolveClose: close.resolve,
+ 				socketClosed: false
+ 			};
++			params.bensonDiagnostic?.event('stage-entered', 'inbox-attach');
+ 			const listenerTask = params.createListener({
+ 				sock,
+ 				connection
+@@ -343,8 +354,11 @@
+ 				onHeartbeat: params.onHeartbeat,
+ 				onWatchdogTimeout: params.onWatchdogTimeout
+ 			});
++			params.bensonDiagnostic?.event('stage-finished', 'ready');
+ 			return connection;
+ 		} catch (err) {
++			params.bensonDiagnostic?.failure(err);
++			params.bensonDiagnostic?.event('stage-entered', 'cleanup');
+ 			try {
+ 				if (connection && this.current === connection) await this.closeCurrentConnection();
+ 				else {
+@@ -363,6 +377,7 @@
+ 					connection?.unregisterTransportActivity?.();
+ 				}
+ 			} catch (closeError) {
++				params.bensonDiagnostic?.event('cleanup-failure', 'cleanup', closeError);
+ 				if (sock && (!connection || this.current !== connection)) this.pendingSocketCleanup = connection ?? {
+ 					sock,
+ 					socketClosed: false
+@@ -501,8 +516,10 @@
+ 	}
+ 	async finishSocketCleanup(cleanup) {
+ 		if (!cleanup.socketClosed) {
++			bensonDiagnosticSocketClose(cleanup.sock);
+ 			await closeWhatsAppSocketAndWait(cleanup.sock, "OpenClaw WhatsApp socket close");
+ 			cleanup.socketClosed = true;
++			bensonDiagnosticSocketCleanup(cleanup.sock);
+ 		}
+ 		if (await waitForCredsSaveQueueWithTimeout(this.authDir) === "timed_out") throw new Error("WhatsApp credential persistence did not drain before owner release");
+ 	}
+--- a/dist/.setup/monitor-B5qdng3U.mjs
++++ b/dist/.setup/monitor-B5qdng3U.mjs
+@@ -7,7 +7,7 @@
+ import { a as lookupInboundMessageMeta, i as cacheInboundMessageMeta, n as resolveWhatsAppGroupSessionRoute, r as buildQuotedMessageOptions } from "./group-session-key-F8JW1qj5.mjs";
+ import { C as getPrimaryIdentityId, D as identitiesOverlap, E as getSenderIdentity, O as resolveComparableIdentity, S as getMentionIdentities, T as getSelfIdentity, _ as readWebSelfIdentityForDecision, h as readWebSelfId, o as getWebAuthAgeMs, r as WhatsAppAuthUnstableError, w as getReplyContext, x as getComparableIdentityValues } from "./auth-store-DMOniiuA.mjs";
+ import { n as resolveWhatsAppGroupsConfigPath } from "./group-config-path-DjFxvrxo.mjs";
+-import { a as DEFAULT_RECONNECT_POLICY, c as resolveHeartbeatSeconds, f as createWhatsAppSocketOperationTimeoutAdapter, g as withWhatsAppSocketOperationTimeout, h as resolveWhatsAppSocketTiming, i as waitForWaConnection, l as resolveReconnectPolicy, m as resolveWhatsAppSocketOperationTimeoutMs, o as computeBackoff, p as isWhatsAppSocketOperationTimeoutError, r as createWaSocket, s as newConnectionId, u as sleepWithAbort$1 } from "./socket-close-BvdLXlbQ.mjs";
++import { bensonCreateConnectionDiagnostic, a as DEFAULT_RECONNECT_POLICY, c as resolveHeartbeatSeconds, f as createWhatsAppSocketOperationTimeoutAdapter, g as withWhatsAppSocketOperationTimeout, h as resolveWhatsAppSocketTiming, i as waitForWaConnection, l as resolveReconnectPolicy, m as resolveWhatsAppSocketOperationTimeoutMs, o as computeBackoff, p as isWhatsAppSocketOperationTimeoutError, r as createWaSocket, s as newConnectionId, u as sleepWithAbort$1 } from "./socket-close-BvdLXlbQ.mjs";
+ import { n as getStatusCode, t as formatError } from "./session-errors-DrPDsEQy.mjs";
+ import { t as BufferJSON } from "./session.runtime-B9asd-5r.mjs";
+ import { _ as resolveInboundMediaMimetype, a as addWhatsAppImagePreviewFields, c as extractContextInfo, d as extractMediaKind, f as extractMentionedJids, g as projectWhatsAppInboundMessage, h as hasInboundUserContent, i as resolveWhatsAppOutboundMentions, l as extractExternalAdReplyContext, n as addWhatsAppOutboundMentionsToContent, o as describeReplyContext, p as extractText, r as mayContainWhatsAppOutboundMention, s as extractContactContext, t as createWebSendApi, u as extractLocationData } from "./send-api-DKvRSr-3.mjs";
+@@ -3944,12 +3944,15 @@
+ 		sleep,
+ 		isNonRetryableStatus: isNonRetryableWebCloseStatus
+ 	});
++	let bensonDiagnostic, bensonPrecedingRetryAttempt = 0;
+ 	const statusController = createWebChannelStatusController(tuning.statusSink);
+ 	statusController.emit();
+ 	try {
+ 		while (true) {
+ 			if (stopRequested()) break;
+ 			const connectionId = newConnectionId();
++			bensonDiagnostic = bensonCreateConnectionDiagnostic({ runId, connectionId });
++			bensonDiagnostic.event('setup-entered', 'monitor', void 0, { precedingRetryAttempt: bensonPrecedingRetryAttempt });
+ 			const shouldDebounce = (msg) => shouldDebounceTextInbound({
+ 				text: msg.payload.commandBody ?? msg.payload.body,
+ 				cfg,
+@@ -3959,6 +3962,7 @@
+ 			let connection;
+ 			try {
+ 				connection = await controller.openConnection({
++					bensonDiagnostic,
+ 					connectionId,
+ 					getMessage: async (key) => key.id && key.remoteJid ? readWhatsAppBaileysCacheEntry(recentMessageKeys, `${key.remoteJid}:${key.id}`) : void 0,
+ 					cachedGroupMetadata: async (jid) => {
+@@ -4094,9 +4098,13 @@
+ 					delayMs: decision.delayMs
+ 				}, normalized ? "web reconnect: setup status error; retrying" : "web reconnect: auth state still stabilizing during inbox attach; retrying");
+ 				runtime.error(normalized ? `WhatsApp Web connection closed during setup (status ${normalized.statusLabel}). Retry ${decision.reconnectAttempts}/${reconnectPolicy.maxAttempts || "∞"} in ${formatDurationPrecise(decision.delayMs ?? 0)}.` : `WhatsApp auth state is still stabilizing. Retry ${decision.reconnectAttempts}/${reconnectPolicy.maxAttempts || "∞"} for inbox attach in ${formatDurationPrecise(decision.delayMs ?? 0)}.`);
++				bensonDiagnostic.event('retry-scheduled', 'retry', void 0, decision);
++				bensonPrecedingRetryAttempt = bensonDiagnostic.attemptOrdinal;
+ 				try {
+ 					await controller.waitBeforeRetry(decision.delayMs ?? 0);
++					bensonDiagnostic.event(stopRequested() ? 'retry-aborted' : 'retry-wait-finished', 'retry');
+ 				} catch {
++					bensonDiagnostic.event('retry-aborted', 'retry');
+ 					break;
+ 				}
+ 				continue;
+@@ -4238,16 +4246,20 @@
+ 			if (isWatchdogRecoveryReconnect) runtime.log(warn(reconnectMessage));
+ 			else runtime.error(reconnectMessage);
+ 			await controller.closeCurrentConnection();
++			bensonDiagnostic.event('retry-scheduled', 'retry', void 0, decision);
++			bensonPrecedingRetryAttempt = bensonDiagnostic.attemptOrdinal;
+ 			try {
+ 				await controller.waitBeforeRetry(decision.delayMs ?? 0);
++				bensonDiagnostic.event(stopRequested() ? 'retry-aborted' : 'retry-wait-finished', 'retry');
+ 			} catch {
++				bensonDiagnostic.event('retry-aborted', 'retry');
+ 				break;
+ 			}
+ 		}
+ 	} finally {
+ 		statusController.markStopped();
+ 		process.removeListener("SIGINT", handleSigint);
+-		await controller.shutdown();
++		try { await controller.shutdown(); } finally { bensonDiagnostic?.summary(); }
+ 	}
+ }
+ export { loadWebMediaRaw as a, monitorWebInbox as c, loadWebMedia as i, resetWebInboundDedupe as l, LocalMediaAccessError as n, optimizeImageToJpeg as o, getDefaultLocalRoots as r, optimizeImageToPng as s, monitorWebChannel as t };
+--- a/dist/.setup/auth-store-DMOniiuA.mjs
++++ b/dist/.setup/auth-store-DMOniiuA.mjs
+@@ -18,12 +18,36 @@
+ const CREDS_FILE_MODE = 384;
+ const CREDS_SAVE_FLUSH_TIMEOUT_MS = 15e3;
+ const credsSaveQueues = /* @__PURE__ */ new Map();
+-async function stringifyCreds(creds) {
++// Observation only: metadata follows native queue-tail lifetime, never authority.
++const bensonCredsObservations = new WeakMap();
++let bensonCredsSaveSequence = 0, bensonCredsBarrierSequence = 0;
++function bensonCredsStage(observe, stage) { try { observe?.(stage); } catch {} }
++function bensonCredsBarrierSnapshot(meta, barrierId, started, outcome) {
++ try {
++  if (!meta) return;
++  const active = meta.queue.active, now = performance.now();
++  meta.save.diagnostic?.event('queue-barrier-' + (outcome === 'waiting' ? 'entered' : 'finished'), 'credential-queue', void 0, {
++   barrierId, tailSaveId: meta.save.id, activeSaveId: active?.id ?? 0,
++   predecessorSaveId: meta.save.predecessorId, pendingSaves: meta.queue.pending,
++   saveState: active ? 'running' : meta.queue.pending ? 'queued' : 'drained',
++   saveStage: active?.stage ?? (meta.queue.pending ? 'queued' : 'settled'),
++   stageAgeMs: active ? Math.max(0, Math.round(now - active.stageAt)) : 0,
++   activeAgeMs: active ? Math.max(0, Math.round(now - active.startedAt)) : 0,
++   tailAgeMs: Math.max(0, Math.round(now - meta.save.enqueuedAt)),
++   barrierElapsedMs: Math.max(0, Math.round(now - started)), barrierOutcome: outcome
++  });
++ } catch {}
++}
++async function stringifyCreds(creds, bensonObserve) {
++	bensonCredsStage(bensonObserve, "current-import");
+ 	const { BufferJSON } = await import("./session.runtime-B9asd-5r.mjs").then((n) => n.o);
++	bensonCredsStage(bensonObserve, "current-serialize");
+ 	return JSON.stringify(creds, BufferJSON.replacer);
+ }
+ async function writeWebCredsRawAtomically(params) {
++	bensonCredsStage(params.bensonObserve, "path-check");
+ 	await assertWebCredsPathRegularFileOrMissing(params.filePath);
++	bensonCredsStage(params.bensonObserve, "atomic-publication");
+ 	await replaceFileAtomic({
+ 		filePath: params.filePath,
+ 		content: params.content,
+@@ -33,29 +57,40 @@
+ 		syncTempFile: true,
+ 		syncParentDir: true,
+ 		beforeRename: async ({ filePath }) => {
++			bensonCredsStage(params.bensonObserve, "before-rename");
+ 			await assertWebCredsPathRegularFileOrMissing(filePath);
+ 		}
+ 	});
++	bensonCredsStage(params.bensonObserve, "published");
+ }
+-async function writeCredsJsonAtomically(authDir, creds) {
++async function writeCredsJsonAtomically(authDir, creds, bensonObserve) {
+ 	await writeWebCredsRawAtomically({
+ 		filePath: resolveWebCredsPath(authDir),
+-		content: await stringifyCreds(creds),
+-		tempPrefix: ".creds"
++		content: await stringifyCreds(creds, bensonObserve),
++		tempPrefix: ".creds",
++		bensonObserve: stage => bensonCredsStage(bensonObserve, "current-" + stage)
+ 	});
+ }
+-function enqueueCredsSave(authDir, saveCreds, onError) {
++function enqueueCredsSave(authDir, saveCreds, onError, bensonDiagnostic) {
++ const predecessor = bensonCredsObservations.get(credsSaveQueues.get(authDir));
++ const queue = predecessor?.queue ?? { pending: 0, active: null };
++ const save = { id: ++bensonCredsSaveSequence, predecessorId: predecessor?.save.id ?? 0,
++  enqueuedAt: performance.now(), startedAt: 0, stageAt: performance.now(), stage: 'queued', diagnostic: bensonDiagnostic };
++ queue.pending++;
++ const observe = stage => { save.stage = stage; save.stageAt = performance.now(); };
+ 	enqueueKeyedTask({
+ 		tails: credsSaveQueues,
+ 		key: authDir,
+ 		task: async () => {
++			queue.active = save; save.startedAt = performance.now(); observe("save-task");
+ 			try {
+-				await saveCreds();
++				await saveCreds(observe);
+ 			} catch (error) {
+ 				onError(error);
+-			}
++			} finally { observe("settled"); queue.pending--; if (queue.active === save) queue.active = null; }
+ 		}
+ 	});
++	bensonCredsObservations.set(credsSaveQueues.get(authDir), { save, queue });
+ }
+ function waitForCredsSaveQueue(authDir) {
+ 	if (authDir) return credsSaveQueues.get(authDir) ?? Promise.resolve();
+@@ -63,7 +98,13 @@
+ }
+ async function waitForCredsSaveQueueWithTimeout(authDir, timeoutMs = CREDS_SAVE_FLUSH_TIMEOUT_MS) {
+ 	const boundedTimeoutMs = resolveTimerTimeoutMs(timeoutMs, CREDS_SAVE_FLUSH_TIMEOUT_MS, 0);
+-	return await raceWithTimeout(waitForCredsSaveQueue(authDir).then(() => "drained"), boundedTimeoutMs, () => "timed_out");
++ const pending = waitForCredsSaveQueue(authDir);
++ const meta = bensonCredsObservations.get(credsSaveQueues.get(authDir));
++ const barrierId = ++bensonCredsBarrierSequence, started = performance.now();
++ bensonCredsBarrierSnapshot(meta, barrierId, started, 'waiting');
++ const outcome = await raceWithTimeout(pending.then(() => "drained"), boundedTimeoutMs, () => "timed_out");
++ bensonCredsBarrierSnapshot(meta, barrierId, started, outcome);
++ return outcome;
+ }
+ // extensions/whatsapp/src/identity.ts
+ const WHATSAPP_LID_RE = /@(lid|hosted\.lid)$/i;

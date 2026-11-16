@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import { registerHooks } from 'node:module';
 import { EventEmitter, once } from 'node:events';
 import { AsyncLocalStorage, AsyncResource } from 'node:async_hooks';
-import { execFile } from 'node:child_process';
+import { execFile, execFileSync } from 'node:child_process';
 import { promisify } from 'node:util';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, readFileSync, watch, writeFileSync } from 'node:fs';
@@ -51,6 +51,7 @@ const monitorOnly = process.env.BENSON_NATIVE_WHATSAPP_MONITOR_ONLY === '1';
 const installerOnly = process.env.BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY === '1';
 const reminderProductOnly = process.env.BENSON_NATIVE_REMINDER_PRODUCT_ONLY === '1';
 const startupRegistryOnly = process.env.BENSON_NATIVE_STARTUP_REGISTRY_ONLY === '1';
+const g2DemoOnly = process.env.BENSON_NATIVE_G2_DEMO_ONLY === '1';
 const startupEffects = { agentRuns: 0, toolCalls: 0, socketAttempts: 0 };
 const startupRegistryLog = () => '/tmp/openclaw/openclaw-' + new Date().toISOString().slice(0, 10) + '.log';
 function startupRegistryMessages(): unknown[] {
@@ -72,7 +73,7 @@ if (startupRegistryOnly) {
   assert.equal(process.env.OPENCLAW_SKIP_CRON, '1');
   transportGlobal[transportSlot] = () => { startupEffects.socketAttempts++; throw new Error('Startup-only fixture forbids sockets'); };
 }
-if (monitorOnly && transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled !== true) {
+if (monitorOnly && process.env.BENSON_NATIVE_CONNECTION_DIAGNOSTIC_ONLY !== '1' && transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled !== true) {
   isolated();
   transportGlobal.__bensonIsolatedWhatsAppLoaderInstalled = true;
   registerHooks({ load(url, context, nextLoad) {
@@ -131,7 +132,7 @@ type BusinessProof = {
   agenticActive: boolean; reminderActive: boolean; agenticCurrent?: () => void;
   directCase: string; directCurrent?: () => void;
   directRuns: Map<string, NonNullable<ReturnType<typeof registerCompletionV6Proof>>['runDirect']>;
-  completion?: { binding: Binding6; backendReads: number; negativeEvidenceCases: number };
+  completion?: { binding: Binding6; backendReads: number; negativeEvidenceCases: number; demonstration?: unknown };
   createActive: boolean; mutationActive: boolean; reminderOperation: 'create' | 'delete'; createSource?: CurrentRequestEvidence;
 };
 
@@ -189,7 +190,8 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     'disallowed-sender', 'retired-binding', 'model-fallback', 'cancel-after-resolution',
     ...installerOnly ? ['main-domain-read', 'direct-read', 'direct-read-failure', 'direct-denied', 'direct-revoked-read', 'direct-cancel-read',
       'direct-destination-changed', 'direct-duplicate', 'direct-payload-changed', 'direct-missing-authority', 'main-domain-agentic', 'main-reminder-read',
-      'direct-agentic-read', 'direct-agentic-cancel', 'main-reminder-create', 'main-jessica-mutation', 'main-reminder-delete'] : []].entries()) {
+      'direct-agentic-read', 'direct-agentic-cancel', 'main-reminder-create', 'main-jessica-mutation', 'main-reminder-delete'] : []]
+      .filter(name => !g2DemoOnly || name === 'main-domain-agentic').entries()) {
     const mutation = name === 'main-jessica-mutation';
     const agentic = name === 'main-domain-agentic' || mutation;
     business.mutationActive = mutation;
@@ -652,6 +654,9 @@ async function monitorProof(api: OpenClawPluginApi, business: BusinessProof) {
     assert.notEqual(registration.captureReadAuthority()?.(), true, 'Retired entry must not mint live authority');
   }
   writeReport({ probe: 'PASS', G3: 'BLOCKED', whatsappPlugin: '2026.10.10', monitorAssembly: true,
+    ...g2DemoOnly ? { demonstration: { evidenceLevel: 'ISOLATED_NATIVE_SIMULATED_INGRESS', productionAcceptance: false,
+      simulated: ['WhatsApp ingress and account identity', 'model provider', 'Jessica backend', 'delivery endpoint'],
+      composition: 'Existing fixture adapters and native Runs; not the complete installed production plugin topology' } } : {},
     cases, supportedTranscriptProbe, trustedReadOwner: installerOnly ? true : readAuthority?.() === true,
     ...installerOnly ? { nativeInstall, authorityRetired: readAuthority?.() === false } : {},
     limits: 'Stock native plugin registration/monitor/listener with isolated socket only. No real server authentication or production authority.' });
@@ -1380,6 +1385,271 @@ export default {
     });
   },
 };
+
+// Version-pinned diagnostic profile: real native owners; only lower transport/auth
+// and version inputs are synthetic. These scripts execute inside the existing
+// disposable namespaces, never through a Gateway command or host runtime.
+const connectionDiagnosticSource = `import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import {registerHooks} from 'node:module';
+import {EventEmitter} from 'node:events';
+import {randomUUID} from 'node:crypto';
+const scenario=process.argv[2]??'controller-428'; const abort=new AbortController();
+const secret='SENTINEL_AUTH_NEVER_LOG';
+let constructors=0, sock, options, closeFailure=false; const made=Promise.withResolvers();
+const orig=Object.assign(new Error('Connection Closed'),{output:{statusCode:428}});
+orig.stack='Error: '+secret+'\\n at raw (/private/'+secret+':1:1)\\n at permitted (/node_modules/baileys/lib/Socket/socket.js:111:9)\\n at secret (/node_modules/baileys/lib/'+secret+'.js:12:3)';
+const fakeSocket=()=>{
+ const ws=new EventEmitter(); ws.isClosed=false;ws.isClosing=false;ws.isOpen=false;
+ ws.close=async()=>{ if(closeFailure)throw new Error(secret);ws.isClosed=true;ws.emit('close',1000,Buffer.from(secret));};
+ return {ws,ev:new EventEmitter(),user:{},end:async()=>{if(closeFailure)throw new Error(secret);await ws.close();}};
+};
+globalThis.__diagnosticFactory=(o)=>{constructors++;options=o;if(scenario==='sync')throw orig;sock=fakeSocket();made.resolve(sock);
+ if(scenario==='controller-health')setImmediate(()=>{sock.ws.isOpen=true;sock.ev.emit('connection.update',{connection:'open'});});
+ if(scenario.startsWith('monitor'))setImmediate(()=>sock.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:orig}}));
+ return sock;};
+globalThis.__diagnosticWire={constructions:0,closes:0};
+const wireSource=\`import {EventEmitter} from 'node:events';export default class Wire extends EventEmitter {static OPEN=1;static CONNECTING=0;static CLOSING=2;static CLOSED=3;constructor(){super();this.readyState=0;globalThis.__diagnosticWire.constructions++;globalThis.__diagnosticWire.instance=this;} close(){globalThis.__diagnosticWire.closes++;this.readyState=3;queueMicrotask(()=>this.emit('close',1000,Buffer.from('SENTINEL_AUTH_NEVER_LOG')));}send(data,cb){cb?.();}}\`;
+registerHooks({resolve(specifier,ctx,next){if(scenario.startsWith('baileys')&&specifier==='ws'&&ctx.parentURL?.endsWith('/Client/websocket.js'))return {url:'data:text/javascript,'+encodeURIComponent(wireSource),shortCircuit:true};return next(specifier,ctx);},load(url,ctx,next){
+ if((scenario==='logging-failure'||scenario==='queue-logging-failure')&&new URL(url).pathname.endsWith('/plugin-sdk/runtime-env.js')){let source=String(next(url,ctx).source);assert(source.includes('r as getChildLogger'));source=source.replace('r as getChildLogger','r as bensonActualLogger');return {format:'module',shortCircuit:true,source:source+\`\\nfunction getChildLogger(...args){if(args[0]?.module==='web-connection-diagnostic')return{info(){globalThis.__diagnosticLogFailures++;throw new Error('synthetic logger failure')}};return bensonActualLogger(...args);}\`};}
+ if(scenario.startsWith('baileys')&&new URL(url).pathname.endsWith('/session.runtime-B9asd-5r.mjs'))return{format:'module',shortCircuit:true,source:\`import {makeWASocket,initAuthCreds,DEFAULT_CONNECTION_CONFIG} from '/candidate/whatsapp/node_modules/baileys/lib/index.js';export const a=makeWASocket;export const s=async()=>({state:{creds:initAuthCreds(),keys:{get:async()=>({}),set:async()=>{}}}});export const r=async()=>({version:[2,3000,1]});export const i=k=>k;export const n=(...args)=>DEFAULT_CONNECTION_CONFIG.makeSignalRepository(...args);export const t=JSON;export const o={BufferJSON:{replacer:(_key,value)=>value}};\`};
+ if(new URL(url).pathname.endsWith('/session.runtime-B9asd-5r.mjs'))return{format:'module',shortCircuit:true,source:\`export const a=o=>globalThis.__diagnosticFactory(o);export const s=async()=>({state:{creds:{},keys:{get:async()=>({}),set:async()=>{}}}});export const r=async()=>{globalThis.__diagnosticVersion?.();return {version:[2,3000,1]}};export const i=k=>k;export const n=()=>({});export const t=JSON;export const o={BufferJSON:{replacer:(_key,value)=>value}};\`};
+ if(scenario==='queue-current'&&new URL(url).pathname.endsWith('/socket-close-BvdLXlbQ.mjs')){const loaded=next(url,ctx),text=String(loaded.source),needle='const seen = new Set();';assert.equal(text.split(needle).length,2);return{format:'module',shortCircuit:true,source:text.replace(needle,needle+' globalThis.__diagnosticSeen=seen;')};}
+ if(scenario==='monitor-two'&&new URL(url).pathname.endsWith('/socket-close-BvdLXlbQ.mjs')) {const loaded=next(url,ctx),text=String(loaded.source);assert.equal(text.split('const BENSON_CONNECTION_SOCKET_LIMIT = 1;').length,2);return {format:'module',shortCircuit:true,source:text.replace('const BENSON_CONNECTION_SOCKET_LIMIT = 1;','const BENSON_CONNECTION_SOCKET_LIMIT = 2;')};}
+ return next(url,ctx);
+}});
+const runtime=await import('/candidate/whatsapp/dist/.setup/runtime-C5kM4SuW.mjs');
+const {setLoggerOverride}=await import('/sdk/dist/plugin-sdk/runtime-env.js'); setLoggerOverride({level:'info',file:'/tmp/diagnostic-'+scenario+'.log'});
+const native=await import('/candidate/whatsapp/dist/.setup/socket-close-BvdLXlbQ.mjs');
+const controllerModule=await import('/candidate/whatsapp/dist/.setup/connection-controller-g_8-U3na.mjs');
+const diag=()=>native.bensonCreateConnectionDiagnostic({runId:randomUUID(),connectionId:randomUUID()});
+const logpath='/tmp/diagnostic-'+scenario+'.log';
+const logger=await import('/sdk/dist/logger-D10DOPMK.mjs');
+const records=()=>fs.readFileSync(logpath,'utf8').split('\\n').filter(Boolean).map(s=>JSON.parse(s)).flatMap(o=>Object.values(o).filter(v=>typeof v==='object'&&v?.schemaVersion===1&&v?.event));
+if(scenario==='queue-current'||scenario==='queue-logging-failure'){
+ globalThis.__diagnosticLogFailures=0;
+ const auth=await import('/candidate/whatsapp/dist/.setup/auth-store-DMOniiuA.mjs');
+ const d=diag(),dir='/tmp/inert-publication',held=Promise.withResolvers(),started=Promise.withResolvers(),late=Promise.withResolvers(),lateStarted=Promise.withResolvers();
+ fs.mkdirSync(dir,{recursive:true});const stages=[],order=[];let errors=0;const rejected=new Error(secret);
+ auth.k(dir,async observe=>{order.push('first');started.resolve();await held.promise;await auth.M(dir,{fixture:'inert'},stage=>{stages.push(stage);observe(stage);});throw rejected;},error=>{assert.equal(error,rejected);errors++;},d);
+ await started.promise;
+ auth.k(dir,async()=>{order.push('second');},()=>assert.fail('Unexpected second error'),d);
+ assert.equal(await auth.j(dir,25),'timed_out');
+ const captured=auth.j(dir,5000);
+ auth.k(dir,async()=>{order.push('later');lateStarted.resolve();await late.promise;},()=>assert.fail('Unexpected later error'),d);
+ held.resolve();assert.equal(await captured,'drained');await lateStarted.promise;
+ assert.deepEqual(order,['first','second','later']);assert.equal(errors,1);
+ late.resolve();assert.equal(await auth.j(dir,5000),'drained');
+ assert.deepEqual(JSON.parse(fs.readFileSync(dir+'/creds.json','utf8')),{fixture:'inert'});assert.equal(fs.statSync(dir+'/creds.json').mode&511,384);
+ for(const stage of ['current-import','current-serialize','current-path-check','current-atomic-publication','current-before-rename','current-published'])assert(stages.includes(stage));
+ d.summary();await logger.n();
+ if(scenario==='queue-logging-failure'){
+  assert(globalThis.__diagnosticLogFailures>0);console.log(JSON.stringify({probe:'PASS',scenario,unchangedOrdering:true,originalErrorPreserved:true,inertAtomicPublication:true,loggingFailureIsNonInterfering:true,captureComplete:false,records:[]}));
+ }else{
+  const rows=records(),failed=rows.find(r=>r.event==='queue-barrier-finished'&&r.barrierOutcome==='timed_out');
+  assert.equal(failed.tailSaveId,2);assert.equal(failed.activeSaveId,1);assert.equal(failed.pendingSaves,2);assert.equal(failed.saveStage,'save-task');assert(failed.barrierElapsedMs>=20&&failed.barrierElapsedMs<1000);
+  const drained=rows.find(r=>r.event==='queue-barrier-finished'&&r.barrierOutcome==='drained'&&r.tailSaveId===2);assert(drained);assert.equal(drained.activeSaveId,3);
+  assert(!JSON.stringify(rows).includes(secret));assert(!JSON.stringify(rows).includes(dir));
+  for(let id=100;id<1100;id++)d.event('queue-barrier-entered','credential-queue',void 0,{...failed,barrierId:id,barrierOutcome:'waiting'});
+  await logger.n();const saturated=records();assert(globalThis.__diagnosticSeen.size<=64);assert(saturated.length<=64);assert(saturated.some(r=>r.event==='overflow'&&r.captureComplete===false));
+  assert(!JSON.stringify(saturated).includes(secret));assert(!JSON.stringify(saturated).includes(dir));
+  console.log(JSON.stringify({probe:'PASS',scenario,unchangedOrdering:true,originalErrorPreserved:true,capturedTailUnchanged:true,inertAtomicPublication:true,boundedDeduplication:true,saturation:{keys:globalThis.__diagnosticSeen.size,records:saturated.length,overflow:saturated.find(r=>r.event==='overflow')},stages,records:rows}));
+ }
+}else if(scenario==='queue-backup'){
+ const auth=await import('/candidate/whatsapp/dist/.setup/auth-store-DMOniiuA.mjs');
+ const d=diag(),held=Promise.withResolvers(),started=Promise.withResolvers();let hold=false;
+ await native.r(false,false,{authDir:'/tmp/synthetic-auth',bensonDiagnostic:d,beforeCredentialPersistence:async()=>{if(hold){started.resolve();await held.promise;}}});
+ const file='/tmp/synthetic-auth/creds.json';fs.writeFileSync(file,JSON.stringify({fixture:secret}),{mode:384});hold=true;sock.ev.emit('creds.update',{});await started.promise;
+ assert.equal(await auth.j('/tmp/synthetic-auth',25),'timed_out');
+ await logger.n();let rows=records(),pending=rows.find(r=>r.event==='queue-barrier-finished');assert.equal(pending.saveStage,'backup-before-persistence');assert.equal(pending.activeSaveId,1);
+ hold=false;held.resolve();await auth.A('/tmp/synthetic-auth');assert.equal(await auth.j('/tmp/synthetic-auth',100),'drained');
+ assert.deepEqual(JSON.parse(fs.readFileSync(file,'utf8')),{});assert.equal(fs.statSync(file).mode&511,384);
+ native.bensonDiagnosticSocketCleanup(sock);d.summary();await logger.n();rows=records();assert(!JSON.stringify(rows).includes(secret));assert(!JSON.stringify(rows).includes('/tmp/synthetic-auth'));
+ console.log(JSON.stringify({probe:'PASS',scenario,actualNativeSaveTask:true,inertBackupAndCurrentPublication:true,timeoutDoesNotCancelSave:true,records:rows}));
+}else if(scenario==='logging-failure'){
+ globalThis.__diagnosticLogFailures=0;const d=diag();await native.r(false,false,{authDir:'/tmp/synthetic-auth',bensonDiagnostic:d});
+ await assert.rejects(()=>native.r(false,false,{authDir:'/tmp/synthetic-auth'}),{code:'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'});
+ native.bensonDiagnosticSocketCleanup(sock);d.summary();assert.equal(constructors,1);assert(globalThis.__diagnosticLogFailures>0);
+ console.log(JSON.stringify({probe:'PASS',scenario,constructors,captureComplete:false,reason:'LOGGER_FAILURE',records:[]}));
+}else if(scenario.startsWith('monitor')){
+ runtime.a({channel:{}});
+ const {setRuntimeConfigSnapshot}=await import('/sdk/dist/plugin-sdk/runtime-config-snapshot.js');
+ setRuntimeConfigSnapshot({channels:{whatsapp:{enabled:true,accounts:{default:{authDir:'/tmp/synthetic-auth'}},sendReadReceipts:false}}});
+ const monitor=await import('/candidate/whatsapp/dist/.setup/monitor-B5qdng3U.mjs');
+ let sleeps=0;
+ const sleep=async()=>{sleeps++;assert.equal(constructors,sleeps);if(scenario==='monitor-abort'||scenario==='monitor-two'&&sleeps===2){abort.abort();throw new Error('aborted');}};
+ const tuning={accountId:'default',reconnect:{initialDelayMs:scenario==='monitor-delayed'?250:0,maxDelayMs:250,factor:1,jitter:0,maxAttempts:3},sleep};
+ if(scenario==='monitor-abort')tuning.reconnect.initialDelayMs=250;
+ let error;try{await monitor.t(false,undefined,true,async()=>{}, {log(){},error(){},exit(){throw new Error('unexpected exit')}},abort.signal,tuning);}catch(e){error=e;}
+ if(scenario!=='monitor-abort'&&scenario!=='monitor-two')assert.equal(error?.code,'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED');
+ await logger.n();const rows=records();const expected=scenario==='monitor-two'?2:1;assert.equal(constructors,expected);
+ const starts=rows.filter(r=>r.event==='setup-entered');assert.equal(starts.length,scenario==='monitor-abort'?1:2);
+ assert(rows.some(r=>r.event==='retry-scheduled'));assert(rows.filter(r=>r.event==='retry-scheduled').every(r=>r.constructorEntered<=expected));
+ if(scenario==='monitor-abort')assert(rows.some(r=>r.event==='retry-aborted'));
+ else {assert(rows.some(r=>r.event==='retry-wait-finished'));assert.equal(starts[1].precedingRetryAttempt,starts[0].attemptOrdinal);assert.notEqual(starts[0].connectionId,starts[1].connectionId);assert.equal(starts[0].runId,starts[1].runId);}
+ if(scenario==='monitor-delayed')assert.equal(rows.find(r=>r.event==='retry-scheduled').delayMs,2000);
+ console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:rows}));
+}else if(scenario==='cancel'||scenario==='cancel-late'||scenario==='preconstructor'){
+ const d=diag();if(scenario==='cancel')abort.abort();if(scenario==='cancel-late')globalThis.__diagnosticVersion=()=>abort.abort();
+ const opts={authDir:'/tmp/synthetic-auth',bensonDiagnostic:d,bensonDiagnosticAbortSignal:abort.signal};
+ if(scenario==='preconstructor')opts.beforeCredentialPersistence=async()=>{throw orig;};
+ await assert.rejects(()=>native.r(false,false,opts));d.summary();await logger.n();assert.equal(constructors,0);assert.equal(records().at(-1).constructorEntered,0);
+ console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:records()}));
+}else if(scenario==='privacy'){
+ let getterCalls=0;const hostile={};Object.defineProperty(hostile,'stack',{get(){getterCalls++;throw new Error(secret)}});Object.defineProperty(hostile,'message',{get(){getterCalls++;return secret;}});
+ const cycle=new Error(secret);cycle.cause=cycle;
+ const errors=[orig,hostile,cycle,new AggregateError([orig,cycle,orig],secret),Object.assign(new Error(secret),{name:secret,stack:secret.repeat(10000),cause:new Error(secret)})];
+ for(const e of errors){const projected=native.bensonDiagnosticError(e);assert(!JSON.stringify(projected).includes(secret));}
+ assert.equal(getterCalls,0);assert.equal(native.bensonDiagnosticError(orig).frames.length,1);
+ const d=diag();await native.r(false,false,{authDir:'/tmp/synthetic-auth',bensonDiagnostic:d,onQr(){throw orig;}});
+ sock.ev.emit('connection.update',{qr:secret});sock.ws.emit('error',orig);
+ for(let i=0;i<70;i++)diag().failure(cycle);
+ d.summary();await logger.n();const rows=records();assert(rows.length<=64);assert(rows.some(r=>r.event==='overflow'));assert.equal(rows.at(-1).captureComplete,false);
+ for(const row of rows)assert(Buffer.byteLength(JSON.stringify(row))<=2048);
+ const all=fs.readFileSync(logpath,'utf8');assert(!all.includes(secret));assert(all.includes('connection.update handler error'));assert(all.includes('WebSocket error'));
+ console.log(JSON.stringify({probe:'PASS',scenario,getterCalls,records:rows}));
+}else if(scenario.startsWith('baileys')){
+ const d=diag(), actual=await native.r(false,false,{authDir:'/tmp/synthetic-auth',bensonDiagnostic:d});
+ const closed=new Promise(resolve=>actual.ev.on('connection.update',u=>{if(u.connection==='close')resolve(u);}));
+ if(scenario==='baileys-wire-close'){const wire=globalThis.__diagnosticWire.instance;wire.readyState=3;wire.emit('close',1006,Buffer.from(secret));}
+ else if(scenario==='baileys-stream')actual.ws.emit('CB:xmlstreamend',{secret});
+ else {actual.ws.emit('error',orig);}
+ await closed;native.bensonDiagnosticSocketCleanup(actual);d.summary();await logger.n();
+ const rows=records();assert.equal(globalThis.__diagnosticWire.constructions,1);assert.equal(globalThis.__diagnosticWire.closes,scenario==='baileys-wire-close'?0:1);
+ assert.equal(rows.find(r=>r.event==='connection-close').closeMetadata,scenario==='baileys-wire-close'?undefined:'UNAVAILABLE');
+ if(scenario==='baileys-stream')assert(rows.some(r=>r.event==='stream-end'));
+ if(scenario==='baileys-wire-close'){assert.equal(rows.find(r=>r.event==='transport-close').closeCode,1006);}else assert(!rows.some(r=>r.event==='transport-close'));assert(!JSON.stringify(rows).includes(secret));
+ console.log(JSON.stringify({probe:'PASS',scenario,wire:{constructions:globalThis.__diagnosticWire.constructions,closes:globalThis.__diagnosticWire.closes},records:rows}));
+}else if(scenario==='factory'){
+ const d=diag(); await native.r(false,false,{authDir:'/tmp/synthetic-auth',bensonDiagnostic:d});
+ sock.ws.emit('error',orig);sock.ws.emit('CB:xmlstreamend',{secret});sock.ws.emit('close',1006,Buffer.from(secret));
+ sock.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:orig},secret});
+ await assert.rejects(()=>native.r(false,false,{authDir:'/tmp/synthetic-auth'}),{code:'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'});
+ native.bensonDiagnosticSocketCleanup(sock);d.summary();await logger.n();assert.equal(constructors,1);
+ assert.equal(sock.ws.listenerCount('CB:xmlstreamend'),0);
+ assert(!JSON.stringify(records()).includes(secret));
+ console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:records()}));
+}else if(scenario==='sync'){
+ const d=diag();await assert.rejects(()=>native.r(false,false,{authDir:'/tmp/synthetic-auth',bensonDiagnostic:d}),e=>e===orig);d.summary();await logger.n();
+ const rows=records();assert.equal(rows.find(r=>r.event==='failure').transportCreation,'UNKNOWN');assert.equal(rows.at(-1).constructorReturned,0);
+ console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:rows}));
+}else if(scenario.startsWith('controller')){
+ runtime.a({channel:{}});
+ const c=new controllerModule.r({accountId:'default',authDir:'/tmp/synthetic-auth',keepAlive:false,verbose:false,heartbeatSeconds:60,transportTimeoutMs:60000,messageTimeoutMs:60000,watchdogCheckMs:60000,reconnectPolicy:{initialDelayMs:0,maxDelayMs:0,factor:1,jitter:0,maxAttempts:3},socketTiming:{connectTimeoutMs:30},abortSignal:abort.signal});
+ const d=diag();
+ const pending=c.openConnection({connectionId:randomUUID(),bensonDiagnostic:d,createListener:async()=>({close:async()=>{},onClose:new Promise(()=>{})})});
+ await made.promise;
+ if(scenario==='controller-health'){
+  await pending;assert.equal(c.getCurrentSock(),sock);c.reconnectAttempts=2;const previousNow=Date.now;
+  try{Date.now=()=>c.current.startedAt+61000;assert.equal(c.resolveCloseDecision({status:428}).reconnectAttempts,1);}finally{Date.now=previousNow;}
+  const before=constructors;await c.waitBeforeRetry(0);assert.equal(constructors,before);
+  await c.closeCurrentConnection();
+  await assert.rejects(()=>c.openConnection({connectionId:randomUUID(),bensonDiagnostic:diag(),createListener:async()=>({})}),{code:'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'});
+  await c.shutdown();
+  const replacement=new controllerModule.r({...c.params,authDir:'/tmp/synthetic-auth'});
+  await assert.rejects(()=>replacement.openConnection({connectionId:randomUUID(),bensonDiagnostic:diag(),createListener:async()=>({})}),{code:'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'});
+  await replacement.shutdown();d.summary();await logger.n();assert.equal(constructors,1);assert(records().some(r=>r.stage==='inbox-attach'));assert(records().some(r=>r.stage==='ready'));
+  console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:records()}));process.exit(0);
+ }
+ if(scenario==='controller-428') { closeFailure=true;setImmediate(()=>sock.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:orig}})); }
+ const hold=setTimeout(()=>{},300);
+ let error; try{await pending;}catch(e){error=e;}finally{clearTimeout(hold);}
+ assert(error);
+ if(scenario==='controller-428'){ assert(error instanceof AggregateError);assert.equal(error.errors[0],orig); }
+ closeFailure=false; await c.shutdown(); d.summary();await logger.n();
+ const rows=records(),failure=rows.find(r=>r.event==='failure');assert.equal(failure.stage,'wait-open');assert.equal(failure.error.status,scenario==='controller-428'?428:408);
+ if(scenario==='controller-428')assert(failure.sequence<rows.find(r=>r.event==='cleanup-failure').sequence);
+ assert(!JSON.stringify(rows).includes(secret));console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:rows}));
+}else{throw new Error('Unknown scenario');}
+
+`;
+const connectionTopologySource = `import assert from 'node:assert/strict';
+import {writeFileSync} from 'node:fs';
+import {setRuntimeConfigSnapshot} from '/sdk/dist/plugin-sdk/runtime-config-snapshot.js';
+import { registerHooks } from 'node:module';
+import {r as loadGatewayPlugins} from '/sdk/dist/server-plugins-CYghP9ao.mjs';
+import {o as metadata} from '/sdk/dist/plugin-metadata-snapshot-BBKj8yr8.mjs';
+import {n as activate} from '/sdk/dist/loader-shared-CtHqSd7V.mjs';
+import {i as loadContext} from '/sdk/dist/load-context-Ca_v6V2m.mjs';
+import {n as loadAgent} from '/sdk/dist/runtime-plugins-C5G26WGG.mjs';
+import { n as getInstance } from '/sdk/dist/plugin-instance-scope-BoTOTPL4.mjs';
+let constructors=0;
+const events=[];
+globalThis.__bensonTopologyConstruct=()=>{constructors++; abort?.abort(); throw Object.assign(new Error('synthetic constructor rejection'),{output:{statusCode:428}});};
+registerHooks({load(url,ctx,next){
+ if(new URL(url).pathname.endsWith('/session.runtime-B9asd-5r.mjs')) return {format:'module',shortCircuit:true,source:
+ 'export const a=(...args)=>globalThis.__bensonTopologyConstruct(...args); export const s=async()=>({state:{creds:{},keys:{get:async()=>({}),set:async()=>{}}}}); export const r=async()=>({version:[2,3000,1]}); export const i=keys=>keys; export const n=()=>({}); export const t=JSON; export const o={};'};
+ return next(url,ctx);
+}});
+const cfg={plugins:{allow:['whatsapp'],load:{paths:['/candidate/whatsapp']},entries:{whatsapp:{enabled:true}},slots:{memory:'none'}},channels:{whatsapp:{enabled:true,dmPolicy:'allowlist',allowFrom:['+15550000001'],accounts:{default:{authDir:'/tmp/synthetic-auth'}},sendReadReceipts:false}}};
+writeFileSync('/tmp/config.json',JSON.stringify(cfg));
+setRuntimeConfigSnapshot(cfg);
+const meta=metadata({config:cfg,env:process.env,workspaceDir:'/tmp/main'});
+const stableContext={};
+const loaded=await loadGatewayPlugins({cfg,env:process.env,workspaceDir:'/tmp/main',pluginIds:['whatsapp'],pluginMetadataSnapshot:meta,baseMethods:[],resolveGatewayContext:()=>stableContext,channelPluginLoadIntent:'full'});
+const registry=loaded.pluginRegistry;
+activate(registry,'isolated-native-topology','gateway-bindable','/tmp/main');
+assert.equal(registry.plugins.filter(p=>p.id==='whatsapp').length,1);
+const record=registry.plugins.find(p=>p.id==='whatsapp');
+assert.equal(record.status,'loaded');
+const instance=getInstance(record); assert(instance);
+const registration=registry.channels.find(p=>p.plugin.id==='whatsapp'); assert(registration);
+const path='/candidate/whatsapp/dist/.setup/socket-close-BvdLXlbQ.mjs';
+const first=instance.loadModule(path); assert.equal(instance.loadModule(path),first);
+let abort;
+for(let attempt=1;attempt<=2;attempt++){
+ abort=new AbortController();
+ const seen=[];
+ const p=registration.plugin.gateway.startAccount({cfg,account:registration.plugin.config.resolveAccount(cfg,'default'),accountId:'default',abortSignal:abort.signal,
+ runtime:{log(){},error(e){events.push({runtimeError:String(e)});},exit(){throw new Error('unexpected exit');}},getStatus:()=>({accountId:'default'}),setStatus:s=>seen.push({connected:s.connected,running:s.running}),log:{info(){},debug(){},warn(){},error(){}}});
+ const timer=setTimeout(()=>abort.abort(),3000);
+ try{await p;events.push({attempt,outcome:'settled',constructors});}catch(e){events.push({attempt,outcome:e.code??e.name,message:e.message,constructors});}finally{clearTimeout(timer);abort.abort();}
+}
+const second=instance.loadModule(path); assert.equal(first,second);
+if(constructors!==1){console.log(JSON.stringify({probe:'FAIL',constructors,events}));process.exit(1);}
+const prepared=[];
+for(const workspaceDir of ['/tmp/main','/tmp/jessica']){
+ const view=loadAgent({config:cfg,workspaceDir,env:process.env,allowGatewaySubagentBinding:true,purpose:'tools'});
+ const channel=view.channels.find(p=>p.plugin.id==='whatsapp'); assert(channel);
+ prepared.push({registrationConfigMatches:loadContext(view)?.registrationConfigKey===loadContext(registry)?.registrationConfigKey,environmentIdentity:loadContext(view)?.env===process.env,sameRecord:view.plugins.find(p=>p.id==='whatsapp')===record,sameInstance:getInstance(view.plugins.find(p=>p.id==='whatsapp'))===instance,sameChannel:channel===registration,workspace:workspaceDir,borrowedRuntimeRecord:channel.borrowedRuntimeRecord===record,channels:view.channels.length,records:view.plugins.filter(p=>p.id==='whatsapp').length});
+}
+abort=new AbortController();
+let finalCode;
+try{await registration.plugin.gateway.startAccount({cfg,account:registration.plugin.config.resolveAccount(cfg,'default'),accountId:'default',abortSignal:abort.signal,runtime:{log(){},error(){},exit(){throw new Error('unexpected exit');}},getStatus:()=>({accountId:'default'}),setStatus(){},log:{info(){},debug(){},warn(){},error(){}}});}catch(e){finalCode=e.code;}
+assert.equal(finalCode,'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED'); assert.equal(constructors,1);
+loaded.retireGatewayRuntimeBindings();
+console.log(JSON.stringify({probe:'PASS',kind:'native-gateway-load-and-prepared-registry',records:registry.plugins.map(p=>({id:p.id,status:p.status,origin:p.origin})),channels:registry.channels.length,prepared,rootDeniedAfterAgentPreparation:finalCode,sameFactory:true,constructorEntries:constructors,events,limits:'One runtime record, synthetic lower factory rejection; no Gateway, external network or real auth. Prepared registry adoption tested separately; no external admin or config reload exercised.'}));
+process.exit(0);
+`;
+function connectionDiagnosticWorker() {
+  isolated();
+  const saveStageOnly = process.env.BENSON_NATIVE_SAVE_STAGE_ONLY === '1';
+  const cases = saveStageOnly ? ['queue-current', 'queue-backup', 'queue-logging-failure'] : ['factory', 'controller-428', 'controller-408', 'controller-health', 'sync', 'preconstructor',
+    'cancel', 'cancel-late', 'monitor-immediate', 'monitor-delayed', 'monitor-two', 'monitor-abort',
+    'baileys-stream', 'baileys-error', 'baileys-wire-close', 'privacy', 'logging-failure'];
+  writeFileSync('/tmp/diagnostic-driver.mjs', connectionDiagnosticSource);
+  writeFileSync('/tmp/runtime-topology-probe.mjs', connectionTopologySource);
+  const reports: unknown[] = [];
+  for (const scenario of cases) {
+    const output = execFileSync(process.execPath, ['/tmp/diagnostic-driver.mjs', scenario], {
+      encoding: 'utf8', timeout: 20_000, maxBuffer: 512 * 1024 });
+    const report: unknown = JSON.parse(output.trim());
+    assert(plain(report)); assert.equal(report.probe, 'PASS'); reports.push(report);
+  }
+  if (saveStageOnly) {
+    console.log(JSON.stringify({ probe: 'PASS', diagnosticOnly: true, saveStageOnly: true, cases: reports,
+      limits: 'Synthetic queue gates and inert JSON in disposable namespaces; no host credentials, Gateway, socket network or G2 acceptance.' }));
+    return;
+  }
+  const topology: unknown = JSON.parse(execFileSync(process.execPath, ['/tmp/runtime-topology-probe.mjs'], {
+    encoding: 'utf8', timeout: 30_000, maxBuffer: 512 * 1024 }).trim());
+  assert(plain(topology)); assert.equal(topology.probe, 'PASS');
+  assert.equal(topology.constructorEntries, 1);
+  console.log(JSON.stringify({ probe: 'PASS', diagnosticOnly: true, cases: reports, topology,
+    limits: 'Source/isolated evidence only. Module cap is not a cross-process guarantee; Restart=always remains a live qualification blocker.' }));
+}
+
 if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === '--worker') {
-  void worker('whatsapp-response-delivery').catch(error => { console.error(error); process.exitCode = 1; });
+  if (process.env.BENSON_NATIVE_CONNECTION_DIAGNOSTIC_ONLY === '1') connectionDiagnosticWorker();
+  else void worker('whatsapp-response-delivery').catch(error => { console.error(error); process.exitCode = 1; });
 }
