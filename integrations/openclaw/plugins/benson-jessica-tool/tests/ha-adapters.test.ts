@@ -1,10 +1,19 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createHaTransport } from '../../../../../agents/jessica-vacuum/lib/adapters/ha-transport.js';
+import { createHaTransport, readHaCredential } from '../../../../../agents/jessica-vacuum/lib/adapters/ha-transport.js';
 import { createHaDevice } from '../../../../../agents/jessica-vacuum/lib/adapters/ha-device.js';
 import { projectMap } from '../../../../../agents/jessica-vacuum/lib/ha-read.js';
 import type { MutationGuard } from '../../../../../agents/jessica-vacuum/lib/ports.js';
 import { fixture } from './fixtures/domain-state.js';
+test('shared credential acquisition carries cancellation without reading a real secret', async () => {
+  const aborted = AbortSignal.abort();
+  assert.throws(() => readHaCredential(aborted), { name: 'AbortError' });
+  const f = fixture(); let received: AbortSignal | undefined;
+  const transport = createHaTransport({ async readCredential(signal) { received = signal; return 'fixture-only'; },
+    fetchImpl: async () => new Response('{}') });
+  await transport.get('/api/states/vacuum.jesica_jesica', f.authority);
+  assert.equal(received, f.authority.signal);
+});
 test('HA map projection retains only canonical selected-map fields before closed validation', () => {
   const f = fixture(), map = f.evidence.map;
   assert.ok(map);
