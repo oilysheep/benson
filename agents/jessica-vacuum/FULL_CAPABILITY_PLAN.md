@@ -447,7 +447,7 @@ Durable Event-Triggered Conditional Actions remain deferred under Architecture �
 | FC4 | Carpet, smart cleaning and robot behavior | FC0, FC1, FC3 | NOT_STARTED | None. |
 | FC5 | Base-station capabilities | FC0, FC1; FC3 for temporary/coupled settings | NOT_STARTED | None. |
 | FC6 | Named safe zones, spots and destinations | FC0–FC3; reviewed spatial data | NOT_STARTED | None. |
-| FC7 | Maintenance, history, counters and household settings | FC0 for independent reads/predicates; FC1 only for task-correlated claims; D3 for restricted resets | NOT_STARTED | None. |
+| FC7 | Maintenance, history, counters and household settings | FC0 for independent reads/predicates; FC1 only for task-correlated claims; D3 for restricted resets | IN_PROGRESS | 2026-11-16 source-only device-error predicate; R08 episode/delivery and whole FC7 acceptance remain open. |
 | FC8 | Map and administrative capability completion | FC0–FC3, FC6 binding contract; D3 | NOT_STARTED | None. |
 | FC9 | Native scheduling, delivery and unresolved-feature disposition | Accepted capability per scheduled action; root ED01 G1/G11/G12 and ED02 for T01; FC7/ED04 for R08; FC1/G5 for T03; native D5/G3 as applicable | NOT_STARTED | None. |
 | FC10 | Full capability acceptance and closure | FC0–FC9 | NOT_STARTED | None. |
@@ -860,6 +860,8 @@ Preparation or a single accepted target cannot mark all FC2 PASS. Record per-cap
 ### FC7 — Maintenance, history and household settings
 
 **Objective/scope:** R01–R08, B17–B20: all exposed consumables, stats/history, device warnings, volume/DND/off-peak/child lock, explicit safe resets and deterministic proactive health/maintenance alert policy.
+
+**2026-11-16 bounded predicate milestone:** Oren approved source/isolated implementation of one ED04 warning path. Existing `lib/ha-read.ts` validates the canonical registry entity, native HA event/new-state binding, ordered event/source timestamps within 30 seconds and explicit boolean `has_error`; true means only that the device reports an error, false only absence of that flag. Missing, unavailable, unknown, stale, future or mismatched evidence cannot establish this predicate. `lib/task.ts` returns the validated deterministic no-Run observation through the existing Request/Response/DomainResult owners, with unknown task correlation and no operation adoption, physical state change, ownership release or pending advancement. False does not re-arm any durable episode. This initial observation predicate does not implement R08 notification eligibility, severity transitions, episode claims, cooldown, re-alert, clear/re-arm persistence or delivery. The root Implementation Plan's ED04 source/isolated warning slice owns the 18-case integrated fixture, affected 19/56-case reuse checks, final review, build limitations, recovery and exposure gates. No runtime or whole-stage PASS is claimed.
 
 **Owners/responsibility change:** EXTEND existing maintenance/statistics/room-settings read branches, closed reset/device-settings execute branches, policy/identity as approved, exact result types. FC7 owns alert conditions and policy only; root ED04 owns shared ingress/native handoff and FC9 owns domain scheduling/notification acceptance. No new metrics/history database.
 

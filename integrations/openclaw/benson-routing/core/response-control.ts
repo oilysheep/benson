@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { type Admission, type NativeDispatchReadAdmission, type NativeDispatchRunAdmission, type NoRunOutcome, type TaskResult, type Response, type ResponseV3, type ResponseV4, type DomainResult, type AnyDomainResult, type RenderedOutput } from './contracts.js';
 import { type SourceAdmissionController } from './request-control.js';
+import { assertNoRunObservation } from './no-run.js';
 import { validateRenderedOutput, validateResponseEnvelope, validateResponseV3Envelope, validateResponseV4Envelope } from './legacy-response.js';
 import { assertion, boundedCopy, exhaustive, fail, freeze, plain, synchronous, type JsonValue } from './value.js';
 
@@ -304,7 +305,7 @@ export function controlReadResponse<A extends Admission>(raw: unknown, options: 
     typeof options.renderOutcome !== 'function') fail('read_response_dependencies_unavailable');
   const { controller, admission, renderOutcome } = options;
   const outcome = synchronous(controller.validateOutcome(admission, raw), 'read_response_validator_must_be_synchronous');
-  if (outcome.schemaVersion !== 2 && outcome.schemaVersion !== 3) fail('read_response_native_invocation_required');
+  assertNoRunObservation(outcome, admission);
   if (outcome.disposition === 'suppressed' || outcome.disposition === 'reasoning-required') {
     assertion(controller.assertCurrent(admission), 'source_authority_must_be_synchronous');
     return freeze({ mode: 'suppressed', outcome, rendered: null });
