@@ -1,5 +1,13 @@
-import { AdmissionSchema, NoRunSchema, type NoRunOutcome } from './contracts.js';
+import { AdmissionSchema, NoRunSchema, type Admission, type NoRunOutcome } from './contracts.js';
 import { assertIds, decode, fail, freeze, identifier, read, timestamp, MAX_RENDERED_TEXT } from './value.js';
+
+/** Existing v1 observation contract; this is not admission or outbound authority. */
+export function assertNoRunObservation(outcome: NoRunOutcome, admission: Admission): void {
+  if (outcome.schemaVersion === 2 || outcome.schemaVersion === 3) return;
+  if (admission.schemaVersion !== 1 || admission.source.type !== 'ha' ||
+      !['read', 'reconcile'].includes(admission.scope) || outcome.effects.status !== 'none' ||
+      outcome.reconciliation.required || outcome.notification !== null) fail('no_run_observation_required');
+}
 
 /** Correlation only. The admission controller supplies identity and live custody. */
 export function validateNoRunOutcome(raw: unknown, rawAdmission: unknown): NoRunOutcome {

@@ -6,6 +6,7 @@ import { DomainResultSchema, DomainResultV3Schema, FactsSchema, FACT_KEYS, Domai
 import { validateCompletion } from './completion.js';
 import { validateRenderedOutput, validateTaskResultEnvelope } from './legacy-response.js';
 import { type SourceAdmissionController } from './request-control.js';
+import { assertNoRunObservation } from './no-run.js';
 import { assertion, boundedCopy, exact, fail, freeze, gaps, identifier, object, pending, read, synchronous,
   timestamp, userResponse, MAX_RENDERED_TEXT, IdentifierSchema, MAX_DOMAIN_RESULT_V3_BYTES, nullable, UserResponseSchema, GapsSchema } from './value.js';
 export const DOMAIN_RESULT_OUTPUT_SCHEMA = freeze(DomainResultSchema);
@@ -140,7 +141,7 @@ export function createNoRunDomainResult<A extends Admission>(response: unknown, 
   exact(response, ['mode', 'outcome', 'rendered'], 'domain_result_response_shape');
   const { controller, admission, normalizeFacts, language } = options;
   const outcome = synchronous(controller.validateOutcome(admission, response.outcome), 'domain_result_validator_must_be_synchronous');
-  if (outcome.schemaVersion !== 2 && outcome.schemaVersion !== 3) fail('domain_result_read_version');
+  assertNoRunObservation(outcome, admission);
   const suppressed = outcome.disposition === 'suppressed' || outcome.disposition === 'reasoning-required';
   if (response.mode !== (suppressed ? 'suppressed' : 'deterministic') || (response.rendered === null) !== suppressed) fail('domain_result_response_mode');
   const normalized = synchronous(normalizeFacts(outcome.evidence.facts), 'domain_result_normalizer_must_be_synchronous');

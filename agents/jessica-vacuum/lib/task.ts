@@ -1,6 +1,11 @@
 import { assertInvocationCurrent } from '../../../integrations/openclaw/benson-routing/core/invocation.js';
 import Type from 'typebox';
-import { object, decode, fail } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { object, decode, fail, freeze, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { isDeepStrictEqual } from 'node:util';
+import type { GrantedSourceDependencies } from '../../../integrations/openclaw/benson-routing/core/request-control.js';
+import type { SourceInput, NoRunOutcome } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
+import { projectJessicaWarningEvent } from './ha-read.js';
+import type { Registry } from './registry.js';
 import { createSourceAdmissionController, NATIVE_READ_ADMISSION_VERSION, type SourceAdmissionController } from '../../../integrations/openclaw/benson-routing/core/request-control.js';
 import { TaskEnvelopeSchema, type TaskEnvelope, type ConsumedPending, type AnyDomainResult, type NativeDispatchReadAdmission } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
 import { reconstructDomainPending, type CurrentRequestProjection } from '../../../integrations/openclaw/benson-routing/core/conversation-context.js';
@@ -12,6 +17,38 @@ import { validateResult, type Result } from './results.js';
 import { IdentitySchema, parseExecuteRequest } from './schemas.js';
 import type { InvocationAuthority } from './ports.js';
 export const JESSICA_TASK_SCHEMA = object({ operation: Type.Literal('status') });
+
+/** The event branch of the existing domain entry. No identity is synthesized
+ * for a person, task or Run, and no operation-state/effect port is available. */
+export function createJessicaWarningEventEntry(deps: {
+  registry: Registry; now(): number; readAuthority: GrantedSourceDependencies['readAuthority'];
+}) {
+  return Object.freeze({ entityIds: Object.freeze([deps.registry.mapBinding.deviceEntity]),
+    execute(input: SourceInput, assertCurrent: () => void) {
+      let expected: NoRunOutcome | undefined;
+      const project = () => projectJessicaWarningEvent(JSON.parse(input.request), deps.registry, deps.now());
+      const controller = createSourceAdmissionController({ now: deps.now, readAuthority: deps.readAuthority, assertCurrent,
+        assertDomainOutcome(outcome) {
+          project();
+          if (!expected || !isDeepStrictEqual(outcome, boundedCopy(expected))) fail('jessica_warning_outcome_mismatch');
+        } });
+      if (input.domain !== 'jessica-vacuum' || input.source.type !== 'ha' || input.scope !== 'read') fail('jessica_warning_admission_invalid');
+      const admission = controller.admit(input), facts = project();
+      expected = freeze({ schemaVersion: 1, kind: 'benson.no-run',
+        admission: { inputId: admission.source.inputId, sourceType: admission.source.type, sourceRef: admission.source.ref,
+          authorityRef: admission.authority.ref, authorityRevision: admission.authority.revision,
+          domain: admission.domain, subject: admission.authority.subject },
+        disposition: facts.active ? 'handled' : 'no-change',
+        evidence: { ref: admission.source.inputId, observedAt: facts.observedAt, freshness: 'fresh', facts },
+        effects: { status: 'none', refs: [] }, reconciliation: { required: false, reason: null }, notification: null, error: null });
+      const response = controlReadResponse(expected, { controller, admission, renderOutcome: () => ({ schemaVersion: 2,
+        message: facts.active ? 'Jessica reports a device error. Cleaning-task correlation is unknown.' : 'Jessica reports no device error. Cleaning-task correlation is unknown.' }) });
+      return createNoRunDomainResult(response, { controller, admission, language: 'en', normalizeFacts: () => ({
+        status: 'success', domain: admission.domain, domainSchemaVersion: '1', operation: 'warning', verified: true,
+        verificationScope: ['ha_device_error_observation'], data: facts, warnings: [], error: null,
+        effects: [], uncertainty: [], pendingContext: null }) });
+    } });
+}
 /** Opt-in intent entry; deterministic status remains independently strict. */
 // Native parameter normalization inspects direct object variants only.
 export const JESSICA_TASK_ENTRY_SCHEMA = Type.Union([JESSICA_TASK_SCHEMA, ...TaskEnvelopeSchema.anyOf]);

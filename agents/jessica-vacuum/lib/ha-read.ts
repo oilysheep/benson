@@ -1,10 +1,30 @@
 import Type, { type Static } from 'typebox';
-import { decode, plain } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { decode, plain, fail, freeze, timestamp } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import type { Registry } from './registry.js';
 import { MapSchema, Positive, SafeInteger, Nonempty, ShortcutTaskSchema, type MapEvidence } from './schemas.js';
 import { deny } from './errors.js';
 import type { ReadData, ReadItem } from './results.js';
 
 export const VACUUM_ENTITY = 'vacuum.jesica_jesica';
+// Source-only FC7 policy: freshness of the HA observation, not a claim that
+// hardware was independently sampled. No numeric fault semantics are inferred.
+export const WARNING_EVENT_MAX_AGE_MS = 30_000;
+export function projectJessicaWarningEvent(raw: unknown, registry: Registry, now: number) {
+  if (!Number.isSafeInteger(now) || !plain(raw) || raw.type !== 'event' || !plain(raw.event) ||
+      raw.event.event_type !== 'state_changed' || !plain(raw.event.data)) fail('jessica_warning_event_invalid');
+  const event = raw.event, data = raw.event.data, state = data.new_state;
+  if (registry.mapBinding.deviceEntity !== VACUUM_ENTITY || data.entity_id !== registry.mapBinding.deviceEntity ||
+      !plain(state) || state.entity_id !== data.entity_id || typeof state.state !== 'string' ||
+      ['unknown', 'unavailable'].includes(state.state) || !plain(state.attributes) ||
+      typeof state.attributes.has_error !== 'boolean') fail('jessica_warning_device_or_signal_invalid');
+  if (!timestamp(event.time_fired) || !timestamp(state.last_updated)) fail('jessica_warning_timestamp_invalid');
+  const fired = Date.parse(event.time_fired), updated = Date.parse(state.last_updated);
+  if (updated > fired || fired > now || now - updated > WARNING_EVENT_MAX_AGE_MS) fail('jessica_warning_evidence_not_fresh');
+  return freeze({ kind: 'device-warning' as const, deviceEntity: VACUUM_ENTITY,
+    condition: 'device-reports-error' as const, active: state.attributes.has_error,
+    severity: state.attributes.has_error ? 'warning' as const : null,
+    observedAt: state.last_updated, sourceKind: 'ha_event' as const, taskCorrelation: 'unknown' as const });
+}
 export const HaEntitySchema = Type.Object({ entity_id: Nonempty, state: Type.String(),
   attributes: Type.Record(Type.String(), Type.Unknown()), last_updated: Type.Optional(Nonempty) });
 export type HaEntity = Static<typeof HaEntitySchema>;
