@@ -89,6 +89,7 @@ generate(join(overlay, 'tsconfig.json'), JSON.stringify({
       'openclaw/plugin-sdk/tool-results': ['./dist/plugin-sdk/tool-results.d.ts'],
       'openclaw/plugin-sdk/runtime-config-snapshot': ['./dist/plugin-sdk/runtime-config-snapshot.d.ts'],
       'openclaw/plugin-sdk/agent-runtime': ['./dist/plugin-sdk/agent-runtime.d.ts'],
+      'openclaw/plugin-sdk/websocket-runtime': ['./dist/plugin-sdk/websocket-runtime.d.ts'],
     },
     rootDirs: ['./dist', '../../node_modules/openclaw/dist'],
   },

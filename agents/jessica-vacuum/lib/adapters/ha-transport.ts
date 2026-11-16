@@ -5,19 +5,24 @@ import { HaEntitySchema, VACUUM_ENTITY, selectSensors } from '../ha-read.js';
 import { deny } from '../errors.js';
 import type { InvocationAuthority, MutationGuard } from '../ports.js';
 
-const HA_URL = 'http://127.0.0.1:8123';
+export const HA_URL = 'http://127.0.0.1:8123';
 const TOKEN_FILE = '/home/oa/.openclaw/secrets/homeassistant-token';
+/** Shared execute-only acquisition; importing this owner never reads a secret. */
+export function readHaCredential(signal: AbortSignal): Promise<string> {
+  signal.throwIfAborted();
+  return readFile(TOKEN_FILE, { encoding: 'utf8', signal });
+}
 export interface HaTransport {
   get(path: string, authority: InvocationAuthority): Promise<unknown>;
   post(path: string, body: unknown, guard: MutationGuard): Promise<{ accepted: boolean }>;
 }
 /** Credential acquisition and HTTP are the only responsibilities of this adapter. */
-export function createHaTransport({ fetchImpl = fetch, readCredential = () => readFile(TOKEN_FILE, 'utf8') }:
-  { fetchImpl?: typeof fetch; readCredential?: () => Promise<string> } = {}): HaTransport {
+export function createHaTransport({ fetchImpl = fetch, readCredential = readHaCredential }:
+  { fetchImpl?: typeof fetch; readCredential?: (signal: AbortSignal) => Promise<string> } = {}): HaTransport {
   async function request(path: string, body: unknown, authority: InvocationAuthority, mutation?: MutationGuard) {
     if (!path.startsWith('/api/') || path.includes('..') || path.includes('?') || path.includes('#')) throw new TypeError('ha_path_invalid');
     authority.signal.throwIfAborted(); assertInvocationCurrent(authority);
-    const credential = (await readCredential()).trim();
+    const credential = (await readCredential(authority.signal)).trim();
     if (!credential) deny('READ_UNAVAILABLE', 'verification', 'Home Assistant credential is unavailable');
     authority.signal.throwIfAborted(); assertInvocationCurrent(authority);
     if (mutation) await mutation.assertMutationCurrent();
