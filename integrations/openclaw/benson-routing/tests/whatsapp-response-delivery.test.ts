@@ -218,3 +218,24 @@ test('native npm installation establishes current WhatsApp authority and native 
   }
   assert.deepEqual(result.isolation, { externalInterfaces: 0, externalRoutes: 0, hostHomeVisible: false });
 });
+
+test('pinned connection diagnostic captures native boundaries without runtime exposure', { timeout: 190_000 }, () => {
+  const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'connection-diagnostic');
+  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.diagnosticOnly, true);
+  assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 17);
+  for (const item of result.cases) { assert(plain(item)); assert.equal(item.probe, 'PASS'); }
+  assert(plain(result.topology)); assert.equal(result.topology.constructorEntries, 1);
+  assert.deepEqual(result.artifact, { targets: 4, foreignPreimageRejected: true, duplicateApplyRejected: true,
+    zeroFuzz: true, exactRollback: true, modesPreserved: true, responseDependencyPreserved: true });
+  console.log(JSON.stringify(result));
+});
+
+
+test('credential save diagnostics preserve native queue and publication semantics', { timeout: 190_000 }, () => {
+  const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'credential-save-diagnostic');
+  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.saveStageOnly, true);
+  assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 3);
+  for (const item of result.cases) { assert(plain(item)); assert.equal(item.probe, 'PASS'); }
+  assert(plain(result.artifact)); assert.equal(result.artifact.targets, 4); assert.equal(result.artifact.exactRollback, true);
+  console.log(JSON.stringify(result));
+});

@@ -1,6 +1,8 @@
 import { unitToolEvidence } from './fixtures/tool-evidence.js';
+import { readToolExecutionEvidence, retainToolExecutionEvidence } from '../core/tool-execution-evidence.js';
 import assert from 'node:assert/strict';
 import test from 'node:test';
+import { createHash } from 'node:crypto';
 import { createCompletionAuthority, acceptAgentCompletion, reconstructCompletion, validateCompletion,
   completionProposalSchema, settleNativeDomainCompletion, type CompletionCustody } from '../core/completion.js';
 import type { NativeDomainNoToolCompletionInput } from '../core/completion.js';
@@ -11,7 +13,12 @@ import { createCompletionDomainResult, createCompletionDomainResultV3 } from '..
 import { renderJessicaDomainResult } from '../../../../agents/jessica-vacuum/lib/presentation.js';
 import { createResponseV3Envelope } from '../core/legacy-response.js';
 import { controlResponse } from '../core/response-control.js';
-import { normalizeJessicaCompletion, createJessicaCompletionToolFactory } from '../../plugins/benson-jessica-tool/src/completion.js';
+import { normalizeJessicaCompletion, createJessicaCompletionToolFactory, projectJessicaReadFacts } from '../../plugins/benson-jessica-tool/src/completion.js';
+import { createJessicaReadToolFactory } from '../../plugins/benson-jessica-tool/src/tool.js';
+import { fixture as jessicaFixture } from '../../plugins/benson-jessica-tool/tests/fixtures/domain-state.js';
+import { loadPolicy } from '../../../../agents/jessica-vacuum/lib/policy.js';
+import { validateResult } from '../../../../agents/jessica-vacuum/lib/results.js';
+import { plain } from '../core/value.js';
 import type { CurrentRequestProjection } from '../core/conversation-context.js';
 
 // Synthetic owner guards test the contract; they do not establish native authority.
@@ -57,6 +64,225 @@ function native() {
         ] as unknown[] }, custody: f.custody };
     return { f, input: { ...input, executionEvidence: unitToolEvidence(input) } };
   }
+test('Jessica read-visible facts reach Completion v6 through actual tool serialization (isolated fixture)', async () => {
+  for (const fault of ['none', 'null-scope', 'null-uncertainty', 'missing-scope', 'missing-uncertainty', 'altered-data', 'foreign-domain', 'unknown-report-version']) {
+    const g = native(), clock = () => new Date('2026-10-26T08:00:00Z'), d = jessicaFixture('.', clock);
+    const policy = loadPolicy(d.policy); let reads = 0;
+    const create = createJessicaReadToolFactory({ registryConfig: d.registry, policy, clock,
+      roster: { accountId: 'fixture-account', approvedIds: [...new Set(policy.rules.map(rule => rule.subject))],
+        subjectForRoute: route => route === 'fixture-private' ? 'oren' : null },
+      async read(request, identity, authority) {
+        authority.assertCurrent(); assert.deepEqual(request, { operation: 'status' }); assert.deepEqual(identity, d.identity); reads++;
+        return validateResult(g.input.tool.value, null, clock());
+      },
+      jsonResult(value, _callId, assertCompletion) {
+        assertCompletion({ operation: 'status' }, value);
+        return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+      } });
+    const tool = create({ agentId: 'jessica-vacuum', requesterSenderId: 'fixture-private',
+      deliveryContext: { channel: 'whatsapp', accountId: 'fixture-account', to: 'fixture-private' }, assertInvocationCurrent() {} });
+    assert(tool && !Array.isArray(tool)); const result = await tool.execute('tool-call', { operation: 'status' });
+    assert.equal(reads, 1);
+    const text = result.content[0]; assert(text?.type === 'text' && typeof text.text === 'string');
+    const view: unknown = JSON.parse(text.text); assert(plain(view) && plain(view.facts)); assert.equal(view.schemaVersion, 2);
+    // The simulated child sees tool text, never the host's fixture facts.
+    const proposal = { schemaVersion: 6, kind: 'domain-task', facts: structuredClone(view.facts), userResponse: g.f.proposal.userResponse };
+    if (fault === 'null-scope') proposal.facts.verificationScope = null;
+    if (fault === 'null-uncertainty') proposal.facts.uncertainty = null;
+    if (fault === 'missing-scope') delete proposal.facts.verificationScope;
+    if (fault === 'missing-uncertainty') delete proposal.facts.uncertainty;
+    if (fault === 'altered-data') proposal.facts.data = { kind: 'status', state: 'invented' };
+    if (fault === 'foreign-domain') proposal.facts.domain = 'reminder';
+    if (fault === 'unknown-report-version') proposal.schemaVersion = 99;
+    const raw = validateResult(result.details, null, clock()), knownFacts = projectJessicaReadFacts(raw); assert(knownFacts);
+    assert.deepEqual(knownFacts, view.facts); assert.equal(raw.schemaVersion, '1'); assert(!Object.hasOwn(raw, 'verificationScope'));
+    const input = { ...g.input, knownFacts, tool: { ...g.input.tool, value: raw }, after: { ...g.input.after, value: result },
+      terminal: { ...g.input.terminal, messages: [{ role: 'user', content: [] }, { role: 'user', content: [] },
+        { role: 'assistant', content: [{ type: 'toolCall', id: 'tool-call', name: 'jessica_read' }] },
+        { role: 'toolResult', toolCallId: 'tool-call', toolName: 'jessica_read', ...result },
+        { role: 'assistant', content: [{ type: 'thinking' }, { type: 'text', text: JSON.stringify(proposal) }] }] } };
+    const events: Readonly<Record<string, unknown>>[] = [];
+    const settled = normalizeJessicaCompletion({ ...input, executionEvidence: unitToolEvidence(input), onReportFailure(diagnostic) { events.push(diagnostic); } });
+    assert.equal(settled.record.completion.outcome, fault === 'none' ? 'NORMAL' : 'FAILED', fault);
+    assert.deepEqual(JSON.parse(JSON.stringify(settled.record.facts.data)), knownFacts.data); assert.deepEqual(knownFacts, view.facts);
+    if (fault !== 'none') {
+      assert.equal(events.length, 1); assert.equal(events[0]?.stage, 'proposal');
+      if (fault === 'null-scope' || fault === 'null-uncertainty') assert.deepEqual(events[0]?.error,
+        { name: 'TypeError', code: 'completion_evidence_mismatch', position: null });
+    }
+  }
+});
+
+test('native terminal report carrier accepts the retained thinking/text shape without treating thinking as a report', () => {
+  const g = native(), events: Readonly<Record<string, unknown>>[] = [];
+  // Retained native evidence proves five messages and this final two-part shape,
+  // not the original report JSON. Prefix and report values here are synthetic.
+  g.input.terminal.messages.unshift({ role: 'user', content: [] }, { role: 'user', content: [] });
+  g.input.terminal.messages[4] = { role: 'assistant', content: [
+    { type: 'thinking', thinking: 'synthetic-private-reasoning' },
+    { type: 'text', text: JSON.stringify(g.f.proposal) },
+  ] };
+  const settled = normalizeJessicaCompletion({ ...g.input, onReportFailure(d) { events.push(d); } });
+  assert.equal(settled.record.completion.outcome, 'NORMAL', JSON.stringify(events));
+  assert.deepEqual(JSON.parse(JSON.stringify(settled.record.facts)), g.f.facts); assert.equal(events.length, 0);
+  assert(!JSON.stringify(settled).includes('synthetic-private-reasoning'));
+  g.f.state.live = false;
+  assert.throws(() => validateCompletion(settled.record, settled.authority), /custody unavailable/);
+});
+test('native terminal report carrier selects one text across native thinking metadata without reading its payload', () => {
+  for (const count of [0, 1, 3]) {
+    const g = native(), thinking = { type: 'thinking', get thinking() { throw Error('Reasoning must remain opaque'); },
+      get thinkingSignature() { throw Error('Replay signatures must remain opaque'); } };
+    g.input.terminal.messages[2] = { role: 'assistant', content: [
+      ...Array.from({ length: count }, () => thinking),
+      { type: 'text', text: JSON.stringify(g.f.proposal) },
+      ...Array.from({ length: count }, () => thinking),
+    ] };
+    assert.equal(settleNativeDomainCompletion(g.input).record.completion.outcome, 'NORMAL');
+  }
+});
+test('native terminal report carrier rejects ambiguous, absent and unsupported report content', () => {
+  for (const fault of ['duplicate', 'split', 'missing', 'unknown', 'image', 'null', 'malformed', 'toolUse'] as const) {
+    const g = native(), text = JSON.stringify(g.f.proposal), events: Readonly<Record<string, unknown>>[] = [];
+    const content: unknown[] = [{ type: 'thinking' }, { type: 'text', text }];
+    if (fault === 'duplicate') content.push({ type: 'text', text });
+    if (fault === 'split') content.splice(1, 1, { type: 'text', text: text.slice(0, 20) }, { type: 'text', text: text.slice(20) });
+    if (fault === 'missing') content.splice(1, 1);
+    if (fault === 'unknown' || fault === 'image') content.push({ type: fault, text: 'synthetic-private-content' });
+    if (fault === 'null') content.push(null);
+    if (fault === 'malformed') content[1] = { type: 'text', text: 42 };
+    g.input.terminal.messages[2] = { role: 'assistant', stopReason: fault === 'toolUse' ? 'toolUse' : 'stop', content };
+    const settled = settleNativeDomainCompletion({ ...g.input, onReportFailure(d) { events.push(d); } });
+    assert.equal(settled.record.completion.outcome, 'FAILED', fault);
+    assert.equal(events[0]?.stage, 'carrier', fault);
+    assert.equal((events[0]?.error as { code: string }).code, 'native_completion_missing', fault);
+    assert.deepEqual(JSON.parse(JSON.stringify(settled.record.facts.data)), g.f.facts.data);
+    assert(!JSON.stringify(events).includes('synthetic-private-content'));
+  }
+});
+test('native terminal report carrier cannot bypass JSON, facts, complete native evidence or live custody', () => {
+  for (const fault of ['json', 'facts', 'bytes', 'foreign', 'missing-native', 'cancelled', 'unsealed', 'incomplete',
+    'seal', 'receipt-count', 'rejected-call', 'tool-call'] as const) {
+    const g = native(), proposal = structuredClone(g.f.proposal), events: Readonly<Record<string, unknown>>[] = [];
+    if (fault === 'facts') proposal.facts.data = { fabricated: true };
+    g.input.terminal.messages[2] = { role: 'assistant', content: [{ type: 'thinking' },
+      { type: 'text', text: fault === 'json' ? '{invalid' : fault === 'bytes' ? 'x'.repeat(MAX_BYTES + 1) : JSON.stringify(proposal) },
+      ...fault === 'tool-call' ? [{ type: 'toolCall', id: 'unaccounted-call', name: 'jessica_read' }] : []] };
+    if (fault === 'foreign') g.input.terminal.runId = 'foreign';
+    if (fault === 'missing-native') Reflect.deleteProperty(g.input, 'executionEvidence');
+    if (fault === 'cancelled') g.f.state.live = false;
+    if (fault === 'unsealed') g.f.state.terminal = false;
+    if (fault === 'incomplete') g.f.state.callsComplete = false;
+    if (fault === 'seal' || fault === 'receipt-count' || fault === 'rejected-call') {
+      const { runId, sessionKey, sessionId, agentId } = g.input.binding;
+      const coverage = structuredClone(readToolExecutionEvidence(g.input.executionEvidence, { runId, sessionKey, sessionId, agentId }));
+      if (fault === 'seal') Reflect.set(coverage.seal, 'complete', false);
+      if (fault === 'receipt-count') Reflect.set(coverage.seal, 'count', 2);
+      if (fault === 'rejected-call') Reflect.set(coverage.receipts[0]!, 'executionStarted', false);
+      g.input.executionEvidence = retainToolExecutionEvidence(() => coverage, () => {});
+    }
+    const settle = () => settleNativeDomainCompletion({ ...g.input, onReportFailure(d) { events.push(d); } });
+    if (fault === 'json' || fault === 'facts' || fault === 'bytes') {
+      assert.equal(settle().record.completion.outcome, 'FAILED', fault);
+      assert.equal(events[0]?.stage, fault === 'json' ? 'json' : fault === 'facts' ? 'proposal' : 'bounds', fault);
+    } else { assert.throws(settle, fault); assert.equal(events.length, 0, fault); }
+  }
+});
+// Diagnostic fixtures contain synthetic secrets only; no native authority claim.
+test('REPORT diagnostics preserve exact codes, stages and recovery without retaining content', () => {
+  const secret = 'synthetic-credential-private-user-content';
+  const cases = [
+    { name: 'envelope', text: JSON.stringify({ content: [{ type: 'text', text: secret }], details: { [secret]: secret } }), stage: 'proposal', code: 'agent_completion_shape' },
+    { name: 'syntax', text: '{"' + secret + '":invalid}', stage: 'json', code: 'json_parse_error' },
+    { name: 'bounds', text: secret.repeat(MAX_BYTES), stage: 'bounds', code: 'json_bytes_exceeded' },
+    { name: 'facts', text: null, stage: 'proposal', code: 'completion_evidence_mismatch' },
+    { name: 'parts', text: null, stage: 'carrier', code: 'native_completion_missing' },
+    { name: 'run', text: null, stage: 'run', code: 'native_domain_run_error' },
+  ];
+  for (const c of cases) {
+    const g = native(), events: Readonly<Record<string, unknown>>[] = [];
+    if (c.name === 'facts') {
+      const proposal = structuredClone(g.f.proposal); Reflect.deleteProperty(proposal.facts, 'verificationScope');
+      g.input.terminal.messages[g.input.terminal.messages.length - 1] = { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(proposal) }] };
+    }
+    if (c.text !== null) g.input.terminal.messages[g.input.terminal.messages.length - 1] = { role: 'assistant', content: [{ type: 'text', text: c.text }] };
+    if (c.name === 'parts') g.input.terminal.messages[g.input.terminal.messages.length - 1] = {
+      role: 'assistant', content: [{ type: 'text', text: JSON.stringify(g.f.proposal) }, { type: 'unsupported', text: secret }] };
+    if (c.name === 'run') g.input.terminal.success = false;
+    const baseline = settleNativeDomainCompletion(g.input).record;
+    const result = settleNativeDomainCompletion({ ...g.input, onReportFailure(d) { events.push(d); } }).record;
+    assert.deepEqual(result, baseline); assert.equal(result.completion.outcome, 'FAILED');
+    assert.equal(events.length, 1);
+    const event = events[0]!;
+    assert.equal(event.stage, c.stage, c.name);
+    assert.equal((event.error as { code: string }).code, c.code, c.name);
+    const serialized = JSON.stringify(event);
+    assert(!serialized.includes(secret)); assert(!serialized.includes(g.f.binding.sessionKey));
+    assert(!serialized.includes(g.f.proposal.userResponse.text));
+    assert(Buffer.byteLength(serialized) < 16384);
+    const correlation = event.correlation as { inputIdSha256: string; child: { runIdSha256: string }; terminalMessageIndex: number };
+    const hash = (text: string) => createHash('sha256').update(text).digest('hex');
+    assert.equal(correlation.inputIdSha256, hash(g.f.binding.inputId));
+    assert.equal(correlation.child.runIdSha256, hash(g.f.binding.runId));
+    assert.equal(correlation.terminalMessageIndex, g.input.terminal.messages.length - 1);
+    if (c.name === 'facts') assert(serialized.includes('verificationScope'));
+    if (c.text !== null && c.name !== 'bounds') assert.equal((event.carrier as { textSha256: string }).textSha256, hash(c.text));
+  }
+});
+test('REPORT shape projection is bounded and withholds adversarial keys and values', () => {
+  const g = native(), events: Readonly<Record<string, unknown>>[] = [];
+  const tree = (depth: number): unknown => depth ? { facts: Array.from({ length: 8 }, () => tree(depth - 1)), text: 'secret-value' } : 'secret-value';
+  const text = JSON.stringify({ facts: tree(4), 'secret-key\nforged-log': 'secret-value' });
+  g.input.terminal.messages[g.input.terminal.messages.length - 1] = { role: 'assistant', content: [{ type: 'text', text }] };
+  settleNativeDomainCompletion({ ...g.input, onReportFailure(d) { events.push(d); } });
+  const event = events[0]!, serialized = JSON.stringify(event);
+  assert.equal(event.truncated, true); assert(Buffer.byteLength(serialized) < 16384);
+  assert(!serialized.includes('secret-value')); assert(!serialized.includes('secret-key'));
+  assert(serialized.includes('withheldKeys'));
+});
+test('REPORT missing-expected-key cap explicitly marks truncated evidence', () => {
+  const g = native(), events: Readonly<Record<string, unknown>>[] = [];
+  const data = Object.fromEntries(['schemaVersion', 'kind', 'facts', 'userResponse', 'state', 'text', 'language',
+    'reason', 'code', 'detail', 'content', 'details', 'type', 'batteryLevel', 'observedAt', 'sourceUpdatedAt', 'freshness'].map(key => [key, true]));
+  g.input.knownFacts.data = data; g.input.tool.value.data = data;
+  const proposal = structuredClone(g.f.proposal); proposal.facts.data = {};
+  g.input.terminal.messages[g.input.terminal.messages.length - 1] = { role: 'assistant', content: [{ type: 'text', text: JSON.stringify(proposal) }] };
+  g.input.executionEvidence = unitToolEvidence(g.input);
+  settleNativeDomainCompletion({ ...g.input, onReportFailure(d) { events.push(d); } });
+  assert.equal(events.length, 1); assert.equal(events[0]!.truncated, true);
+  const projection = events[0]!.proposal as { fields: { facts: { fields: { data: { missingExpectedKeys: string[] } } } } };
+  assert.equal(projection.fields.facts.fields.data.missingExpectedKeys.length, 16);
+});
+test('REPORT observer failure cannot change recovery; observer cancellation prevents release', () => {
+  const g = native(); g.input.terminal.messages.pop();
+  const baseline = settleNativeDomainCompletion(g.input).record;
+  assert.deepEqual(settleNativeDomainCompletion({ ...g.input, onReportFailure() { throw Error('synthetic-secret'); } }).record, baseline);
+  let calls = 0;
+  assert.throws(() => settleNativeDomainCompletion({ ...g.input, onReportFailure() { calls++; g.f.state.live = false; } }), /custody unavailable/);
+  assert.equal(calls, 1);
+});
+test('Jessica normalization forwards REPORT observation without adding it to Completion or DomainResult', () => {
+  const g = native(), events: Readonly<Record<string, unknown>>[] = [];
+  g.input.terminal.messages.pop();
+  const result = normalizeJessicaCompletion({ ...g.input, onReportFailure(d) { events.push(d); } });
+  assert.equal(events.length, 1); assert.equal(events[0]!.stage, 'carrier');
+  assert.equal(result.record.completion.outcome, 'FAILED');
+  assert.equal(result.result.evidence.gaps[0]?.code, 'REPORT');
+  assert(!JSON.stringify(result.record).includes('correlation'));
+  assert(!JSON.stringify(result.result).includes('terminalMessageIndex'));
+});
+test('NORMAL and invalid native authority emit no REPORT diagnostic', () => {
+  for (const fault of ['none', 'stale', 'foreign', 'missing-evidence'] as const) {
+    const g = native(); let calls = 0;
+    const input = { ...g.input, onReportFailure() { calls++; } };
+    if (fault === 'stale') g.f.state.live = false;
+    if (fault === 'foreign') input.terminal.runId = 'foreign-run';
+    if (fault === 'missing-evidence') Reflect.deleteProperty(input, 'executionEvidence');
+    if (fault === 'none') assert.equal(settleNativeDomainCompletion(input).record.completion.outcome, 'NORMAL');
+    else assert.throws(() => settleNativeDomainCompletion(input));
+    assert.equal(calls, 0);
+  }
+});
 function nativeSequence(count: number) {
   const g = native();
   const preceding = Array.from({ length: count - 1 }, (_, index) => {

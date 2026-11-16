@@ -1,0 +1,139 @@
+{
+  "id": "connection-diagnostics-2026.10.10",
+  "status": "SOURCE_ISOLATED_CANDIDATE_NOT_INSTALLED",
+  "package": "@openclaw/whatsapp",
+  "version": "2026.10.10",
+  "hostVersion": "2026.10.10",
+  "baileysVersion": "7.0.0-rc14",
+  "wsVersion": "8.22.0",
+  "upstreamTag": "v2026.10.10",
+  "repositoryBaseCommit": "d67b801d17bbee03e4b222889ae7bcc1e48fb3a4",
+  "sourceCommit": null,
+  "sourceCommitNote": "Uncommitted source candidate; exact artifact hash, installed preimages and retained baseline are authoritative. Not a published commit.",
+  "requires": {
+    "artifact": "2026.10.10.patch",
+    "sha256": "41b33921a0ed6b05c32dcd6804581ea4a1c25d897272820219ebd29f59ad5c2a",
+    "manifestSha256": "be8bd96fb3cf2319b80fc4327101dbc29a395b3bce8bf663e07f1cb1482d7de3"
+  },
+  "artifactSha256": "5e62235d9bc2b1be811e7195ba575b7ccca980bec32b6f67b373d67d6f33481b",
+  "files": [
+    {
+      "target": "dist/.setup/socket-close-BvdLXlbQ.mjs",
+      "beforeSha256": "cbaf38b5c0329b5696564950a5caeaecd4eed86666c29fc6aaaca85805cdaafd",
+      "afterSha256": "cc10bf554891e29635938ff7751f51019bdb1411ec9a70fa7939b75ef00e1e04",
+      "mode": "0664"
+    },
+    {
+      "target": "dist/.setup/connection-controller-g_8-U3na.mjs",
+      "beforeSha256": "a8ce247c908cc2a39edc36857a89df3beca0bc4f1be0e6131ae12a73e833d2a6",
+      "afterSha256": "4550981f4710afe164d7ebc36cd452639b7f43a5d0ad4b2b0e175205682d6e1f",
+      "mode": "0664"
+    },
+    {
+      "target": "dist/.setup/monitor-B5qdng3U.mjs",
+      "beforeSha256": "5797e2a84d386affb41236963b31aee7f37691a26042e66f215a87f8115f88f3",
+      "afterSha256": "7cc0b187e211f5da774d3b628dda3d90feea83f6e96330b20dd43fd0d610d478",
+      "mode": "0664"
+    },
+    {
+      "target": "dist/.setup/auth-store-DMOniiuA.mjs",
+      "beforeSha256": "68f381d03e9f30ab26dca0f17acf48a85cdc3954b9f937720bba48d0f7489ea1",
+      "afterSha256": "4325b0218a15fe4773c52f3df6f59a5b1b80931a6801c1e96c11d7e43c314863",
+      "mode": "0664"
+    }
+  ],
+  "hostFiles": {
+    "package.json": "24211af07f7be872b714cd2181008b8bc9981a07608e531c3d70fddd3672c28b",
+    "dist/server-channels-BQ5HaSAC.mjs": "e472cc45a64edda5a77fe2a46dfa0f83df05a24439d383dde1e1ee3d97b879c6",
+    "dist/server-plugins-CYghP9ao.mjs": "262352f80b8645ca2938b58da3d67a081552c60e4d972f9adcb38731756e0264",
+    "dist/loader-shared-CtHqSd7V.mjs": "918ce2a10aaf6e07808727f326d3ebb5d249d2c34404445c2f3ef061602f72fb",
+    "dist/runtime-plugins-C5G26WGG.mjs": "31121fea4a96f921036472afe510002516043c63fc69e8ebe70b2792bb9bd25b",
+    "dist/plugin-instance-scope-BoTOTPL4.mjs": "79ba165bc74634b1e401f351b5978cc0418443a7896fbed4976b48a0c6c6b307",
+    "dist/logger-D10DOPMK.mjs": "6755e594d2da9601c10c98045fd5b61b4adf8b3b47427d23734aa8249e091ffd"
+  },
+  "baileysFiles": {
+    "package.json": "773388100d4104838141095bb3e23e0cd86e402cbccd4a52af2d449927fb53fb",
+    "lib/Socket/socket.js": "ff8b19ff02491fa080ee371f066d49c94acb903207dd0d9fdb5548e5a594fb4a",
+    "lib/Socket/Client/websocket.js": "3344bcf808751d4cf1d25970ad5945c130e7f14d22814f7c2f6ac1a7b05e7de0",
+    "lib/Socket/index.js": "e8e89a1c41f0a153cdea99975a7af106e5854e02ee6efd606b40a13821e8b57c"
+  },
+  "admission": {
+    "reservationsPerModule": 1,
+    "reloadAllowed": false,
+    "replacementProcessAllowed": false,
+    "scope": "Only the qualified root channel manager and its closed no-login/no-directory/no-standalone-inbox callgraph. Not a universal module singleton or cross-process cap."
+  },
+  "limits": {
+    "eventBytes": 2048,
+    "recordsPerModule": 64
+  },
+  "liveBlocker": "Existing Restart=always permits a replacement process with fresh counters. A separately approved, qualified session-scoped automatic-restart prohibition in the existing service owner is required before live qualification.",
+  "rollback": "Restore exactly all four verified preimages/modes/owners from an action-time checkpoint while stopped. Retain the accepted Response patch and native authentication/history/effects. Restore any separately approved temporary Restart=no policy independently. No production install authorized.",
+  "upgrade": "Inspect exact official replacement artifact for equivalent native diagnostics/admission; retire or adapt only after version/hash and bounded topology/lifecycle requalification. Never auto-apply on unknown bytes.",
+  "archiveIntegrity": "sha512-IaIUJKULPB+s0CFbAkQh9xQz988+sU9cs6geoO4YWytgI7hqmPy3ASJAq/nCkjH916k7nmgmh31N8aS1aQCPXA==",
+  "validation": {
+    "evidenceOwner": ".checkpoints/domain-run-g1b-g2-20261109/read-facts-projection-20261115-my23lh/connection-diagnostics-source-QwMrqY",
+    "strictBuild": {
+      "path": "build-1794748067260.log",
+      "sha256": "f037645c27f33cb94b00505d2d9f408b28d4dd7eb675f852e3b04b470d28b94a"
+    },
+    "native": {
+      "path": "native-validation.json",
+      "sha256": "35dc1544d79d1671e5104bef8c6c25257acf81b7eb5bc7b839ddf1f58e8a9105",
+      "cases": 17,
+      "topology": "Bounded root registry/startAccount calls plus static manager callgraph; not a live Gateway or universal singleton."
+    },
+    "responseRegression": {
+      "path": "diagnostic-1794748219124.log",
+      "sha256": "1c93385c84e0ad9e2b1fce8a4174d119fa8f943b3b1347301e55ea14501e25cc"
+    },
+    "preservation": {
+      "path": "preservation.json",
+      "sha256": "6b7353317720fd5f6b86b678acee26181efabbe8774b53c9fd7551191961e40c"
+    },
+    "independentReview": {
+      "result": "PASS",
+      "path": "independent-review.json",
+      "sha256": "10c68eb582a7889979d5a1bbb127dea571ca373a42720a8e9d7691013e2f59e4",
+      "targetSha256": "4e5007111c1c182c337ad8bb19118f84449ad7ab4bb3b95bd4c13fc3e5fdae57",
+      "liveEligibility": "BLOCKED"
+    },
+    "saveStageExtension": {
+      "status": "SOURCE_ISOLATED_PASS_INDEPENDENT_REVIEW_PASS",
+      "evidenceOwner": ".checkpoints/domain-run-g1b-g2-20261109/read-facts-projection-20261115-my23lh/save-stage-extension-cM1hxH",
+      "artifactSha256": "5e62235d9bc2b1be811e7195ba575b7ccca980bec32b6f67b373d67d6f33481b",
+      "strictBuild": {
+        "path": "build-1794769489601.log",
+        "sha256": "f037645c27f33cb94b00505d2d9f408b28d4dd7eb675f852e3b04b470d28b94a"
+      },
+      "native": {
+        "path": "save-stage-validation-final.json",
+        "sha256": "e78e4095969ed93698a26a46df3b602223935c075fd1996c4859cf11989f8e75",
+        "cases": 3,
+        "scope": "Inert data and synthetic gates; real native queue/save/publication functions in disposable namespaces. Not production cause or G2 acceptance.",
+        "boundedDeduplication": true,
+        "overflowProjectionClosed": true
+      },
+      "consumer": {
+        "path": "capture.mjs",
+        "sha256": "bf96c330a684785b699664feebc74d174003080e49f7a020d6aaa974b413fe1f",
+        "validationPath": "capture-qualification.json",
+        "validationSha256": "28a83191f57e127c995147bf1b97a6ae5cb3af7389675a7629033af7ff2b3dda",
+        "checks": 17,
+        "nativeReplayRecords": 53,
+        "retryPolicy": "FAIL",
+        "constructorEntries": 1,
+        "boundToRuntime": false
+      },
+      "priorEvidence": "Existing17-case/topology/review records apply to the earlier artifact only; unchanged surfaces reused, not a full rerun or review of this extension.",
+      "independentReview": {
+        "result": "PASS",
+        "path": "independent-review.json",
+        "sha256": "f23a5f84df9130e0dc2c1e6f252967b55a82e5fcc27235ed38f015e4af66e8cd",
+        "targetSha256": "6d96db5c4a180723f1825e086e5aa330ce8d245324add54ee7c3625c9aa50691",
+        "productionAcceptance": "BLOCKED"
+      },
+      "productionPendingCause": "UNKNOWN"
+    }
+  }
+}

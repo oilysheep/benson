@@ -1,6 +1,7 @@
 import Type from 'typebox';
 import { readToolExecutionEvidence, receiptDomainValue, type ToolExecutionReceipt } from './tool-execution-evidence.js';
 import { isDeepStrictEqual as same } from 'node:util';
+import { createHash } from 'node:crypto';
 import { FactsSchema, FACT_KEYS, DOMAIN_VERSIONS, DOMAIN_AGENTS, type Facts } from './contracts.js';
 import { Binding3Schema, Binding4Schema, Binding5Schema, Binding6Schema, CompletionSchema, WorkflowSchema, SemanticsSchema,
   COMPLETION_SCHEMA_VERSION, type Binding, type Binding4, type Binding6, type Completion,
@@ -337,6 +338,78 @@ export function reconstructCompletion(authority: unknown): Completion {
  * model wording nor serialized identities can establish either.
  */
 export const MAX_NATIVE_TOOL_CALLS = 64;
+// Diagnostic vocabulary comes from this validator, never from report content.
+const REPORT_ERRORS = new Set(['native_domain_run_error', 'native_completion_missing', 'json_bytes_exceeded',
+  'agent_completion_shape', 'completion_version_or_kind', 'completion_origin_mismatch', 'completion_evidence_mismatch',
+  'json_too_deep', 'json_array_invalid', 'json_object_invalid', 'json_key_invalid', 'json_invalid_or_oversized',
+  'user_response_required', 'candidate_invalid', 'user_response_reason_invalid', 'completion_shape',
+  'completion_evidence_insufficient', 'completion_runtime_response_mismatch']);
+const REPORT_KEYS = new Set(['schemaVersion', 'kind', 'facts', 'userResponse', ...FACT_KEYS,
+  'state', 'text', 'language', 'reason', 'code', 'detail', 'content', 'details', 'type',
+  'batteryLevel', 'observedAt', 'sourceUpdatedAt', 'freshness', 'activeSegments', 'currentSegment']);
+type ReportStage = 'run' | 'carrier' | 'bounds' | 'json' | 'proposal';
+/** Content-free projection. Unknown keys and all scalar values are withheld;
+ * counts/types and equality to host facts diagnose shape/evidence failures.
+ * Truncation is explicit. No getters, toJSON, error stacks or raw JSON snippets.
+ */
+function reportFailure(stage: ReportStage, error: unknown, b: Binding6, messages: readonly unknown[],
+  text: string | undefined, proposal: unknown, facts: Facts): Readonly<Record<string, unknown>> {
+  let remaining = 96, truncated = false;
+  const shape = (value: unknown, expected: unknown, depth: number): unknown => {
+    if (--remaining < 0 || depth > 6) { truncated = true; return { type: 'truncated' }; }
+    const type = value === null ? 'null' : Array.isArray(value) ? 'array' : typeof value;
+    const matchesExpected = expected === undefined ? {} : { matchesExpected: same(value, expected) };
+    if (typeof value === 'string') return { type, bytes: Buffer.byteLength(value, 'utf8'), ...matchesExpected };
+    if (Array.isArray(value)) {
+      if (value.length > 4) truncated = true;
+      const items: unknown[] = [];
+      for (let i = 0; i < Math.min(value.length, 4); i++) {
+        if (remaining <= 0) { truncated = true; break; }
+        items.push(shape(value[i], Array.isArray(expected) ? expected[i] : undefined, depth + 1));
+      }
+      return { type, length: value.length, items };
+    }
+    if (plain(value)) {
+      const keys = Object.keys(value), safe = keys.filter(key => REPORT_KEYS.has(key));
+      if (safe.length > 16) truncated = true;
+      const fields: Record<string, unknown> = {};
+      for (const key of safe.slice(0, 16)) {
+        if (remaining <= 0) { truncated = true; break; }
+        fields[key] = shape(field(value, key), plain(expected) ? field(expected, key) : undefined, depth + 1);
+      }
+      const missing = plain(expected) ? Object.keys(expected).filter(key => REPORT_KEYS.has(key) && !Object.hasOwn(value, key)) : [];
+      if (missing.length > 16) truncated = true;
+      return { type, keys: keys.length, withheldKeys: keys.length - safe.length, fields,
+        missingExpectedKeys: missing.slice(0, 16) };
+    }
+    return { type, ...matchesExpected };
+  };
+  const fingerprint = (value: string) => createHash('sha256').update(value).digest('hex');
+  const identity = (value: { runId: string; sessionKey: string; sessionId: string }) => ({
+    runIdSha256: fingerprint(value.runId), sessionKeySha256: fingerprint(value.sessionKey), sessionIdSha256: fingerprint(value.sessionId) });
+  const final = messages.at(-1), content = plain(final) ? field(final, 'content') : undefined;
+  const bytes = text === undefined ? null : Buffer.byteLength(text, 'utf8');
+  const message = error instanceof Error ? field(error, 'message') : undefined;
+  // V8 SyntaxError messages may quote private report text; retain position only.
+  const position = error instanceof SyntaxError && typeof message === 'string' ? /\bposition (\d+)\b/u.exec(message)?.[1] : undefined;
+  const projected = shape(proposal, { schemaVersion: 6, kind: 'domain-task', facts }, 0);
+  return freeze({ version: 1, stage, error: {
+    name: error instanceof SyntaxError ? 'SyntaxError' : error instanceof TypeError ? 'TypeError' : 'Error',
+    code: typeof message === 'string' && REPORT_ERRORS.has(message) ? message : error instanceof SyntaxError ? 'json_parse_error' : 'withheld',
+    position: position === undefined ? null : Number(position) },
+    correlation: { inputIdSha256: fingerprint(b.inputId), admissionIdSha256: fingerprint(b.admissionId),
+      taskIdSha256: fingerprint(b.taskId), parent: b.caller === null ? null : identity(b.caller), child: identity(b),
+      completionSchemaVersion: 6, terminalMessageIndex: messages.length - 1 },
+    carrier: { messages: messages.length, role: plain(final) && field(final, 'role') === 'assistant' ? 'assistant' : 'other',
+      toolUse: plain(final) && field(final, 'stopReason') === 'toolUse', parts: Array.isArray(content) ? content.length : null,
+      partTypesTruncated: Array.isArray(content) && content.length > 8,
+      partTypes: Array.isArray(content) ? content.slice(0, 8).map(part => {
+        const type = plain(part) ? field(part, 'type') : undefined;
+        return typeof type === 'string' && ['text', 'thinking', 'toolCall', 'image'].includes(type) ? type : 'other';
+      }) : [],
+      textBytes: bytes, textSha256: text !== undefined && bytes !== null && bytes <= MAX_BYTES ? fingerprint(text) : null },
+    proposal: projected, truncated });
+}
 export interface NativeToolObservation {
   tool: { runId: string; sessionKey: string; sessionId: string; callId: string; name: string; value: unknown };
   after: { runId: string | undefined; callId: string | undefined; value: unknown; error: string | undefined };
@@ -352,6 +425,8 @@ export interface NativeDomainCompletionInput extends NativeToolObservation {
   preceding?: readonly NativeToolObservation[];
   /** Domain-owned validation of every captured raw result, before settlement. */
   validateTool?(tool: Readonly<NativeToolObservation['tool']>, receipt?: Readonly<ToolExecutionReceipt>): unknown;
+  /** Adapter-private best-effort observation, never evidence or authority. */
+  onReportFailure?(diagnostic: Readonly<Record<string, unknown>>): void;
   terminal: { runId: string | undefined; sessionKey: string | undefined; sessionId: string | undefined; success: boolean; messages: unknown[] };
   custody: CompletionCustody;
 }
@@ -451,22 +526,41 @@ export function settleNativeDomainCompletion(input: NativeDomainCompletionInput 
     results: [], coverage: 'complete', gaps: [], origin: 'agent' };
   let authority = createCompletionAuthority(evidence, { assertCurrent: assertEvidence });
   let record: Completion;
+  let stage: ReportStage = 'run', reportText: string | undefined, proposal: unknown;
   try {
     if (!terminal.success) fail('native_domain_run_error');
+    stage = 'carrier';
     const messages = terminal.messages as unknown[], final = messages.at(-1);
     if (!plain(final) || final.role !== 'assistant' || final.stopReason === 'toolUse' ||
-      !Array.isArray(final.content) || final.content.length !== 1) fail('native_completion_missing');
-    const text: unknown = final.content[0];
-    if (!plain(text) || text.type !== 'text' || typeof text.text !== 'string') fail('native_completion_missing');
+      !Array.isArray(final.content)) fail('native_completion_missing');
+    // Native thinking blocks are opaque replay metadata, not report text or
+    // authority. Require exactly one text block; never join or discard other
+    // content to manufacture a report. The projection above omits thinking data.
+    for (const part of final.content) {
+      if (plain(part) && part.type === 'thinking') continue;
+      if (!plain(part) || part.type !== 'text' || typeof part.text !== 'string' || reportText !== undefined)
+        fail('native_completion_missing');
+      reportText = part.text;
+    }
+    if (reportText === undefined) fail('native_completion_missing');
     // Bound the serialized carrier, then validate parsed logical fields and the
     // complete envelope. A JSON report is not itself one domain string field.
-    if (Buffer.byteLength(text.text, 'utf8') > MAX_BYTES) fail('json_bytes_exceeded');
-    record = acceptAgentCompletion(JSON.parse(text.text), authority);
-  } catch {
+    stage = 'bounds';
+    if (Buffer.byteLength(reportText, 'utf8') > MAX_BYTES) fail('json_bytes_exceeded');
+    stage = 'json'; proposal = JSON.parse(reportText);
+    stage = 'proposal'; record = acceptAgentCompletion(proposal, authority);
+  } catch (error) {
     // A broken reporting step cannot erase a verified transaction or restart it.
     // Recovery changes Run disposition, retaining all domain data/effect facts.
     // Foreign/missing native evidence and lost live authority still fail closed.
     assertEvidence(b);
+    if (input.onReportFailure) {
+      try { assertion(input.onReportFailure(reportFailure(stage, error, b, terminal.messages, reportText, proposal, facts)),
+        'completion_diagnostic_must_be_synchronous'); }
+      catch { /* Logging failure cannot change recovery or disclose an exception. */ }
+      // The observer cannot extend custody or release a newly cancelled result.
+      assertEvidence(b);
+    }
     // Nonexpanding recovery: the accepted NORMAL authority already budgets
     // 128 bytes for unavailable wording. This response plus one REPORT/RUN gap
     // uses at most 125 bytes; NORMAL/FAILED have equal length, and unknown is

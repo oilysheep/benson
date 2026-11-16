@@ -14,7 +14,7 @@ import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results
 import { currentNativeTurn } from '../../../benson-routing/adapters/openclaw/response.js';
 import { createOpenClawDomainRunCollector, observeOpenClawToolExecution } from '../../../benson-routing/adapters/openclaw/tool-execution-evidence.js';
 import { receiptDomainValue } from '../../../benson-routing/core/tool-execution-evidence.js';
-import { normalizeJessicaCompletion } from './completion.js';
+import { normalizeJessicaCompletion, projectJessicaReadFacts } from './completion.js';
 import { loadCanonicalIdentityContract } from '../../benson-reminder-tool/src/identity.js';
 import { captureJessicaRequesterDelegation, createJessicaTaskToolFactory, createJessicaReadToolFactory, resolveJessicaRequesterDelegation } from './tool.js';
 
@@ -118,7 +118,8 @@ export default definePluginEntry({
               const value = validateResult(selected.tool.value, null, new Date());
               // This first G2 vertical slice reuses the accepted status facts.
               // Other semantic outcomes remain fail-closed, not inferred.
-              if (value.operation !== 'status' || value.pendingContext !== null) throw new Error('jessica_native_completion_unverified');
+              const knownFacts = projectJessicaReadFacts(value);
+              if (!knownFacts) throw new Error('jessica_native_completion_unverified');
               const normalized = normalizeJessicaCompletion({ resultVersion: 3, binding: {
                 inputId: work.execution.requestEpoch, admissionId: work.callId,
                 conversationId: work.source.context.conversation.conversationRef,
@@ -126,12 +127,11 @@ export default definePluginEntry({
                 domain: 'jessica-vacuum', taskId: work.callId, caller,
                 completionTarget: 'CALLER', authorizationId: work.callId,
                 parentContinuation: { eligible: true, reason: null }, deliveryPolicy: { eligible: false, reason: null },
-              }, knownFacts: { domain: value.domain, domainSchemaVersion: value.schemaVersion, operation: value.operation,
-                status: value.status, verified: value.verified, verificationScope: value.verified ? ['status_read'] : [],
-                data: value.data, warnings: value.warnings, error: value.error, pendingContext: null, effects: [], uncertainty: [] },
+              }, knownFacts,
                 ...selected, tool: { ...selected.tool, name: 'jessica_read' },
                 preceding: collected.observations.slice(0, -1), terminal: collected.terminal,
-                custody: collected.custody, validateTool: collected.validateTool, executionEvidence });
+                custody: collected.custody, validateTool: collected.validateTool, executionEvidence,
+                onReportFailure(diagnostic) { api.logger?.info(`benson.completion_v6_report ${JSON.stringify(diagnostic)}`); } });
               scope.release(); receipts.close();
               return { completion: normalized.record, authority: normalized.authority, effects: normalized.result.effects };
             } catch (error) { scope.discard(); receipts?.dispose(); throw error; }

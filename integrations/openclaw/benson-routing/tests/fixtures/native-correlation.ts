@@ -15,13 +15,14 @@ import { createJessicaTaskToolFactory, createJessicaReadToolFactory } from '../.
 import { createJessicaExecuteToolFactory } from '../../../plugins/benson-jessica-tool/src/execute-tool.js';
 import { fixture as jessicaFixture } from '../../../plugins/benson-jessica-tool/tests/fixtures/domain-state.js';
 import type { CurrentRequestEvidence } from '../../core/conversation-context.js';
-import { normalizeJessicaCompletion } from '../../../plugins/benson-jessica-tool/src/completion.js';
+import { normalizeJessicaCompletion, projectJessicaReadFacts } from '../../../plugins/benson-jessica-tool/src/completion.js';
 import { READ_REQUEST_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/schemas.js';
 import { plain, decode } from '../../core/value.js';
 import { createCompletionAuthority, acceptAgentCompletion, validateCompletion } from '../../core/completion.js';
 import type { Binding6, Completion6 } from '../../core/completion-contracts.js';
 import type { NativeDispatchRunAdmission } from '../../core/contracts.js';
 import { boundedCopy } from '../../core/value.js';
+import { readToolExecutionEvidence } from '../../core/tool-execution-evidence.js';
 import { validateStartupTargetMetadata } from './native-isolation.js';
 import { validateDomainResultEnvelope, createCompletionDomainResult } from '../../core/domain-result.js';
 import { createResponseV3Envelope } from '../../core/legacy-response.js';
@@ -96,7 +97,8 @@ function completionFacts(value: ReturnType<typeof validateResult>): Completion6[
 export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
   active(): boolean; assertCurrent(): void; accountId: string; route: string; parentSessionKey: string; requestId: string;
   mutation?: { source(): CurrentRequestEvidence }; resultVersion?: 2 | 3;
-  onCompletion(proof: { binding: Binding6; backendReads: number; negativeEvidenceCases: number; guard: () => void }): void;
+  onCompletion(proof: { binding: Binding6; backendReads: number; negativeEvidenceCases: number; guard: () => void;
+    demonstration?: { completion: Completion6; execution: unknown } }): void;
 }) {
   const cancellation = process.env.BENSON_NATIVE_COMPLETION_V6_ONLY === 'cancel';
   const callCount = process.env.BENSON_NATIVE_COMPLETION_V6_ONLY === 'multi' ? 3 : 1;
@@ -125,6 +127,7 @@ export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
   let nativeEvidence: Awaited<ReturnType<typeof observeOpenClawToolExecution>> | undefined;
   let mutationEvidence: ((args: unknown, value: unknown) => void) | undefined;
   let backendReads = 0, consumed = false, negativeEvidenceCases = 0;
+  let demoExecution: unknown;
   api.on('before_tool_call', (event, ctx) => {
     if (host && !host.active()) return;
     assert(['jessica_task', toolName].includes(event.toolName));
@@ -211,7 +214,7 @@ export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
         assert(collectedScope);
         collectedScope.record(ctx, callId, toolName, value, (args, result) => {
           original.authority.assertCurrent(); host?.assertCurrent(); authorize(policy, original.identity, 'read');
-          assert.deepEqual(boundedCopy(args), { operation: 'status' });
+          assert.deepEqual(boundedCopy(args), boundedCopy({ operation: 'status' }));
           assert.deepEqual(boundedCopy(validateResult(result, null, new Date())), boundedCopy(value));
         });
         assertCurrent(); returned.push({ ...binding, value });
@@ -261,7 +264,8 @@ export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
         assert.equal(call.id, child.callId); assert.equal(call.name, toolName);
         assert.equal(value.toolCallId, child.callId); assert.equal(value.toolName, toolName); assert(!value.isError);
         assert(Array.isArray(value.content)); assert.equal(value.content.length, 1); const content: unknown = value.content[0]; assert(record(content));
-        assert.equal(content.type, 'text'); assert.equal(content.text, JSON.stringify(child.value));
+        assert.equal(content.type, 'text'); assert.equal(content.text, JSON.stringify(mutation ? child.value
+          : { schemaVersion: 2, facts: projectJessicaReadFacts(child.value) }));
         assert.equal(hooks.filter(item => item.tool === toolName).length, callCount);
         assert.equal(after.length, callCount); const completed = after.at(-1); assert(completed && !completed.error);
         assert.equal(completed.runId, child.runId); assert.equal(completed.callId, child.callId);
@@ -277,6 +281,8 @@ export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
       assert.equal(retainedChildGuards.length, callCount); assert.throws(retainedChildGuards[0]!);
       const facts = completionFacts(child.value);
       const executionEvidence = nativeEvidence.evidence(receipt.runId);
+      if (process.env.BENSON_NATIVE_G2_DEMO_ONLY === '1') demoExecution = boundedCopy(
+        readToolExecutionEvidence(executionEvidence, nativeEvidence.inspectIdentity(receipt.runId)));
       const collected = collectedScope.complete(nativeEvidence.inspectIdentity(receipt.runId), executionEvidence);
       assert.equal(collected.observations.length, callCount);
       const selected = collected.observations.at(-1); assert(selected);
@@ -316,7 +322,8 @@ export function registerCompletionV6Proof(api: OpenClawPluginApi, host?: {
       validateCompletion(retainedRecord, retainedAuthority); consumed = true;
       assert.throws(() => validateCompletion(retainedRecord, retainedAuthority), /already consumed/);
       assert(source);
-      host?.onCompletion({ binding: retainedRecord.binding, backendReads, negativeEvidenceCases, guard: source.authority.assertCurrent });
+      host?.onCompletion({ binding: retainedRecord.binding, backendReads, negativeEvidenceCases, guard: source.authority.assertCurrent,
+        ...process.env.BENSON_NATIVE_G2_DEMO_ONLY === '1' ? { demonstration: { completion: retainedRecord, execution: demoExecution } } : {} });
       return { content: [{ type: 'text' as const, text: JSON.stringify(accepted) }], details: accepted };
   }
   const create = createJessicaTaskToolFactory({ ...host?.resultVersion ? { resultVersion: host.resultVersion } : {}, roster: { accountId: host?.accountId ?? 'fixture-account', approvedIds: ['reader'],
@@ -724,7 +731,18 @@ process.stdout.write(JSON.stringify(value));
       if ((mutationChild || completionChild || completionV6Only && !completionParent) && done && !completionCancellation) {
         const message = turnMessages.findLast((item: unknown) => record(item) && item.role === 'tool'); assert(record(message));
         assert(typeof message.content === 'string');
-        const value = mutationChild ? decode(ResultSchema, JSON.parse(message.content), 'fixture_jessica_result_shape') : validateResult(JSON.parse(message.content));
+        const carrier: unknown = JSON.parse(message.content);
+        let value;
+        if (mutationChild) value = decode(ResultSchema, carrier, 'fixture_jessica_result_shape');
+        else {
+          assert(record(carrier)); assert.equal(carrier.schemaVersion, 2);
+          assert.deepEqual(Object.keys(carrier).sort(), ['facts', 'schemaVersion']); assert(record(carrier.facts));
+          const facts = carrier.facts;
+          value = validateResult({ schemaVersion: facts.domainSchemaVersion, domain: facts.domain, operation: facts.operation,
+            status: facts.status, verified: facts.verified, data: facts.data, warnings: facts.warnings,
+            error: facts.error, pendingContext: facts.pendingContext });
+          assert.deepEqual(carrier.facts, projectJessicaReadFacts(value));
+        }
         completionText = JSON.stringify({ schemaVersion: 6, kind: 'domain-task', facts: completionFacts(value),
           userResponse: mutationChild ? { state: 'unavailable', reason: { code: 'DOMAIN_RENDERING_REQUIRED', detail: 'Use verified domain facts' } } : { state: 'usable', text: renderJessicaStatusText(value, new Date()), language: 'he' } });
       }
@@ -916,7 +934,8 @@ process.stdout.write(JSON.stringify(value));
     } else if (target === 'whatsapp-response-delivery') {
       assert.equal(result.whatsappPlugin, '2026.10.10');
       assert(Array.isArray(result.cases));
-      assert(result.cases.length >= (reminderProduct ? 2 : whatsappMonitorOnly ? 8 : 10));
+      if (process.env.BENSON_NATIVE_G2_DEMO_ONLY === '1') assert.equal(result.cases.length, 1);
+      else assert(result.cases.length >= (reminderProduct ? 2 : whatsappMonitorOnly ? 8 : 10));
     } else if (!correlation) {
       assert(Array.isArray(result.readAdmissionCases));
       assert.equal(result.readAdmissionCases.length, codeModeOnly ? 5 : 7); assert.equal(mainReadCarriers.length, codeModeOnly ? 10 : 11);

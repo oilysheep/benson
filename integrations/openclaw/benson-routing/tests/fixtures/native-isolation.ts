@@ -1,7 +1,7 @@
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert/strict';
 import { createHash } from 'node:crypto';
-import { mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { plain } from '../../core/value.js';
@@ -28,7 +28,12 @@ export function validateStartupTargetMetadata(value: unknown) {
 }
 
 /** Fail closed: both proof fixtures run only inside disposable Linux namespaces. */
-export function runIsolatedFixture(target: 'native-correlation' | 'main-interception' | 'whatsapp-response-delivery' | 'tool-execution-receipts', codeModeOnly = false, completionV6Only: boolean | 'cancel' | 'multi' = false, mainHookSurfaceOnly = false, supportedNativeOnly = false, whatsappMonitorOnly: boolean | 'installed' | 'reminder-product' | 'startup-registry' = false): unknown {
+export function runIsolatedFixture(target: 'native-correlation' | 'main-interception' | 'whatsapp-response-delivery' | 'tool-execution-receipts', codeModeOnly = false, completionV6Only: boolean | 'cancel' | 'multi' = false, mainHookSurfaceOnly = false, supportedNativeOnly = false, whatsappMonitorOnly: boolean | 'installed' | 'reminder-product' | 'startup-registry' | 'connection-diagnostic' | 'credential-save-diagnostic' | 'g2-demo' = false): unknown {
+  if (whatsappMonitorOnly === 'connection-diagnostic' || whatsappMonitorOnly === 'credential-save-diagnostic') {
+    assert.equal(target, 'whatsapp-response-delivery');
+    assert(!codeModeOnly && !completionV6Only && !mainHookSurfaceOnly && !supportedNativeOnly);
+    return runConnectionDiagnosticFixture(whatsappMonitorOnly === 'credential-save-diagnostic');
+  }
   const startupRegistry = whatsappMonitorOnly === 'startup-registry';
   const targetMetadata = process.env.BENSON_NATIVE_STARTUP_TARGET_METADATA;
   if (targetMetadata) {
@@ -36,7 +41,8 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
     validateStartupTargetMetadata(JSON.parse(readFileSync(targetMetadata, 'utf8')));
   }
   const reminderProduct = whatsappMonitorOnly === 'reminder-product' || startupRegistry;
-  const installed = whatsappMonitorOnly === 'installed' || reminderProduct;
+  const g2Demo = whatsappMonitorOnly === 'g2-demo';
+  const installed = whatsappMonitorOnly === 'installed' || reminderProduct || g2Demo;
   if (whatsappMonitorOnly && target !== 'whatsapp-response-delivery') throw new TypeError('Monitor proof requires its WhatsApp fixture');
   if (codeModeOnly && target !== 'main-interception') throw new TypeError('Code Mode requires the Main fixture');
   if (completionV6Only && (target !== 'native-correlation' || codeModeOnly)) throw new TypeError('Completion v6 requires its isolated correlation fixture');
@@ -120,6 +126,7 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
     ...supportedNativeOnly ? ['--setenv', 'BENSON_NATIVE_SUPPORTED_RESPONSE_ONLY', '1'] : [],
     ...whatsappMonitorOnly ? ['--setenv', 'BENSON_NATIVE_WHATSAPP_MONITOR_ONLY', '1'] : [],
     ...installed ? ['--setenv', 'BENSON_NATIVE_WHATSAPP_INSTALLER_ONLY', '1'] : [],
+    ...g2Demo ? ['--setenv', 'BENSON_NATIVE_G2_DEMO_ONLY', '1'] : [],
     ...reminderProduct ? ['--setenv', 'BENSON_NATIVE_REMINDER_PRODUCT_ONLY', '1'] : [],
     ...startupRegistry ? ['--setenv', 'BENSON_NATIVE_STARTUP_REGISTRY_ONLY', '1', '--setenv', 'OPENCLAW_SKIP_CHANNELS', '1', '--setenv', 'OPENCLAW_SKIP_CRON', '1'] : [],
     ...receiptPatch ? ['/usr/bin/bash', '--noprofile', '--norc', '-c',
@@ -131,4 +138,109 @@ export function runIsolatedFixture(target: 'native-correlation' | 'main-intercep
     timeout: startupRegistry ? 450_000 : installed ? 290_000 : 170_000, maxBuffer: 1024 * 1024 });
   return JSON.parse(output.trim());
   } finally { if (whatsappDirectory) rmSync(whatsappDirectory, { recursive: true }); }
+}
+
+/** One existing positive fixture flow, not production authentication or acceptance. */
+if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === '--g2-demo') {
+  assert.equal(process.argv.length, 3);
+  const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'g2-demo');
+  assert(plain(result)); assert.equal(result.probe, 'PASS');
+  assert(plain(result.demonstration)); assert.equal(result.demonstration.productionAcceptance, false);
+  assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 1);
+  const item: unknown = result.cases[0]; assert(plain(item));
+  assert.equal(item.name, 'main-domain-agentic'); assert.equal(item.stopped, true); assert.equal(item.leasesReleased, true);
+  assert(plain(item.business)); assert.equal(item.business.reads, 1);
+  assert(plain(item.business.completion) && plain(item.business.completion.demonstration));
+  const { completion, execution } = item.business.completion.demonstration;
+  assert(plain(completion) && plain(completion.completion) && plain(completion.binding));
+  assert.equal(completion.schemaVersion, 6); assert.equal(completion.completion.outcome, 'NORMAL');
+  assert(plain(completion.binding.caller)); assert.equal(completion.binding.caller.runId, item.runId);
+  assert.notEqual(completion.binding.runId, item.runId);
+  assert(plain(execution) && plain(execution.identity) && plain(execution.seal));
+  assert.equal(execution.identity.runId, completion.binding.runId);
+  assert.equal(execution.seal.complete, true); assert.equal(execution.seal.count, 1); assert.equal(execution.seal.attempts, 1);
+  assert(Array.isArray(item.sends)); assert.equal(item.sends.length, 1);
+  console.log(JSON.stringify(result));
+}
+
+/** Pinned public-code inputs only; no installation, native Run or Gateway server. */
+function runConnectionDiagnosticFixture(saveStageOnly = false): unknown {
+  const repo = realpathSync(process.cwd());
+  const emittedRoot = realpathSync(fileURLToPath(new URL('../../../../../', import.meta.url)));
+  const owner = join(repo, 'integrations/openclaw/patches/whatsapp-response-controller');
+  const read = (file: string) => readFileSync(file, 'utf8');
+  const hash = (file: string) => createHash('sha256').update(readFileSync(file)).digest('hex');
+  const original = JSON.parse(read(join(owner, 'manifest.json'))) as { integrity: string; target: string; beforeSha256: string; afterSha256: string };
+  const manifest = JSON.parse(read(join(owner, 'connection-diagnostics.manifest.json'))) as {
+    id: string; version: string; hostVersion: string; baileysVersion: string; artifactSha256: string;
+    requires: { sha256: string; manifestSha256: string };
+    files: { target: string; beforeSha256: string; afterSha256: string; mode: string }[];
+    hostFiles: Record<string, string>; baileysFiles: Record<string, string>;
+  };
+  assert.equal(manifest.id, 'connection-diagnostics-2026.10.10');
+  assert.equal(manifest.version, '2026.10.10'); assert.equal(manifest.hostVersion, '2026.10.10');
+  assert.equal(manifest.baileysVersion, '7.0.0-rc14');
+  assert.equal(hash(join(owner, '2026.10.10.patch')), manifest.requires.sha256);
+  assert.equal(hash(join(owner, 'manifest.json')), manifest.requires.manifestSha256);
+  assert.equal(hash(join(owner, '2026.10.10-connection-diagnostics.patch')), manifest.artifactSha256);
+  assert.deepEqual(manifest.files.map(f => f.target).sort(), ['dist/.setup/auth-store-DMOniiuA.mjs', 'dist/.setup/connection-controller-g_8-U3na.mjs',
+    'dist/.setup/monitor-B5qdng3U.mjs', 'dist/.setup/socket-close-BvdLXlbQ.mjs']);
+  // This focused installed-cohort proof deliberately uses its actual SDK build,
+  // whose chunk IDs differ from the repository's same-version development SDK.
+  const sdk = '/home/oa/.npm-global/lib/node_modules/openclaw';
+  const publicPlugin = '/home/oa/.openclaw/npm/projects/openclaw-whatsapp-290d7f7427__openclaw-generation__g-9f74b6f7ed450f85/node_modules/@openclaw/whatsapp';
+  for (const [file, expected] of Object.entries(manifest.hostFiles)) assert.equal(hash(join(sdk, file)), expected);
+  for (const [file, expected] of Object.entries(manifest.baileysFiles)) assert.equal(hash(join(publicPlugin, 'node_modules/baileys', file)), expected);
+  assert.equal((JSON.parse(read(join(sdk, 'package.json'))) as { version: string }).version, manifest.hostVersion);
+  const archive = process.env.BENSON_WHATSAPP_ARCHIVE ?? join(repo, '.checkpoints/ts05-two-read-cutover-20261103/openclaw-2026.10.10-target/aligned-whatsapp-and-recovery/whatsapp-2026.10.10.tgz');
+  assert.equal('sha512-' + createHash('sha512').update(readFileSync(archive)).digest('base64'), original.integrity);
+  const directory = mkdtempSync('/tmp/benson-whatsapp-diagnostic-');
+  try {
+    execFileSync('/usr/bin/tar', ['-xzf', archive, '-C', directory]);
+    const root = join(directory, 'package');
+    const apply = (artifact: string, reverse = false) => execFileSync('/usr/bin/patch', ['--batch', '--fuzz=0',
+      reverse ? '--reverse' : '--forward', '-p1', '-d', root, '--input', join(owner, artifact)], { stdio: 'pipe' });
+    assert.equal(hash(join(root, original.target)), original.beforeSha256);
+    apply('2026.10.10.patch'); assert.equal(hash(join(root, original.target)), original.afterSha256);
+    // Official archive mode differs from the verified installed cohort; model
+    // that exact installed mode only in this disposable package.
+    for (const file of manifest.files) {
+      assert.equal(statSync(join(root, file.target)).mode & 0o777, 0o644);
+      chmodSync(join(root, file.target), 0o664);
+    }
+    const verify = (after: boolean) => {
+      for (const file of manifest.files) {
+        assert.equal(file.mode, '0664');
+        assert.equal(hash(join(root, file.target)), after ? file.afterSha256 : file.beforeSha256);
+        assert.equal((statSync(join(root, file.target)).mode & 0o777).toString(8), '664');
+      }
+    };
+    verify(false);
+    const first = manifest.files[0]!;
+    const before = readFileSync(join(root, first.target));
+    writeFileSync(join(root, first.target), Buffer.concat([before, Buffer.from('foreign-byte')]));
+    assert.throws(() => verify(false)); writeFileSync(join(root, first.target), before); verify(false);
+    apply('2026.10.10-connection-diagnostics.patch'); verify(true);
+    assert.throws(() => execFileSync('/usr/bin/patch', ['--batch', '--fuzz=0', '--forward', '--dry-run', '-p1', '-d', root,
+      '--input', join(owner, '2026.10.10-connection-diagnostics.patch')], { stdio: 'pipe' }));
+    apply('2026.10.10-connection-diagnostics.patch', true); verify(false);
+    apply('2026.10.10-connection-diagnostics.patch'); verify(true);
+    const output = execFileSync('/usr/bin/bwrap', [
+      '--unshare-all', '--die-with-parent', '--new-session', '--ro-bind', '/usr', '/usr',
+      '--symlink', 'usr/lib', '/lib', '--symlink', 'usr/lib64', '/lib64', '--proc', '/proc', '--dev', '/dev', '--tmpfs', '/tmp',
+      '--ro-bind', join(repo, 'node_modules'), '/repo/node_modules',
+      '--overlay-src', sdk, '--tmp-overlay', '/repo/node_modules/openclaw',
+      '--ro-bind', emittedRoot, '/repo/output/typescript', '--symlink', '/repo/node_modules/openclaw', '/sdk',
+      '--ro-bind', root, '/candidate/whatsapp', '--ro-bind', join(publicPlugin, 'node_modules'), '/candidate/whatsapp/node_modules',
+      '--dir', '/node_modules', '--symlink', '/sdk', '/node_modules/openclaw',
+      '--clearenv', '--setenv', 'PATH', '/usr/bin', '--setenv', 'HOME', '/tmp/home',
+      '--setenv', 'OPENCLAW_STATE_DIR', '/tmp/state', '--setenv', 'OPENCLAW_CONFIG_PATH', '/tmp/config.json',
+      '--setenv', 'BENSON_NATIVE_CORRELATION_ISOLATED', '1', '--setenv', 'BENSON_NATIVE_CONNECTION_DIAGNOSTIC_ONLY', '1',
+      ...saveStageOnly ? ['--setenv', 'BENSON_NATIVE_SAVE_STAGE_ONLY', '1'] : [],
+      '--chdir', '/tmp', '/usr/bin/node', '/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/whatsapp-response-delivery.js', '--worker',
+    ], { encoding: 'utf8', timeout: 180_000, maxBuffer: 2 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
+    const result: unknown = JSON.parse(output.trim()); assert(plain(result));
+    return { ...result, artifact: { targets: manifest.files.length, foreignPreimageRejected: true,
+      duplicateApplyRejected: true, zeroFuzz: true, exactRollback: true, modesPreserved: true, responseDependencyPreserved: true } };
+  } finally { rmSync(directory, { recursive: true }); }
 }
