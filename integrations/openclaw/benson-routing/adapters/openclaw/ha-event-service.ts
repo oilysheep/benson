@@ -48,7 +48,9 @@ export function createHaEventService(deps: {
         assertion(state.connection.assertCurrent(), 'ha_source_custody_must_be_synchronous');
       };
       const gap = () => {
+        if (state.abort.signal.aborted) return;
         state.accepting = false;
+        state.abort.abort(); close(state);
         if (active === state) context.serviceHealth?.reportFailure(new Error('ha_event_gap_reconciliation_required'));
       };
       try {
