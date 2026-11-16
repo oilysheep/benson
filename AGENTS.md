@@ -1,4 +1,3 @@
-
 # Benson Engineering Contract
 
 Global Codex policy applies. Inspect routine uncertainty; stop for mandatory-rule conflicts or missing canonical ownership. This governs engineering, not runtime agents.
@@ -19,21 +18,29 @@ Current fact order: focused read-only runtime output → newest valid timestampe
 
 Classify **risk/exposure**, not implementation complexity:
 
-- **SIGNIFICANT:** architecture, ownership, public contract, persistent state/schema, security/authorization, native lifecycle/recovery, runtime instructions/policy, stage acceptance strategy or externally observable behavior changes.
-- **ROUTINE:** bounded repairs/implementation within approved owners and contracts, with no new authority, irreversible effect or architectural boundary.
+- **SIGNIFICANT:** a change to architecture, ownership, public contract, persistent state/schema, security/authorization, native lifecycle/recovery, runtime instructions/policy, stage acceptance strategy or externally observable behavior. SIGNIFICANT determines the required assurance level, not whether fresh approval is necessary for an already approved exact change.
+
+- **ROUTINE:** bounded repairs/implementation within approved owners, contracts, exposure and recovery guarantees, with no new authority, irreversible effect or architectural boundary. Technical difficulty, number of files, failed tests and the need for multiple repair iterations do not by themselves change a ROUTINE repair into a new SIGNIFICANT decision.
+
 - **EDITORIAL:** wording/format only, with no behavior, contract, policy or acceptance change. A policy text edit is not editorial. Unresolved classification is SIGNIFICANT.
 
-**Approval inheritance:** An approved bounded objective covers routine inspection, repairs, tests, review and acceptance. Do not reapprove mechanics, local findings or intermediate PASS. Stop only for new authority.
+**Approval inheritance:** An explicit bounded approval covers the entire authorized objective and risk envelope, including inspection, implementation iterations, diagnosis, focused repairs, tests, evidence updates, required review and acceptance. Even when a covered change is SIGNIFICANT for checkpoint/review purposes, do not request renewed approval for its mechanical implementation or local remediation. An intermediate PASS, reviewer finding or routine milestone is not a stopping condition. If the approved envelope is unclear, clarify only the missing authority rather than reapproving established work.
 
 ### Hard stops — explicit new operator decision required
 
 1. A new SIGNIFICANT objective/boundary outside approved scope: architecture, ownership, contracts, security, permissions, lifecycle or acceptance.
-2. New infrastructure or registration (service/store/queue/scheduler/transport/plugin, MCP/A2A, orchestration framework), or an OpenClaw core modification.
+
+2. New infrastructure or registration (service/store/queue/scheduler/transport/plugin, MCP/A2A, orchestration framework), or an OpenClaw core modification, **unless that exact action was explicitly approved** within the current envelope. Core modifications require their own exact approval, version coupling and rollback; general stage approval is insufficient.
+
 3. Authentication/secret operations; production, physical or user-channel exposures not covered by a current exact approval envelope.
+
 4. Failed required safety guard, unreconciled previous state-changing outcome, uncertain effect/authority, or inability to fail closed or recover safely.
+
 5. Push (Oren approval) and merge (Oren only); any stricter applicable canonical Plan or host/sandbox authorization gate remains binding.
 
-**Scoped operational authorization:** One action-time approval may cover an E2E session with multiple controlled Gateway starts/stops/restarts, reloads and named canaries. Bound owner/channel/device, allowed effects, attempt/time limits, preconditions, stop conditions, recovery and expiry. No approval per covered step; code-stage approval alone never authorizes production. No unlisted config, permissions, recipients, physical actions or higher-risk experiments.
+**Scoped operational authorization:** Request one action-time approval for a bounded E2E session when operational exposure is needed; include expected controlled Gateway starts/stops/restarts, reloads and specifically named canaries in that single envelope. State owner/channel/device, permitted effects, attempt/time limits, preconditions, stop conditions, recovery and expiry. Execute covered mechanical steps without repeated approval; before each state-changing retry reconcile previous effects and current state. Code-stage approval alone never authorizes production. No unlisted config, permissions, recipients, physical actions or higher-risk experiments.
+
+A mandatory safety, authority, data-integrity, effect or recovery failure remains a hard stop for the affected operation, even within an approved envelope.
 
 Before retrying a mutation reconcile prior effects, state and attempt budget; UNKNOWN prohibits blind replay. Stop on changed risk/scope, unsafe state or expiry. Never bypass host controls or downgrade a safety gate without justified approval.
 
@@ -53,9 +60,9 @@ Reuse when coverage/freshness/later changes are protected. Not one per repair/re
 
 **Checkpoint retention:** After accepted merge and verified recovery/snapshot, identify safely superseded checkpoints and remove only those with no remaining recovery, rollback or required evidence dependency. Preserve the last known-good restorable copy, essential E2E evidence and unresolved failure records. Obtain required destructive-operation approval. Do not delete by age alone or accumulate unnecessary nested checkpoint trees.
 
-**Risk-based validation:** Reproduce failure, add focused regression, run affected tests and mandatory safety negatives, then approved representative E2E. Reuse valid results; rerun suites only for invalidation/new risk. Label source-only evidence honestly; unsupported verifier predicates are not product requirements.
+**Risk-based validation:** Prove changed behavior and affected safety invariants with the smallest sufficient test set. For a defect, reproduce the failure, fix it, then rerun the failing case and only materially affected tests and mandatory safety negatives. Reuse accepted evidence while relevant code, contracts, dependencies and execution conditions remain unchanged; identify the concrete invalidation before rerunning a passed suite or E2E. Do not add tests for coverage counts, unrelated hypothetical edge cases or speculative OpenClaw internals; defer nonblocking cases to `PHASE2_BACKLOG.md`. Run representative approved E2E when required by the affected acceptance boundary, not after every local repair. Label source-only evidence honestly; unsupported verifier predicates are not product requirements.
 
-Finish the approved bounded objective rather than stopping at a subtask or PASS. If a real gate blocks one capability, continue only independent approved safe work. Update the existing canonical Plan at material decisions/closure, not every probe.
+Finish the approved bounded objective rather than stopping at a subtask or PASS. Progress and interim PASS/BLOCKED reports are informational, not requests for permission to continue. When a genuine gate blocks one capability, continue only independent approved safe work. Update the existing canonical Plan at material decisions/closure, not every probe. For every required operator decision, identify the exact uncovered action/risk, why existing approval does not cover it, and the smallest sufficient approval envelope for the next measurable milestone and its expected routine iterations; do not ask merely whether to continue.
 
 ## E2E diagnosis and verifier discipline
 
@@ -73,7 +80,7 @@ Classify product, verifier, test fixture, infrastructure, native-contract and mo
 
 Before extending a verifier, state the exact otherwise-uncovered Benson invariant, its existing owner and the cheapest authoritative proof. If absent, do not add it.
 
-Repeated BLOCKED findings in verification infrastructure—or recurrence after a focused repair—require immediate review of the *verifier contract*, not serial narrow patches. Repair locally within scope; escalate architectural/authority redesign decisions.
+Repeated BLOCKED findings in verification infrastructure—or recurrence after a focused repair—require immediate review of the **verifier contract**, not serial narrow patches. Repair locally within scope; escalate architectural/authority redesign decisions.
 
 Never create a permanent diagnostic tool without recurring demonstrated need. Test production-relevant topology (e.g. separate agent workspaces) when it matters.
 
