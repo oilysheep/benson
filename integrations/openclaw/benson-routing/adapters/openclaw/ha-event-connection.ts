@@ -1,7 +1,8 @@
 import type { SourceInput } from '../../core/contracts.js';
 import type { GrantedSourceDependencies } from '../../core/request-control.js';
 import { boundedCopy, fail, identifier, plain, synchronous } from '../../core/value.js';
-import { MAX_HA_EVENT_BYTES, type HaEventConnection } from './ha-event-service.js';
+import { MAX_HA_EVENT_BYTES, reportHaEventDiagnostic, type HaEventConnection,
+  type HaEventDiagnosticCode, type HaEventDiagnostics } from './ha-event-service.js';
 
 /** Fresh socket; install listeners synchronously before delivering protocol
  * traffic. The host owns endpoint/TLS selection; this module never opens one. */
@@ -19,6 +20,7 @@ export function createHaEventConnector(deps: {
   createSocket(signal: AbortSignal): HaEventSocket;
   readCredential(signal: AbortSignal): Promise<string>;
   readAuthority: GrantedSourceDependencies['readAuthority'];
+  diagnose?: HaEventDiagnostics;
 }) {
   const { sourceRef, domain, subscriptionId, handshakeTimeoutMs, createSocket, readCredential, readAuthority } = deps;
   if (!identifier(sourceRef) || !Number.isSafeInteger(subscriptionId) || subscriptionId < 1 ||
@@ -34,7 +36,10 @@ export function createHaEventConnector(deps: {
         // The existing Request Controller validates the returned GrantSchema,
         // input ID, scope, identity/revision, expiry and live revocation state.
         return synchronous(readAuthority(input), 'source_authority_must_be_synchronous');
-      } catch { active?.close(); throw new Error('ha_connection_grant_unavailable'); }
+      } catch {
+        reportHaEventDiagnostic(deps.diagnose, 'connector_grant_rejected');
+        active?.close(); throw new Error('ha_connection_grant_unavailable');
+      }
     },
     connect(signal: AbortSignal): Promise<HaEventConnection> {
       if (active) fail('ha_connection_already_open');
@@ -53,9 +58,10 @@ export function createHaEventConnector(deps: {
         close() { retire(false); },
       };
       active = custody;
-      function retire(notify: boolean) {
+      function retire(notify: boolean, reason: HaEventDiagnosticCode = 'connector_closed') {
         if (phase === 'retired') return;
         phase = 'retired';
+        reportHaEventDiagnostic(deps.diagnose, reason);
         if (active === custody) active = undefined;
         clearTimeout(timer); signal.removeEventListener('abort', onAbort); abort.abort();
         try { detach?.(); } catch { /* Retired custody remains authoritative. */ }
@@ -64,18 +70,18 @@ export function createHaEventConnector(deps: {
         rejectSubscription?.(new Error('ha_subscription_unavailable'));
         if (notify) { try { gap?.(); } catch { /* Already retired and closed. */ } }
       }
-      const onAbort = () => retire(true);
-      const timer = setTimeout(() => retire(true), handshakeTimeoutMs);
+      const onAbort = () => retire(true, 'connector_signal_abort');
+      const timer = setTimeout(() => retire(true, 'connector_handshake_timeout'), handshakeTimeoutMs);
       const connection = Object.freeze<HaEventConnection>({
         sourceRef: sourceRef, subscriptionId: subscriptionId,
         assertCurrent: custody.current,
         subscribe(eventType, onEvent, onGap) {
           custody.current();
-          if (eventType !== 'state_changed' || phase !== 'authenticated') { retire(true); return Promise.reject(new Error('ha_subscription_unavailable')); }
+          if (eventType !== 'state_changed' || phase !== 'authenticated') { retire(true, 'connector_subscribe_rejected'); return Promise.reject(new Error('ha_subscription_unavailable')); }
           receive = onEvent; gap = onGap; phase = 'subscribing';
           const pending = new Promise<() => void>((resolve, reject) => { resolveSubscription = resolve; rejectSubscription = reject; });
           try { socket!.send(JSON.stringify({ id: subscriptionId, type: 'subscribe_events', event_type: eventType })); }
-          catch { retire(true); }
+          catch { retire(true, 'connector_send_failed'); }
           return pending;
         },
         close: custody.close,
@@ -84,11 +90,17 @@ export function createHaEventConnector(deps: {
       try {
         custody.current();
         socket = synchronous(createSocket(abort.signal), 'ha_socket_must_be_synchronous');
-        const remove = socket.listen({ close: () => retire(true), error: () => retire(true), message(data) {
+        const remove = socket.listen({ close: () => retire(true, 'connector_socket_close'), error: () => retire(true, 'connector_socket_error'), message(data) {
+          let failure: HaEventDiagnosticCode = 'connector_current_failed';
           try {
             custody.current();
+            failure = 'connector_frame_bytes';
             if (typeof data !== 'string' || Buffer.byteLength(data, 'utf8') > MAX_HA_EVENT_BYTES) fail('ha_protocol_frame_invalid');
-            const frame = boundedCopy(JSON.parse(data));
+            failure = 'connector_frame_json';
+            const parsed: unknown = JSON.parse(data);
+            failure = 'connector_frame_bounds';
+            const frame = boundedCopy(parsed);
+            failure = 'connector_sequence';
             if (!plain(frame)) fail('ha_protocol_frame_invalid');
             if (phase === 'greeting' && frame.type === 'auth_required') {
               phase = 'credential';
@@ -96,18 +108,19 @@ export function createHaEventConnector(deps: {
                 custody.current();
                 if (phase !== 'credential' || typeof credential !== 'string' || !credential.trim()) fail('ha_auth_unavailable');
                 phase = 'auth'; socket!.send(JSON.stringify({ type: 'auth', access_token: credential.trim() }));
-              }).catch(() => retire(true));
+              }).catch(() => retire(true, 'connector_credential_failed'));
             } else if (phase === 'auth' && frame.type === 'auth_ok') {
-              phase = 'authenticated'; resolveReady(connection);
+              phase = 'authenticated'; reportHaEventDiagnostic(deps.diagnose, 'connector_authenticated'); resolveReady(connection);
             } else if (phase === 'subscribing' && frame.type === 'result' && frame.id === subscriptionId && frame.success === true && frame.result === null) {
-              phase = 'subscribed'; clearTimeout(timer); resolveSubscription!(custody.close);
+              phase = 'subscribed'; clearTimeout(timer); reportHaEventDiagnostic(deps.diagnose, 'connector_subscribed'); resolveSubscription!(custody.close);
             } else if (phase === 'subscribed' && frame.type === 'event' && frame.id === subscriptionId) {
+              failure = 'connector_receive_failed';
               receive!(data);
             } else fail('ha_protocol_sequence_invalid');
-          } catch { retire(true); }
+          } catch { retire(true, failure); }
         } });
         if (abort.signal.aborted) remove(); else detach = remove;
-      } catch { retire(true); }
+      } catch { retire(true, 'connector_open_failed'); }
       return ready;
     },
   });
