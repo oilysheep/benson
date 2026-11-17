@@ -69,7 +69,7 @@ function fixture(options: { credential?: (signal: AbortSignal) => Promise<string
     } });
   const entry = createJessicaWarningEventEntry({ registry, now: () => epoch, readAuthority: connector.readAuthority });
   const service = createHaEventService({ sourceRef, connect: connector.connect,
-    entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds, execute: entry.execute }],
+    entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds, prepareRequest: entry.prepareRequest, execute: entry.execute }],
     observe(result) { state.results.push(validateDomainResultEnvelope(result) as DomainResult); } });
   const context: Parameters<OpenClawPluginService['start']>[0] = { config: {}, stateDir: '/unused-synthetic-state',
     logger: { info() {}, warn() {}, error() {}, debug() {} },

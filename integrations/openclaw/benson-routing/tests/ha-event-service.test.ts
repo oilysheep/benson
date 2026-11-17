@@ -5,7 +5,7 @@ import type { OpenClawPluginService } from 'openclaw/plugin-sdk/plugin-entry';
 import { createHaEventService, type HaEventConnection, MAX_HA_EVENT_BYTES } from '../adapters/openclaw/ha-event-service.js';
 import { createJessicaWarningEventEntry } from '../../../../agents/jessica-vacuum/lib/task.js';
 import { loadRegistry } from '../../../../agents/jessica-vacuum/lib/registry.js';
-import { WARNING_EVENT_MAX_AGE_MS, VACUUM_ENTITY } from '../../../../agents/jessica-vacuum/lib/ha-read.js';
+import { prepareJessicaWarningEvent, WARNING_EVENT_MAX_AGE_MS, VACUUM_ENTITY } from '../../../../agents/jessica-vacuum/lib/ha-read.js';
 import { validateDomainResultEnvelope, createNoRunDomainResult } from '../core/domain-result.js';
 import { createSourceAdmissionController } from '../core/request-control.js';
 import { controlReadResponse } from '../core/response-control.js';
@@ -24,7 +24,7 @@ function frame(active: unknown = true, entity = VACUUM_ENTITY, updated = epoch -
       old_state: { entity_id: entity, state: 'cleaning', attributes: { has_error: false } },
       new_state: { entity_id: entity, state: 'cleaning', attributes: { has_error: active }, last_updated: new Date(updated).toISOString() } } } };
 }
-function fixture() {
+function fixture(prepareRequest = prepareJessicaWarningEvent) {
   const state = { now: epoch, trusted: true, granted: true, sourceRef, subscriptionId: 18, connects: 0, closes: 0,
     unsubscribes: 0, grants: 0, failures: 0, domainFailures: [] as string[], results: [] as DomainResult[],
     receive: (_: string) => {}, gap: () => {}, signal: undefined as AbortSignal | undefined };
@@ -44,7 +44,7 @@ function fixture() {
       return () => { state.unsubscribes++; };
     }, close() { state.closes++; },
   };
-  const service = createHaEventService({ sourceRef, entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds,
+  const service = createHaEventService({ sourceRef, entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds, prepareRequest,
     execute(input, current) {
       try { return entry.execute(input, current); }
       catch (error) { state.domainFailures.push(error instanceof Error ? error.message : 'unknown'); throw error; }
@@ -82,6 +82,35 @@ test('unmapped alias and foreign entity are not routed or granted', async () => 
   const f = fixture(); await f.service.start(f.context);
   f.send(frame(true, 'vacuum.jesica')); f.send(frame(true, 'vacuum.foreign'));
   assert.equal(f.state.grants, 0); assert.equal(f.state.results.length, 0);
+  await f.service.stop?.(f.context);
+});
+
+for (const fault of ['unknown-version', 'legacy-raw-frame', 'extra-field', 'oversized-request', 'async-projection', 'revoked-during-projection'] as const) {
+  test(`HA projection fails closed without fallback after ${fault}`, async () => {
+    const f = fixture(raw => {
+      if (fault === 'legacy-raw-frame') return JSON.stringify(raw);
+      if (fault === 'oversized-request') return 'x'.repeat(8193);
+      if (fault === 'async-projection') return Promise.resolve(prepareJessicaWarningEvent(raw)) as unknown as string;
+      if (fault === 'revoked-during-projection') f.state.trusted = false;
+      const projected = JSON.parse(prepareJessicaWarningEvent(raw)) as Record<string, unknown>;
+      if (fault === 'unknown-version') projected.schemaVersion = 2;
+      if (fault === 'extra-field') projected.unrelated = 'must-not-be-admitted';
+      return JSON.stringify(projected);
+    });
+    await f.service.start(f.context); f.send();
+    assert.equal(f.state.results.length, 0); assert.equal(f.state.failures, 1); assert.equal(f.state.closes, 1);
+    if (['oversized-request', 'async-projection', 'revoked-during-projection'].includes(fault)) assert.equal(f.state.grants, 0);
+    f.state.trusted = true; f.send(); assert.equal(f.state.results.length, 0);
+    await f.service.stop?.(f.context);
+  });
+}
+
+test('larger raw budget preserves structural bounds before domain projection', async () => {
+  const f = fixture(); await f.service.start(f.context);
+  const value = frame();
+  Object.assign(value.event.data.new_state.attributes, { unrelated_telemetry: 'x'.repeat(16385) });
+  assert(Buffer.byteLength(JSON.stringify(value)) < MAX_HA_EVENT_BYTES);
+  f.send(value); assert.equal(f.state.failures, 1); assert.equal(f.state.grants, 0); assert.equal(f.state.results.length, 0);
   await f.service.stop?.(f.context);
 });
 

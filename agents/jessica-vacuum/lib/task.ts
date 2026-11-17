@@ -4,7 +4,7 @@ import { object, decode, fail, freeze, boundedCopy } from '../../../integrations
 import { isDeepStrictEqual } from 'node:util';
 import type { GrantedSourceDependencies } from '../../../integrations/openclaw/benson-routing/core/request-control.js';
 import type { SourceInput, NoRunOutcome } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
-import { projectJessicaWarningEvent } from './ha-read.js';
+import { prepareJessicaWarningEvent, projectJessicaWarningEvent } from './ha-read.js';
 import type { Registry } from './registry.js';
 import { createSourceAdmissionController, NATIVE_READ_ADMISSION_VERSION, type SourceAdmissionController } from '../../../integrations/openclaw/benson-routing/core/request-control.js';
 import { TaskEnvelopeSchema, type TaskEnvelope, type ConsumedPending, type AnyDomainResult, type NativeDispatchReadAdmission } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
@@ -24,6 +24,7 @@ export function createJessicaWarningEventEntry(deps: {
   registry: Registry; now(): number; readAuthority: GrantedSourceDependencies['readAuthority'];
 }) {
   return Object.freeze({ entityIds: Object.freeze([deps.registry.mapBinding.deviceEntity]),
+    prepareRequest: prepareJessicaWarningEvent,
     execute(input: SourceInput, assertCurrent: () => void) {
       let expected: NoRunOutcome | undefined;
       const project = () => projectJessicaWarningEvent(JSON.parse(input.request), deps.registry, deps.now());

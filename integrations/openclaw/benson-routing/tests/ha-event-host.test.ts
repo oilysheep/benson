@@ -1,17 +1,19 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { setImmediate } from 'node:timers/promises';
 import type { WebSocket as NativeSocket, ClientOptions } from 'openclaw/plugin-sdk/websocket-runtime';
 import type { OpenClawPluginService } from 'openclaw/plugin-sdk/plugin-entry';
 import { createHaEventHostBinding } from '../adapters/openclaw/ha-event-host.js';
 import { createHaEventService, MAX_HA_EVENT_BYTES } from '../adapters/openclaw/ha-event-service.js';
+import type { HaEventDiagnosticCode } from '../adapters/openclaw/ha-event-service.js';
 import { createJessicaWarningEventEntry } from '../../../../agents/jessica-vacuum/lib/task.js';
 import { loadRegistry } from '../../../../agents/jessica-vacuum/lib/registry.js';
 import { VACUUM_ENTITY } from '../../../../agents/jessica-vacuum/lib/ha-read.js';
 import { validateDomainResultEnvelope } from '../core/domain-result.js';
-import type { DomainResult, SourceInput } from '../core/contracts.js';
+import type { DomainResult, SourceInput, SourceAdmission } from '../core/contracts.js';
 
 // Fake SDK constructor and synthetic credentials only. The default SDK loader,
 // protected credential reader, real network, effects and model ports never run.
@@ -24,10 +26,12 @@ function deferred<T>() {
   return { promise, resolve };
 }
 function fixture(options: { endpoint?: string; grant?: Partial<Host['grant']>; loadSocket?: Host['loadSocket'];
-  credential?: Host['readCredential'] } = {}) {
+  credential?: Host['readCredential']; diagnose?: Host['diagnose'] } = {}) {
   const opened = deferred<FakeSocket>(), auth = deferred<void>(), subscription = deferred<void>(), loading = deferred<void>();
   const revoked = new AbortController();
-  const state = { time: epoch, loads: 0, credentials: 0, failures: 0, sockets: [] as FakeSocket[], results: [] as DomainResult[], sendFault: false };
+  const state = { time: epoch, loads: 0, credentials: 0, failures: 0, sockets: [] as FakeSocket[], results: [] as DomainResult[],
+    diagnostics: [] as HaEventDiagnosticCode[], inputs: [] as (SourceInput | SourceAdmission)[], sendFault: false };
+  const diagnose: NonNullable<Host['diagnose']> = code => { state.diagnostics.push(code); return options.diagnose?.(code); };
   class FakeSocket extends EventEmitter {
     binaryType = '';
     closes = 0;
@@ -50,12 +54,13 @@ function fixture(options: { endpoint?: string; grant?: Partial<Host['grant']>; l
     subject: 'explicit-monitor', authorityRef: 'operator-approved-source', authorityRevision: '1', scopes: ['read'],
     expiresAt: epoch + 60_000, status: 'active', cancelled: false, replayState: 'fresh', commitment: 'uncommitted', ...options.grant };
   const host = createHaEventHostBinding({ endpoint: options.endpoint ?? endpoint, grant, revoked: revoked.signal,
-    now: () => state.time, subscriptionId: 18, handshakeTimeoutMs: 10_000,
+    now: () => state.time, subscriptionId: 18, handshakeTimeoutMs: 10_000, diagnose,
     async loadSocket() { state.loads++; loading.resolve(); return options.loadSocket ? options.loadSocket() : Constructor; },
     async readCredential(signal) { state.credentials++; return options.credential ? options.credential(signal) : 'synthetic-only'; } });
-  const entry = createJessicaWarningEventEntry({ registry, now: () => state.time, readAuthority: host.readAuthority });
-  const service = createHaEventService({ sourceRef: 'synthetic-ha', connect: host.connect,
-    entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds, execute: entry.execute }],
+  const entry = createJessicaWarningEventEntry({ registry, now: () => state.time,
+    readAuthority(input) { state.inputs.push(input); return host.readAuthority(input); } });
+  const service = createHaEventService({ sourceRef: 'synthetic-ha', connect: host.connect, diagnose,
+    entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds, prepareRequest: entry.prepareRequest, execute: entry.execute }],
     observe(result) { state.results.push(validateDomainResultEnvelope(result) as DomainResult); } });
   const context: Parameters<OpenClawPluginService['start']>[0] = { config: {}, stateDir: '/unused-synthetic-state',
     logger: { info() {}, warn() {}, error() {}, debug() {} },
@@ -99,6 +104,112 @@ test('host-bound synthetic SDK auth/subscription reaches warning and no-change D
   await assert.rejects(f.host.connect(new AbortController().signal), /already_used/);
   assert.equal(f.state.loads, 1);
 });
+
+for (const active of [true, false]) {
+  test(`attribute-rich HA frame reaches bounded admission with original identity: has_error=${active}`, async () => {
+    const f = fixture(), socket = await f.start();
+    const state = { ...f.warning(active).event.data.new_state,
+      attributes: { has_error: active, unrelated_telemetry: 'synthetic-private-attribute'.repeat(480) } };
+    const frame = { ...f.warning(active), event: { ...f.warning(active).event,
+      data: { entity_id: VACUUM_ENTITY, old_state: state, new_state: state } } };
+    const raw = JSON.stringify(frame);
+    assert(Buffer.byteLength(raw) > 16_422);
+    socket.frame(frame);
+    assert.equal(f.state.results.length, 1);
+    const result = f.state.results[0]!;
+    const inputId = `ha-${createHash('sha256').update(raw).digest('hex')}`;
+    assert.equal(result.outcome.disposition, active ? 'handled' : 'no-change');
+    assert.equal(result.executionMode, 'deterministic');
+    assert.equal(result.effects.status, 'none'); assert.deepEqual(result.effects.refs, []);
+    assert.equal(result.evidence.observations[0]?.ref, inputId);
+    assert(f.state.inputs.length > 0);
+    for (const input of f.state.inputs) {
+      assert.equal(input.source.inputId, inputId);
+      assert(Buffer.byteLength(input.request) <= 8192);
+      assert(!input.request.includes('unrelated_telemetry')); assert(!input.request.includes('synthetic-private-attribute'));
+    }
+    assert(!JSON.stringify(result).includes('synthetic-private-attribute'));
+    assert.equal(f.state.failures, 0); await f.service.stop?.(f.context); assert.equal(socket.closes, 1);
+  });
+}
+
+test('retirement diagnostics: subscribed idle source survives 29 and 120 seconds until its 125-second grant', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const f = fixture({ grant: { expiresAt: epoch + 125_000 } }), socket = await f.start();
+  assert.deepEqual(f.state.diagnostics, ['connector_authenticated', 'connector_subscribed']);
+  for (const delta of [29_000, 91_000]) {
+    f.state.time += delta; t.mock.timers.tick(delta);
+    assert.equal(socket.closes, 0); assert.equal(f.state.failures, 0);
+  }
+  f.state.time += 5_000; t.mock.timers.tick(5_000);
+  await setImmediate();
+  assert.equal(f.state.diagnostics[2], 'host_grant_expired');
+  assert.equal(socket.closes, 1); assert.equal(f.state.failures, 1);
+  assert.equal(f.state.results.length, 0);
+  await f.service.stop?.(f.context);
+});
+
+for (const [fault, expected] of [
+  ['payload-limit', 'host_payload_limit'], ['socket-error', 'host_socket_error'],
+  ['socket-close', 'host_socket_close'], ['protocol-json', 'connector_frame_json'],
+  ['protocol-bounds', 'connector_frame_bounds'], ['protocol-sequence', 'connector_sequence'],
+  ['event-shape', 'service_frame_shape'], ['domain', 'service_domain_failed'],
+] as const) {
+  test(`retirement diagnostics: first cause ${fault} stays sanitized and closes once`, async () => {
+    const f = fixture(), socket = await f.start();
+    const offset = f.state.diagnostics.length, secret = 'synthetic-private-payload-and-error';
+    if (fault === 'payload-limit' || fault === 'socket-error') {
+      socket.emit('error', Object.assign(new Error(secret), { code: fault === 'payload-limit' ? 'WS_ERR_UNSUPPORTED_MESSAGE_LENGTH' : secret }));
+    }
+    if (fault === 'socket-close') socket.emit('close', 1006, Buffer.from(secret));
+    if (fault === 'protocol-json') socket.emit('message', Buffer.from('{'+secret), false);
+    if (fault === 'protocol-bounds') socket.frame({ type: 'event', id: 18, private: Array(257).fill(secret.slice(0, 1)) });
+    if (fault === 'protocol-sequence') socket.frame({ type: secret });
+    if (fault === 'event-shape') socket.frame({ type: 'event', id: 18, event: { event_type: secret } });
+    if (fault === 'domain') {
+      const frame = f.warning();
+      socket.frame({ ...frame, event: { ...frame.event, data: { ...frame.event.data,
+        new_state: { ...frame.event.data.new_state, attributes: { has_error: secret } } } } });
+    }
+    await setImmediate();
+    assert.equal(f.state.diagnostics[offset], expected);
+    assert.equal(f.state.failures, 1); assert.equal(socket.closes, 1); assert.equal(f.state.results.length, 0);
+    socket.frame(f.warning()); await f.service.stop?.(f.context); await setImmediate();
+    assert.equal(socket.closes, 1); assert.equal(f.state.results.length, 0);
+    assert.ok(!JSON.stringify(f.state.diagnostics).includes(secret));
+    assert.ok(f.state.diagnostics.every(code => typeof code === 'string'));
+  });
+}
+
+for (const mode of ['throw', 'reject'] as const) {
+  test(`retirement diagnostics: observer ${mode} cannot change retirement or leak details`, async () => {
+    const f = fixture({ diagnose() {
+      if (mode === 'throw') throw new Error('synthetic-private-diagnostic');
+      return Promise.reject(new Error('synthetic-private-diagnostic'));
+    } }), socket = await f.start();
+    socket.emit('error', new Error('synthetic-private-native-error')); await setImmediate();
+    assert.equal(f.state.diagnostics[2], 'host_socket_error');
+    assert.equal(socket.closes, 1); assert.equal(f.state.failures, 1);
+    assert.equal(f.state.results.length, 0); await f.service.stop?.(f.context);
+  });
+}
+
+for (const [action, expected] of [
+  ['fault', 'host_socket_error'], ['grant', 'connector_grant_rejected'], ['stop', 'service_stop'],
+] as const) {
+  test(`retirement diagnostics: reentrant ${action} observer cannot admit after retirement starts`, async () => {
+    let socket: Awaited<ReturnType<ReturnType<typeof fixture>['start']>> | undefined;
+    const f = fixture({ diagnose(code) { if (code === expected) socket?.frame(f.warning()); } });
+    socket = await f.start();
+    if (action === 'fault') socket.emit('error', new Error('synthetic-private-native-error'));
+    if (action === 'grant') assert.throws(() => f.host.readAuthority({ ...f.input(), domain: 'reminder' }), /grant_unavailable/);
+    if (action === 'stop') await f.service.stop?.(f.context);
+    await setImmediate();
+    assert.ok(f.state.diagnostics.includes(expected));
+    assert.equal(f.state.results.length, 0); assert.equal(socket.closes, 1);
+    await f.service.stop?.(f.context);
+  });
+}
 
 test('binding rejects foreign endpoints and non-read grants before any callback can run', () => {
   for (const value of ['ws://localhost:8123/api/websocket', endpoint + '?x=1', endpoint + '#x',
@@ -199,6 +310,13 @@ test('async SDK send failure retires custody without disclosing provider error',
   const started = Promise.resolve(f.service.start(f.context)), rejected = assert.rejects(started, /^Error: ha_event_service_start_failed$/);
   const socket = await f.opened.promise; socket.frame({ type: 'auth_required' }); await rejected;
   assert.equal(socket.closes, 1); assert.equal(f.state.credentials, 1);
+});
+
+test('larger receive budget preserves the 8KiB outbound auth command limit', async () => {
+  const f = fixture({ async credential() { return 'x'.repeat(8192); } });
+  const started = Promise.resolve(f.service.start(f.context)), rejected = assert.rejects(started, /service_start_failed/);
+  const socket = await f.opened.promise; socket.frame({ type: 'auth_required' }); await rejected;
+  assert.equal(socket.commands.length, 0); assert.equal(socket.closes, 1); assert.equal(f.state.credentials, 1);
 });
 
 test('SDK load failure is sanitized and cannot acquire a credential', async () => {

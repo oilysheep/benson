@@ -1,5 +1,5 @@
 import Type, { type Static } from 'typebox';
-import { decode, plain, fail, freeze, timestamp } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { decode, object, plain, fail, freeze, timestamp } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Registry } from './registry.js';
 import { MapSchema, Positive, SafeInteger, Nonempty, ShortcutTaskSchema, type MapEvidence } from './schemas.js';
 import { deny } from './errors.js';
@@ -9,21 +9,33 @@ export const VACUUM_ENTITY = 'vacuum.jesica_jesica';
 // Source-only FC7 policy: freshness of the HA observation, not a claim that
 // hardware was independently sampled. No numeric fault semantics are inferred.
 export const WARNING_EVENT_MAX_AGE_MS = 30_000;
-export function projectJessicaWarningEvent(raw: unknown, registry: Registry, now: number) {
-  if (!Number.isSafeInteger(now) || !plain(raw) || raw.type !== 'event' || !plain(raw.event) ||
+const WarningEventRequestSchema = object({ schemaVersion: Type.Literal(1), kind: Type.Literal('jessica.warning-event'),
+  deviceEntity: Type.String(), state: Type.String(), hasError: Type.Boolean(),
+  timeFired: Type.String(), lastUpdated: Type.String() });
+/** Reduce only an authenticated native event selected by ingress. Authority and
+ * original-frame identity remain outside this domain-owned payload. */
+export function prepareJessicaWarningEvent(raw: unknown): string {
+  if (!plain(raw) || raw.type !== 'event' || !plain(raw.event) ||
       raw.event.event_type !== 'state_changed' || !plain(raw.event.data)) fail('jessica_warning_event_invalid');
   const event = raw.event, data = raw.event.data, state = data.new_state;
-  if (registry.mapBinding.deviceEntity !== VACUUM_ENTITY || data.entity_id !== registry.mapBinding.deviceEntity ||
-      !plain(state) || state.entity_id !== data.entity_id || typeof state.state !== 'string' ||
-      ['unknown', 'unavailable'].includes(state.state) || !plain(state.attributes) ||
-      typeof state.attributes.has_error !== 'boolean') fail('jessica_warning_device_or_signal_invalid');
-  if (!timestamp(event.time_fired) || !timestamp(state.last_updated)) fail('jessica_warning_timestamp_invalid');
-  const fired = Date.parse(event.time_fired), updated = Date.parse(state.last_updated);
+  if (!plain(state) || state.entity_id !== data.entity_id || !plain(state.attributes)) fail('jessica_warning_device_or_signal_invalid');
+  return JSON.stringify({ schemaVersion: 1, kind: 'jessica.warning-event', deviceEntity: data.entity_id,
+    state: state.state, hasError: state.attributes.has_error, timeFired: event.time_fired, lastUpdated: state.last_updated });
+}
+/** Only projection v1 is admitted: legacy raw events and unknown versions fail
+ * closed. Freshness and device semantics remain this domain's responsibility. */
+export function projectJessicaWarningEvent(raw: unknown, registry: Registry, now: number) {
+  const input = decode(WarningEventRequestSchema, raw, 'jessica_warning_projection_invalid');
+  if (!Number.isSafeInteger(now) || registry.mapBinding.deviceEntity !== VACUUM_ENTITY ||
+      input.deviceEntity !== registry.mapBinding.deviceEntity ||
+      ['unknown', 'unavailable'].includes(input.state)) fail('jessica_warning_device_or_signal_invalid');
+  if (!timestamp(input.timeFired) || !timestamp(input.lastUpdated)) fail('jessica_warning_timestamp_invalid');
+  const fired = Date.parse(input.timeFired), updated = Date.parse(input.lastUpdated);
   if (updated > fired || fired > now || now - updated > WARNING_EVENT_MAX_AGE_MS) fail('jessica_warning_evidence_not_fresh');
   return freeze({ kind: 'device-warning' as const, deviceEntity: VACUUM_ENTITY,
-    condition: 'device-reports-error' as const, active: state.attributes.has_error,
-    severity: state.attributes.has_error ? 'warning' as const : null,
-    observedAt: state.last_updated, sourceKind: 'ha_event' as const, taskCorrelation: 'unknown' as const });
+    condition: 'device-reports-error' as const, active: input.hasError,
+    severity: input.hasError ? 'warning' as const : null,
+    observedAt: input.lastUpdated, sourceKind: 'ha_event' as const, taskCorrelation: 'unknown' as const });
 }
 export const HaEntitySchema = Type.Object({ entity_id: Nonempty, state: Type.String(),
   attributes: Type.Record(Type.String(), Type.Unknown()), last_updated: Type.Optional(Nonempty) });
