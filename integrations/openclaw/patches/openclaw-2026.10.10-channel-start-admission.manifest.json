@@ -1,0 +1,37 @@
+{
+  "id": "channel-start-admission-2026.10.10",
+  "status": "SOURCE_ISOLATED_CANDIDATE_NOT_INSTALLED",
+  "package": "openclaw",
+  "version": "2026.10.10",
+  "bensonBaseCommit": "28ffb04afb5cc4b13ad476397ecb827b547ea50c",
+  "artifact": "openclaw-2026.10.10-channel-start-admission.patch",
+  "artifactSha256": "c18b4269d379202373df0bc539f254f22967afdb4e345aab50e5c7505a1922f4",
+  "files": [
+    {
+      "path": "dist/server-channels-BQ5HaSAC.mjs",
+      "beforeSha256": "e472cc45a64edda5a77fe2a46dfa0f83df05a24439d383dde1e1ee3d97b879c6",
+      "afterSha256": "d35d7f0ddcbf04bc90822156a763ed8ba41da3caf98a181e5b3ac85742a7d3bf",
+      "mode": "0664"
+    }
+  ],
+  "hostFiles": {
+    "package.json": "24211af07f7be872b714cd2181008b8bc9981a07608e531c3d70fddd3672c28b",
+    "dist/gateway-work-admission-kHo3f3-G.mjs": "1b608bacb466fb1cd14ed0524214156d4f4e663d623485cd5f0f04e1e83477cc"
+  },
+  "contract": "Existing shared account-start startup barrier and native restart-drain fencing; no new API, permission, orchestration or runtime owner.",
+  "compatibility": "Exact2026.10.10 and all pinned bytes only. Unknown versions/preimages reject. Existing diagnostics host pin for server-channels remains its historical preimage; later operational preparation must explicitly compose and bind this separate approved Core afterimage. Do not silently repin historical evidence.",
+  "rollback": "Not installed. For a separately approved later install: checkpoint exact file bytes/mode/owner while stopped; restore only the owned matching afterimage to its exact preimage. Preserve native state, auth/history/effects and existing accepted patches. No automatic upgrade or unknown-byte rollback.",
+  "research": [
+    {
+      "url": "https://raw.githubusercontent.com/openclaw/openclaw/main/src/gateway/server-channels.ts",
+      "finding": "Shared account task waits on opts.deferStartupAccountStartsUntil in current upstream; port that behavior only."
+    },
+    {
+      "url": "https://docs.openclaw.ai/gateway/health",
+      "finding": "Health-monitor and initial startup share readiness barrier; transport liveness differs from startup/readiness."
+    }
+  ],
+  "evidenceOwner": ".checkpoints/domain-run-g1b-g2-20261109/channel-start-admission-20261121-ifokHH",
+  "evidenceLevel": "Source/fixture only; no native Gateway, socket, authentication, live cancellation or performance proof.",
+  "runtimeAcceptance": "BLOCKED; prior session remains CLOSED / NOT_EXERCISED, Recovery PASS, historical retryPolicy FAIL. Stall root cause remains UNKNOWN."
+}
