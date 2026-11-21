@@ -1397,6 +1397,7 @@ import {randomUUID} from 'node:crypto';
 const scenario=process.argv[2]??'controller-428'; const abort=new AbortController();
 const secret='SENTINEL_AUTH_NEVER_LOG';
 let constructors=0, sock, options, closeFailure=false; const made=Promise.withResolvers();
+const unknown=new Error('Synthetic constructor failure');
 const orig=Object.assign(new Error('Connection Closed'),{output:{statusCode:428}});
 orig.stack='Error: '+secret+'\\n at raw (/private/'+secret+':1:1)\\n at permitted (/node_modules/baileys/lib/Socket/socket.js:111:9)\\n at secret (/node_modules/baileys/lib/'+secret+'.js:12:3)';
 const fakeSocket=()=>{
@@ -1404,9 +1405,10 @@ const fakeSocket=()=>{
  ws.close=async()=>{ if(closeFailure)throw new Error(secret);ws.isClosed=true;ws.emit('close',1000,Buffer.from(secret));};
  return {ws,ev:new EventEmitter(),user:{},end:async()=>{if(closeFailure)throw new Error(secret);await ws.close();}};
 };
-globalThis.__diagnosticFactory=(o)=>{constructors++;options=o;if(scenario==='sync')throw orig;sock=fakeSocket();made.resolve(sock);
+globalThis.__diagnosticFactory=(o)=>{constructors++;options=o;if(scenario==='sync')throw orig;if(scenario==='monitor-untyped')throw unknown;sock=fakeSocket();made.resolve(sock);
  if(scenario==='controller-health')setImmediate(()=>{sock.ws.isOpen=true;sock.ev.emit('connection.update',{connection:'open'});});
- if(scenario.startsWith('monitor'))setImmediate(()=>sock.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:orig}}));
+ if(scenario==='monitor-close')setImmediate(()=>sock.ev.emit('connection.update',{connection:'open'}));
+ else if(scenario.startsWith('monitor')&&scenario!=='monitor-408')setImmediate(()=>sock.ev.emit('connection.update',{connection:'close',lastDisconnect:{error:orig}}));
  return sock;};
 globalThis.__diagnosticWire={constructions:0,closes:0};
 const wireSource=\`import {EventEmitter} from 'node:events';export default class Wire extends EventEmitter {static OPEN=1;static CONNECTING=0;static CLOSING=2;static CLOSED=3;constructor(){super();this.readyState=0;globalThis.__diagnosticWire.constructions++;globalThis.__diagnosticWire.instance=this;} close(){globalThis.__diagnosticWire.closes++;this.readyState=3;queueMicrotask(()=>this.emit('close',1000,Buffer.from('SENTINEL_AUTH_NEVER_LOG')));}send(data,cb){cb?.();}}\`;
@@ -1415,7 +1417,6 @@ registerHooks({resolve(specifier,ctx,next){if(scenario.startsWith('baileys')&&sp
  if(scenario.startsWith('baileys')&&new URL(url).pathname.endsWith('/session.runtime-B9asd-5r.mjs'))return{format:'module',shortCircuit:true,source:\`import {makeWASocket,initAuthCreds,DEFAULT_CONNECTION_CONFIG} from '/candidate/whatsapp/node_modules/baileys/lib/index.js';export const a=makeWASocket;export const s=async()=>({state:{creds:initAuthCreds(),keys:{get:async()=>({}),set:async()=>{}}}});export const r=async()=>({version:[2,3000,1]});export const i=k=>k;export const n=(...args)=>DEFAULT_CONNECTION_CONFIG.makeSignalRepository(...args);export const t=JSON;export const o={BufferJSON:{replacer:(_key,value)=>value}};\`};
  if(new URL(url).pathname.endsWith('/session.runtime-B9asd-5r.mjs'))return{format:'module',shortCircuit:true,source:\`export const a=o=>globalThis.__diagnosticFactory(o);export const s=async()=>({state:{creds:{},keys:{get:async()=>({}),set:async()=>{}}}});export const r=async()=>{globalThis.__diagnosticVersion?.();return {version:[2,3000,1]}};export const i=k=>k;export const n=()=>({});export const t=JSON;export const o={BufferJSON:{replacer:(_key,value)=>value}};\`};
  if(scenario==='queue-current'&&new URL(url).pathname.endsWith('/socket-close-BvdLXlbQ.mjs')){const loaded=next(url,ctx),text=String(loaded.source),needle='const seen = new Set();';assert.equal(text.split(needle).length,2);return{format:'module',shortCircuit:true,source:text.replace(needle,needle+' globalThis.__diagnosticSeen=seen;')};}
- if(scenario==='monitor-two'&&new URL(url).pathname.endsWith('/socket-close-BvdLXlbQ.mjs')) {const loaded=next(url,ctx),text=String(loaded.source);assert.equal(text.split('const BENSON_CONNECTION_SOCKET_LIMIT = 1;').length,2);return {format:'module',shortCircuit:true,source:text.replace('const BENSON_CONNECTION_SOCKET_LIMIT = 1;','const BENSON_CONNECTION_SOCKET_LIMIT = 2;')};}
  return next(url,ctx);
 }});
 const runtime=await import('/candidate/whatsapp/dist/.setup/runtime-C5kM4SuW.mjs');
@@ -1476,19 +1477,34 @@ if(scenario==='queue-current'||scenario==='queue-logging-failure'){
  const {setRuntimeConfigSnapshot}=await import('/sdk/dist/plugin-sdk/runtime-config-snapshot.js');
  setRuntimeConfigSnapshot({channels:{whatsapp:{enabled:true,accounts:{default:{authDir:'/tmp/synthetic-auth'}},sendReadReceipts:false}}});
  const monitor=await import('/candidate/whatsapp/dist/.setup/monitor-B5qdng3U.mjs');
- let sleeps=0;
- const sleep=async()=>{sleeps++;assert.equal(constructors,sleeps);if(scenario==='monitor-abort'||scenario==='monitor-two'&&sleeps===2){abort.abort();throw new Error('aborted');}};
- const tuning={accountId:'default',reconnect:{initialDelayMs:scenario==='monitor-delayed'?250:0,maxDelayMs:250,factor:1,jitter:0,maxAttempts:3},sleep};
- if(scenario==='monitor-abort')tuning.reconnect.initialDelayMs=250;
- let error;try{await monitor.t(false,undefined,true,async()=>{}, {log(){},error(){},exit(){throw new Error('unexpected exit')}},abort.signal,tuning);}catch(e){error=e;}
- if(scenario!=='monitor-abort'&&scenario!=='monitor-two')assert.equal(error?.code,'DIAGNOSTIC_SOCKET_BUDGET_EXHAUSTED');
- await logger.n();const rows=records();const expected=scenario==='monitor-two'?2:1;assert.equal(constructors,expected);
- const starts=rows.filter(r=>r.event==='setup-entered');assert.equal(starts.length,scenario==='monitor-abort'?1:2);
- assert(rows.some(r=>r.event==='retry-scheduled'));assert(rows.filter(r=>r.event==='retry-scheduled').every(r=>r.constructorEntered<=expected));
- if(scenario==='monitor-abort')assert(rows.some(r=>r.event==='retry-aborted'));
- else {assert(rows.some(r=>r.event==='retry-wait-finished'));assert.equal(starts[1].precedingRetryAttempt,starts[0].attemptOrdinal);assert.notEqual(starts[0].connectionId,starts[1].connectionId);assert.equal(starts[0].runId,starts[1].runId);}
- if(scenario==='monitor-delayed')assert.equal(rows.find(r=>r.event==='retry-scheduled').delayMs,2000);
- console.log(JSON.stringify({probe:'PASS',scenario,constructors,records:rows}));
+ let sleeps=0,listenerCloses=0;const states=[];
+ const tuning={accountId:'default',reconnect:{maxAttempts:3},socketTiming:{connectTimeoutMs:25},
+  sleep:async()=>{sleeps++;throw new Error('Unapproved retry wait');},statusSink:s=>states.push(s)};
+ const close=Promise.withResolvers();
+ const listenerFactory=async()=>{setImmediate(()=>close.resolve({status:428,isLoggedOut:false,error:orig}));return{close:async()=>{listenerCloses++;},onClose:close.promise};};
+ // Keep the process alive for the native unref'd local connection timer.
+ const keeper=setInterval(()=>{},1000);
+ let error;try{await monitor.t(false,listenerFactory,true,async()=>{}, {log(){},error(){},exit(){throw new Error('unexpected exit')}},abort.signal,tuning);}catch(e){error=e;}finally{clearInterval(keeper);}
+ assert.equal(sleeps,0);assert.equal(constructors,1);
+ if(scenario==='monitor-untyped')assert.equal(error,unknown);else assert.equal(error,undefined);
+ await logger.n();const rows=records(),final=states.at(-1);
+ assert.equal(rows.filter(r=>r.event==='setup-entered').length,1);
+ assert(!rows.some(r=>r.event.startsWith('retry-')));
+ assert.equal(rows.at(-1).event,'summary');assert.equal(final.terminalDisconnect,true);
+ assert.equal(final.lifecycle,'blocked');assert.equal(final.healthState,'stopped');assert.equal(final.connected,false);assert.equal(final.running,false);
+ if(scenario==='monitor-408')assert(rows.some(r=>r.event==='failure'&&r.stage==='wait-open'&&r.error?.status===408));
+ if(scenario==='monitor-close'){assert(rows.some(r=>r.event==='stage-finished'&&r.stage==='ready'));assert.equal(listenerCloses,1);}
+ if(sock){assert.equal(sock.ws.isClosed,true);assert(rows.some(r=>r.event==='listeners-removed'));}
+ // Execute the installed supervisor's actual scheduling branch with the native
+ // emitted status. All external dependencies are inert; scheduling is forbidden.
+ const host=fs.readFileSync('/sdk/dist/server-channels-BQ5HaSAC.mjs','utf8');
+ const start=host.indexOf('if (manuallyStopped.has(rKey)) {',host.indexOf('const trackedPromise ='));
+ const end=host.indexOf('}).finally(() => {',start);assert(start>0&&end>start);
+ let skipped=false;const AsyncFunction=Object.getPrototypeOf(async function(){}).constructor;
+ await new AsyncFunction('manuallyStopped','rKey','clearRecoveryState','getRuntime','channelId','id','restarts','setRestartState','log','recoveryStopTimedOut','store','opts','isCurrentTask',host.slice(start,end))(
+  new Set(),'synthetic',()=>{},()=>final,'whatsapp','default',new Map(),v=>assert.equal(v,false),{info:m=>{assert(m.includes('auto-restart skipped, terminal disconnect'));skipped=true;}},new Set(),{stops:new Set()},{isClosing:()=>false},()=>true);
+ assert.equal(skipped,true);
+ console.log(JSON.stringify({probe:'PASS',scenario,constructors,retryWaits:sleeps,supervisorRestartSkipped:skipped,terminalDisconnect:final.terminalDisconnect,listenerCloses,records:rows}));
 }else if(scenario==='cancel'||scenario==='cancel-late'||scenario==='preconstructor'){
  const d=diag();if(scenario==='cancel')abort.abort();if(scenario==='cancel-late')globalThis.__diagnosticVersion=()=>abort.abort();
  const opts={authDir:'/tmp/synthetic-auth',bensonDiagnostic:d,bensonDiagnosticAbortSignal:abort.signal};
@@ -1624,8 +1640,9 @@ process.exit(0);
 function connectionDiagnosticWorker() {
   isolated();
   const saveStageOnly = process.env.BENSON_NATIVE_SAVE_STAGE_ONLY === '1';
-  const cases = saveStageOnly ? ['queue-current', 'queue-backup', 'queue-logging-failure'] : ['factory', 'controller-428', 'controller-408', 'controller-health', 'sync', 'preconstructor',
-    'cancel', 'cancel-late', 'monitor-immediate', 'monitor-delayed', 'monitor-two', 'monitor-abort',
+  const noRetryOnly = process.env.BENSON_NATIVE_NO_RETRY_ONLY === '1';
+  const cases = noRetryOnly ? ['monitor-408', 'monitor-close', 'monitor-428', 'monitor-untyped'] : saveStageOnly ? ['queue-current', 'queue-backup', 'queue-logging-failure'] : ['factory', 'controller-428', 'controller-408', 'controller-health', 'sync', 'preconstructor',
+    'cancel', 'cancel-late', 'monitor-408', 'monitor-close', 'monitor-428', 'monitor-untyped',
     'baileys-stream', 'baileys-error', 'baileys-wire-close', 'privacy', 'logging-failure'];
   writeFileSync('/tmp/diagnostic-driver.mjs', connectionDiagnosticSource);
   writeFileSync('/tmp/runtime-topology-probe.mjs', connectionTopologySource);
@@ -1633,11 +1650,14 @@ function connectionDiagnosticWorker() {
   for (const scenario of cases) {
     const output = execFileSync(process.execPath, ['/tmp/diagnostic-driver.mjs', scenario], {
       encoding: 'utf8', timeout: 20_000, maxBuffer: 512 * 1024 });
-    const report: unknown = JSON.parse(output.trim());
-    assert(plain(report)); assert.equal(report.probe, 'PASS'); reports.push(report);
+    // Native informational console output may precede the driver's final report.
+    const lines = output.trim().split('\n');
+    const report: unknown = JSON.parse(lines.at(-1)!);
+    assert(plain(report)); assert.equal(report.probe, 'PASS');
+    assert.equal(report.scenario, scenario); reports.push(report);
   }
-  if (saveStageOnly) {
-    console.log(JSON.stringify({ probe: 'PASS', diagnosticOnly: true, saveStageOnly: true, cases: reports,
+  if (saveStageOnly || noRetryOnly) {
+    console.log(JSON.stringify({ probe: 'PASS', diagnosticOnly: true, saveStageOnly, noRetryOnly, cases: reports,
       limits: 'Synthetic queue gates and inert JSON in disposable namespaces; no host credentials, Gateway, socket network or G2 acceptance.' }));
     return;
   }

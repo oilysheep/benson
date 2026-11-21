@@ -9,13 +9,13 @@
   "upstreamTag": "v2026.10.10",
   "repositoryBaseCommit": "d67b801d17bbee03e4b222889ae7bcc1e48fb3a4",
   "sourceCommit": null,
-  "sourceCommitNote": "Uncommitted source candidate; exact artifact hash, installed preimages and retained baseline are authoritative. Not a published commit.",
+  "sourceCommitNote": "The containing Git commit binds the reviewed source correction. Historical reviews apply only to their pinned artifacts; current qualification and source review are recorded below. Publication grants no installation or activation authority.",
   "requires": {
     "artifact": "2026.10.10.patch",
     "sha256": "41b33921a0ed6b05c32dcd6804581ea4a1c25d897272820219ebd29f59ad5c2a",
     "manifestSha256": "be8bd96fb3cf2319b80fc4327101dbc29a395b3bce8bf663e07f1cb1482d7de3"
   },
-  "artifactSha256": "5e62235d9bc2b1be811e7195ba575b7ccca980bec32b6f67b373d67d6f33481b",
+  "artifactSha256": "ef053a585d500f6ed65c7c1c344f02c4c5a2a7ab092558e589dc453acb93888e",
   "files": [
     {
       "target": "dist/.setup/socket-close-BvdLXlbQ.mjs",
@@ -32,7 +32,7 @@
     {
       "target": "dist/.setup/monitor-B5qdng3U.mjs",
       "beforeSha256": "5797e2a84d386affb41236963b31aee7f37691a26042e66f215a87f8115f88f3",
-      "afterSha256": "7cc0b187e211f5da774d3b628dda3d90feea83f6e96330b20dd43fd0d610d478",
+      "afterSha256": "1f742f9707927a71debbe98b13d9c77c8d890b995fd381e16cd3c5239ea73a0a",
       "mode": "0664"
     },
     {
@@ -61,7 +61,8 @@
     "reservationsPerModule": 1,
     "reloadAllowed": false,
     "replacementProcessAllowed": false,
-    "scope": "Only the qualified root channel manager and its closed no-login/no-directory/no-standalone-inbox callgraph. Not a universal module singleton or cross-process cap."
+    "scope": "Only the qualified root channel manager and its closed no-login/no-directory/no-standalone-inbox callgraph. Not a universal module singleton or cross-process cap.",
+    "retryPolicy": "One-use profile: reconnect maxAttempts=1; native stopped/blocked/terminalDisconnect suppresses outer supervisor recovery; unexpected monitor errors retain their original rejection and terminal status."
   },
   "limits": {
     "eventBytes": 2048,
@@ -134,6 +135,40 @@
         "productionAcceptance": "BLOCKED"
       },
       "productionPendingCause": "UNKNOWN"
+    },
+    "noRetryCorrection": {
+      "status": "SOURCE_ISOLATED_PASS_INDEPENDENT_REVIEW_PASS",
+      "evidenceOwner": "/home/oa/projects/benson/.checkpoints/domain-run-g1b-g2-20261109/no-retry-source-20261121-s1DPpO",
+      "artifactSha256": "ef053a585d500f6ed65c7c1c344f02c4c5a2a7ab092558e589dc453acb93888e",
+      "scope": "Source/isolated only; no Core changes or live authority. Historical review records retain their exact earlier artifact scope.",
+      "validation": {
+        "path": "/home/oa/projects/benson/.checkpoints/domain-run-g1b-g2-20261109/no-retry-source-20261121-s1DPpO/validation.json",
+        "sha256": "7b9c3a90bbc23a9b8f46a27302c04bf60b63c9f790eb75fda32cdb15a556674b"
+      },
+      "independentReview": {
+        "result": "PASS",
+        "path": "/home/oa/projects/benson/.checkpoints/domain-run-g1b-g2-20261109/no-retry-source-20261121-s1DPpO/independent-review.json",
+        "sha256": "3102a175780f16c07cb4d5560cf3de5d379ba23b1c1ed3170f4ee2cbda716929",
+        "targetSha256": "50ce2e5b63225e8bd75e43c894aee626e5982566d7ad0f28294baa25b3fb38c1",
+        "liveEligibility": "NOT_AUTHORIZED"
+      },
+      "privateAcceptanceOwners": {
+        "publication": "Retained private checkpoint owners, not Git-published tools or runtime registration. Exact reviewed source hashes are preserved; future session preparation must bind them explicitly.",
+        "files": [
+          {
+            "path": "/home/oa/projects/benson/.checkpoints/domain-run-g1b-g2-20261109/cancellation-recovery-20261121-Yr1DET/execution.mjs",
+            "sha256": "6adc9e94dc4baede7c47daf65c3914336ec2254cdf7083881c13f17910bdd4fc"
+          },
+          {
+            "path": "/home/oa/projects/benson/.checkpoints/domain-run-g1b-g2-20261109/cancellation-recovery-20261121-Yr1DET/capture.mjs",
+            "sha256": "38fe4bc4808b6a9acf9f667babc358f068b771c8bcdb2c25a6820968ca97b2c6"
+          },
+          {
+            "path": "/home/oa/projects/benson/.checkpoints/domain-run-g1b-g2-20261109/cancellation-recovery-20261121-Yr1DET/recovery.test.mjs",
+            "sha256": "036204b883f4f9b53e9a661cfc6991d006afa064a358740009bdacfa848496c8"
+          }
+        ]
+      }
     }
   }
 }

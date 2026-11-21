@@ -28,11 +28,11 @@ export function validateStartupTargetMetadata(value: unknown) {
 }
 
 /** Fail closed: both proof fixtures run only inside disposable Linux namespaces. */
-export function runIsolatedFixture(target: 'native-correlation' | 'main-interception' | 'whatsapp-response-delivery' | 'tool-execution-receipts', codeModeOnly = false, completionV6Only: boolean | 'cancel' | 'multi' = false, mainHookSurfaceOnly = false, supportedNativeOnly = false, whatsappMonitorOnly: boolean | 'installed' | 'reminder-product' | 'startup-registry' | 'connection-diagnostic' | 'credential-save-diagnostic' | 'g2-demo' = false): unknown {
-  if (whatsappMonitorOnly === 'connection-diagnostic' || whatsappMonitorOnly === 'credential-save-diagnostic') {
+export function runIsolatedFixture(target: 'native-correlation' | 'main-interception' | 'whatsapp-response-delivery' | 'tool-execution-receipts', codeModeOnly = false, completionV6Only: boolean | 'cancel' | 'multi' = false, mainHookSurfaceOnly = false, supportedNativeOnly = false, whatsappMonitorOnly: boolean | 'installed' | 'reminder-product' | 'startup-registry' | 'connection-diagnostic' | 'connection-no-retry' | 'credential-save-diagnostic' | 'g2-demo' = false): unknown {
+  if (whatsappMonitorOnly === 'connection-diagnostic' || whatsappMonitorOnly === 'connection-no-retry' || whatsappMonitorOnly === 'credential-save-diagnostic') {
     assert.equal(target, 'whatsapp-response-delivery');
     assert(!codeModeOnly && !completionV6Only && !mainHookSurfaceOnly && !supportedNativeOnly);
-    return runConnectionDiagnosticFixture(whatsappMonitorOnly === 'credential-save-diagnostic');
+    return runConnectionDiagnosticFixture(whatsappMonitorOnly === 'credential-save-diagnostic', whatsappMonitorOnly === 'connection-no-retry');
   }
   const startupRegistry = whatsappMonitorOnly === 'startup-registry';
   const targetMetadata = process.env.BENSON_NATIVE_STARTUP_TARGET_METADATA;
@@ -164,7 +164,7 @@ if (process.argv[1] === fileURLToPath(import.meta.url) && process.argv[2] === '-
 }
 
 /** Pinned public-code inputs only; no installation, native Run or Gateway server. */
-function runConnectionDiagnosticFixture(saveStageOnly = false): unknown {
+function runConnectionDiagnosticFixture(saveStageOnly = false, noRetryOnly = false): unknown {
   const repo = realpathSync(process.cwd());
   const emittedRoot = realpathSync(fileURLToPath(new URL('../../../../../', import.meta.url)));
   const owner = join(repo, 'integrations/openclaw/patches/whatsapp-response-controller');
@@ -237,6 +237,7 @@ function runConnectionDiagnosticFixture(saveStageOnly = false): unknown {
       '--setenv', 'OPENCLAW_STATE_DIR', '/tmp/state', '--setenv', 'OPENCLAW_CONFIG_PATH', '/tmp/config.json',
       '--setenv', 'BENSON_NATIVE_CORRELATION_ISOLATED', '1', '--setenv', 'BENSON_NATIVE_CONNECTION_DIAGNOSTIC_ONLY', '1',
       ...saveStageOnly ? ['--setenv', 'BENSON_NATIVE_SAVE_STAGE_ONLY', '1'] : [],
+      ...noRetryOnly ? ['--setenv', 'BENSON_NATIVE_NO_RETRY_ONLY', '1'] : [],
       '--chdir', '/tmp', '/usr/bin/node', '/repo/output/typescript/integrations/openclaw/benson-routing/tests/fixtures/whatsapp-response-delivery.js', '--worker',
     ], { encoding: 'utf8', timeout: 180_000, maxBuffer: 2 * 1024 * 1024, stdio: ['ignore', 'pipe', 'inherit'] });
     const result: unknown = JSON.parse(output.trim()); assert(plain(result));

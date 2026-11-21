@@ -35,7 +35,7 @@ accepted Response patch. Four native targets, relative to the official plugin:
 
 | Target | Contract |
 | --- | --- |
-| `dist/.setup/monitor-B5qdng3U.mjs` | Reuse native runId/connectionId; separate setup, retry scheduling/wait/abort and cumulative summary. Preserve Response insertion and native retry decisions. |
+| `dist/.setup/monitor-B5qdng3U.mjs` | Reuse native runId/connectionId; separate setup, retry scheduling/wait/abort and cumulative summary. Preserve Response insertion. This temporary one-use profile binds native reconnect maxAttempts=1; stopped/blocked/terminalDisconnect terminates supervisor recovery. Unexpected errors retain their rejection and terminal status. |
 | `dist/.setup/connection-controller-g_8-U3na.mjs` | Setup stage/original rejection before cleanup; existing AbortSignal passed to factory; owner close intent and diagnostic-listener cleanup. Original errors/rethrows remain native. |
 | `dist/.setup/socket-close-BvdLXlbQ.mjs` | Bounded closed projection, actual constructor entry/return counts, passive transport/stream observations and two sanitized existing error-log arguments. Temporary one-reservation cap before auth; cancellation recheck immediately before construction. Observe existing backup/current save stages through the native save callback. |
 | `dist/.setup/auth-store-DMOniiuA.mjs` | Observe existing queue tails and active save stages; emit bounded barrier entry/outcome snapshots. Preserve queue/error ordering, captured-tail waiting, the15000ms default timeout and atomic publication/durability. |
@@ -54,8 +54,14 @@ The verified recoverable baseline, emitted logs, focused validation and required
 independent review belong to Plan §11.65 under
 `connection-diagnostics-source-QwMrqY`. The approved save-stage extension and
 consumer qualification belong to `save-stage-extension-cM1hxH`; source/isolated
-approval does not permit installation or activation. The later separately
-approved bounded live session is recorded below; its temporary files were restored.
+approval does not permit installation or activation. The bounded no-retry
+correction and runner first-cause evidence are recorded in the canonical Plan
+and the manifest’s noRetryCorrection entry; earlier reviews apply only to their
+pinned artifacts. The three private acceptance-owner files remain in their
+existing checkpoint, with reviewed hashes retained in that entry; publication
+does not promote them to a public tool or authorize a new session. The later
+separately approved bounded live session is recorded below; its temporary files
+were restored.
 
 The save-stage extension uses diagnostic-only metadata in a WeakMap keyed by
 existing native tail Promises. It records opaque process-local save/predecessor

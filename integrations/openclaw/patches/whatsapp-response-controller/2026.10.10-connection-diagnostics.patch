@@ -427,7 +427,17 @@
  import { n as getStatusCode, t as formatError } from "./session-errors-DrPDsEQy.mjs";
  import { t as BufferJSON } from "./session.runtime-B9asd-5r.mjs";
  import { _ as resolveInboundMediaMimetype, a as addWhatsAppImagePreviewFields, c as extractContextInfo, d as extractMediaKind, f as extractMentionedJids, g as projectWhatsAppInboundMessage, h as hasInboundUserContent, i as resolveWhatsAppOutboundMentions, l as extractExternalAdReplyContext, n as addWhatsAppOutboundMentionsToContent, o as describeReplyContext, p as extractText, r as mayContainWhatsAppOutboundMention, s as extractContactContext, t as createWebSendApi, u as extractLocationData } from "./send-api-DKvRSr-3.mjs";
-@@ -3944,12 +3944,15 @@
+@@ -3908,7 +3908,8 @@
+ 	}).cfg;
+ 	const maxMediaBytes = resolveWhatsAppMediaMaxBytes(account);
+ 	const heartbeatSeconds = resolveHeartbeatSeconds(tuning.heartbeatSeconds);
+-	const reconnectPolicy = resolveReconnectPolicy(tuning.reconnect);
++	// This temporary one-socket acceptance profile grants no reconnect attempt.
++	const reconnectPolicy = resolveReconnectPolicy({ ...tuning.reconnect, maxAttempts: 1 });
+ 	const socketTiming = resolveWhatsAppSocketTiming(tuning.socketTiming);
+ 	const groupHistoryLimit = resolvePromptHistoryLimit(account.historyLimit ?? cfg.channels?.whatsapp?.historyLimit ?? cfg.messages?.groupChat?.historyLimit);
+ 	const groupHistories = /* @__PURE__ */ new Map();
+@@ -3944,12 +3945,15 @@
  		sleep,
  		isNonRetryableStatus: isNonRetryableWebCloseStatus
  	});
@@ -443,7 +453,7 @@
  			const shouldDebounce = (msg) => shouldDebounceTextInbound({
  				text: msg.payload.commandBody ?? msg.payload.body,
  				cfg,
-@@ -3959,6 +3962,7 @@
+@@ -3959,6 +3963,7 @@
  			let connection;
  			try {
  				connection = await controller.openConnection({
@@ -451,7 +461,7 @@
  					connectionId,
  					getMessage: async (key) => key.id && key.remoteJid ? readWhatsAppBaileysCacheEntry(recentMessageKeys, `${key.remoteJid}:${key.id}`) : void 0,
  					cachedGroupMetadata: async (jid) => {
-@@ -4094,9 +4098,13 @@
+@@ -4094,9 +4099,13 @@
  					delayMs: decision.delayMs
  				}, normalized ? "web reconnect: setup status error; retrying" : "web reconnect: auth state still stabilizing during inbox attach; retrying");
  				runtime.error(normalized ? `WhatsApp Web connection closed during setup (status ${normalized.statusLabel}). Retry ${decision.reconnectAttempts}/${reconnectPolicy.maxAttempts || "∞"} in ${formatDurationPrecise(decision.delayMs ?? 0)}.` : `WhatsApp auth state is still stabilizing. Retry ${decision.reconnectAttempts}/${reconnectPolicy.maxAttempts || "∞"} for inbox attach in ${formatDurationPrecise(decision.delayMs ?? 0)}.`);
@@ -465,7 +475,7 @@
  					break;
  				}
  				continue;
-@@ -4238,16 +4246,20 @@
+@@ -4238,16 +4247,24 @@
  			if (isWatchdogRecoveryReconnect) runtime.log(warn(reconnectMessage));
  			else runtime.error(reconnectMessage);
  			await controller.closeCurrentConnection();
@@ -479,6 +489,10 @@
  				break;
  			}
  		}
++	} catch (error) {
++		// Unexpected exits must also be terminal for the native channel supervisor.
++		statusController.noteClose({ error: formatError(error), reconnectAttempts: controller.getReconnectAttempts(), healthState: "stopped" });
++		throw error;
  	} finally {
  		statusController.markStopped();
  		process.removeListener("SIGINT", handleSigint);
