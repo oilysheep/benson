@@ -2,11 +2,13 @@
 
 Temporary OpenClaw **Core/SDK** exception, Plan §11.48; the operator approved
 source/isolated qualification for 2026.10.10 on 2026-11-14 (§11.65).
-Only disposable isolated acceptance is authorized. No production installation,
-Gateway changes, production registration, messages or device actions are authorized.
+That source approval alone authorized disposable isolated acceptance. The later,
+separately approved2026-11-14 installation and current installed composition are
+recorded in the canonical [Plan §8](../../../../BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md#8-core-modification-inventory-and-legacy-disposition) and §11.65. No new installation, Gateway changes,
+registration, messages or device actions are authorized by this README.
 The separate WhatsApp Plugin patch remains byte-identical and separately owned.
 
-`manifest.json` is the sole active version/hash/file inventory;
+`manifest.json` is this patch’s exact version/hash/file owner;
 `2026.10.10.patch` is the current canonical patch. The unchanged `2026.10.4.patch`
 is retained historical evidence, not permission to apply it to another release. No layered patch, fuzzy application, automatic rebase or
 compatibility fallback is supported. Target: npm `openclaw@2026.10.10`, source commit

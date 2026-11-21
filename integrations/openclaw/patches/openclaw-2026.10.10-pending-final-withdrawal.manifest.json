@@ -1,0 +1,103 @@
+{
+  "id": "exact-pending-final-withdrawal-2026.10.10",
+  "status": "SOURCE_ISOLATED_CANDIDATE_NOT_INSTALLED",
+  "package": "openclaw",
+  "version": "2026.10.10",
+  "bensonBaseCommit": "6f8567f1b7125e08b356530e7f5dde88dd50bce5",
+  "artifact": "openclaw-2026.10.10-pending-final-withdrawal.patch",
+  "artifactSha256": "9f0c026a8646a02bac83659ddeffb40a18069726429e442ce784fd68a26f769c",
+  "files": [
+    {
+      "path": "dist/session-actor-memory-owner-C3pnd6d2.mjs",
+      "beforeSha256": "0c1463b9f7040f019c76cd921fef40e5919eb9fc5bd3c3bc50e40de81ef57cfd",
+      "afterSha256": "00a15eed2c3a5d4e577bacc1c8a8653d078e5fd1249af7a8429ee3f99fca011f",
+      "mode": "664"
+    },
+    {
+      "path": "dist/delivery-completion-Cd30DITK.mjs",
+      "beforeSha256": "9d646d3ebbeeea9b0f0a40e89e51e26cb97a443322660a3368da55488200d023",
+      "afterSha256": "a9ea1c9218d82bdba0fc869bde3c3e0f2788f50a87ab7f0c931e077ed453d67c",
+      "mode": "664"
+    },
+    {
+      "path": "dist/plugin-sdk/session-store-runtime.js",
+      "beforeSha256": "ae77e640df2d4590e2bd1aca5647abdc05a7a0678112ec16428cf8d4e3962fd6",
+      "afterSha256": "8a11fd77b15dbc4fae4a31eedb005edbbd0f3afd83bed7ae500c07dc35cda4d7",
+      "mode": "664"
+    },
+    {
+      "path": "dist/plugin-sdk/session-store-runtime.d.ts",
+      "beforeSha256": "f02f38bd2c79d7f3a9f52a670849655d97fd5bb4c7b970b620035e889a4a928d",
+      "afterSha256": "6240cc67e85eb434350e03c1381b7f686c5d02443b03725c8ed554b5a0ecf992",
+      "mode": "664"
+    },
+    {
+      "path": "dist/config-contracts-CaROPwlH.d.ts",
+      "beforeSha256": "88ee8e33390ad107725d2d12c6a7108000ac922a1ba9a7836317dc580bcae581",
+      "afterSha256": "160f15d3e766757fe6b6290515e43239f7871955b07af953be1c8d2057d8a75e",
+      "mode": "664"
+    }
+  ],
+  "hostFiles": {
+    "package.json": "24211af07f7be872b714cd2181008b8bc9981a07608e531c3d70fddd3672c28b",
+    "dist/session-actor.worker-2ZG8xnLD.mjs": "429215981741c292ee5d9096b595d432ef4a84306a5511b95bd5400f809e38b4",
+    "dist/session-message-rewrite.worker-DKwJoOdD.mjs": "6e26b932bdc2dd8694d2e538edac0dd450cb219d9de8f13019eb772a5c8b07ad",
+    "dist/session-actor-transaction-D7TqTvSD.mjs": "e79f62bc94ae8967e746ced0a7213cc9243ed1e5ba37a5118ebdb5a50aea4781",
+    "dist/session-accessor.sqlite-transcript-turn-C5EeUJUq.mjs": "4ccad1b64b9d4ad760033c86f3984e0692ec077325944b0aaed0ff00babce25d",
+    "dist/session-actor-durable-BcxBXS2b.mjs": "c9b16c1330220eca70c01813ab777e2ff84dbeaa2cbc04bbcffb11dca035cfcc",
+    "dist/session-actor-command-BBmRamW_.mjs": "2b4f72c5f13bfce31b55bdcc2fea781c86cc745ef5048c078fefdfe63bfb7775",
+    "dist/delivery-queue-storage-Aqg_oq1Q.mjs": "500285cf20b93598959cd53cda9900a986f6a3b3d4fe540b63245bb2ab755da5",
+    "dist/session-history-visibility-CUkAHE4T.mjs": "98348ac903e44a8ae8554a411cf2000584e0068925f2067beda49fba14e14b80",
+    "dist/types-BGDhC4_W.mjs": "4ee73edd53c5f8e14cb29900d97a0fe339f0b42e42a8e1bc21092c984e4d4abf",
+    "dist/session-entry-lineage-B7Mubzwj.mjs": "e719618674cf66880bf349f758b5a477c259f10f8e498abc10679e9288d22d37",
+    "dist/store-maintenance-Dcvj0_80.mjs": "2d290011c041a8e446594cb60f0e7ed311c60207d84d72e8733ed9034e817656",
+    "dist/session-accessor.sqlite-transcript-store-DtdAOAHQ.mjs": "4de5ba478b6ead658bb0fe0eb8427c6ee081c43203b9c797f603e6c49e3ec1d3"
+  },
+  "contract": "Approved Core modification in the existing native pending-final settlement owner only. Host-only withdrawPendingFinalDelivery is not an agent tool or an unmodified upstream SDK guarantee. Explicit one-use operator grant, exact retained intent/entry/route/member and physical-owner bindings, current native actor version, stopped exclusive writer/channel authority and absent native queue ownership are mandatory. No send, recovery dispatch, receipt, deletion, idleness bypass or new store.",
+  "history": "Version 1 openclaw.pending-final-withdrawal custom transcript event and suppressed-to-clear transition commit in the same existing actor transaction. History retains exact native IDs, authorization digests and member dispositions, without response text/recipient disclosure. Past delivery outcome remains unknown. Existing native audit retention applies; no purge or native history rewind is authorized.",
+  "concurrency": "Queue ownership inspection and session mutation are separate native owners. This procedure requires an exclusive stopped maintenance fence through completion; it does not claim a cross-database transaction. Unknown custody/currentness/commit consumes the attempt and requires read-only reconciliation, never automatic retry.",
+  "compatibility": "Exact version/package/target/dependency hashes only; unknown versions/preimages reject. Compose the config declaration over the pinned accepted requester-authority afterimage. Custom audit and authorization schema v1 only; unknown authorization versions reject. No new pending-state schema. Publication/provenance and isolated native qualification remain operational prerequisites.",
+  "rollback": "Source checkpoint and zero-fuzz apply/reverse verified outside active runtime. Installation requires separate approval and a fresh stopped target checkpoint. Restore code only from exact known afterimages; do not restore old native state after a committed withdrawal or erase its audit. Prior native storage schema and generic custom history remain readable by the preimage. An unknown commit is reconciled before any further operation.",
+  "research": [
+    {
+      "url": "https://github.com/openclaw/openclaw/blob/main/src/config/sessions/session-pending-final-settlement.ts",
+      "finding": "Use existing exact pending-final settlement/custody cleanup, not replay or a parallel ledger. Installed 2026.10.10 pins govern behavior."
+    },
+    {
+      "url": "https://docs.openclaw.ai/concepts/messages",
+      "finding": "Message lifecycle and delivery are separate; an operator withdrawal must not fabricate delivery confirmation."
+    }
+  ],
+  "evidenceOwner": ".checkpoints/domain-run-g1b-g2-20261109/pending-final-withdrawal-20261121-VJNh1z",
+  "evidenceLevel": "Source/native-function and synthetic SQLite fixture only. Not installed/native-store, channel or live acceptance.",
+  "acceptance": "Normal Cancellation idleness gate is byte-identical. Prior CLOSED / NOT_EXERCISED and Recovery PASS remain. Withdrawal, current custody, native audit persistence and resumed idleness require separately approved stopped operation.",
+  "validation": {
+    "sourceReview": {
+      "path": ".checkpoints/domain-run-g1b-g2-20261109/pending-final-withdrawal-20261121-VJNh1z/independent-review.json",
+      "sha256": "64e5d1f17b357c51ef3d3868869135f815250ccb2e9f3da6dc1d3ea39db99d9a",
+      "targetSha256": "cd4ba208208b0ab8819c9e32b90367f7fe55b5e036248a942ecf8a5f62aedd4c"
+    },
+    "sourceClosure": {
+      "path": ".checkpoints/domain-run-g1b-g2-20261109/pending-final-withdrawal-20261121-VJNh1z/closure.json",
+      "sha256": "26236b24fd9f00fd704853ec5762759cbdb56b3752be5c17753edc02416dd613"
+    },
+    "evidence": {
+      "path": ".checkpoints/domain-run-g1b-g2-20261109/pending-final-withdrawal-20261121-VJNh1z/validation.json",
+      "sha256": "a3410c8969d8651f49d7003b089aae971ac2f49c36e1238f9cc891c7eb328252"
+    },
+    "preparationOwner": {
+      "path": ".checkpoints/domain-run-g1b-g2-20261109/cancellation-recovery-20261121-Yr1DET/prepare.mjs",
+      "sha256": "cd03d5d400a95549e8e042902458b79a05db6aa107c1c57d2b638fee6567c6ac",
+      "publication": "Retained private preparation owner; not committed. Exact reviewed bytes required. No agent runtime registration."
+    },
+    "focusedTests": {
+      "passed": 10,
+      "total": 10,
+      "logSha256": "05205ba35aff16ec3cef3baaf5ef68b93fb70aa1d9d44b8197a39b0f474a6e0d",
+      "publicationReruns": 0
+    },
+    "fixtureRequirements": "Run the published test only with the retained hash-pinned preparation owner at its referenced path, the exact2026.10.10 native source/dependency preimages, and BENSON_WITHDRAWAL_CANDIDATE pointing to a verified isolated patch afterimage directory. The test reads pinned native function source with inert dependencies; it must not import installed SDK modules or open native state. This is a retained-host acceptance fixture, not a self-contained fresh-clone CI test.",
+    "command": "BENSON_WITHDRAWAL_CANDIDATE=<verified-isolated-candidate> node --test --test-isolation=none --test-reporter=tap integrations/openclaw/patches/openclaw-2026.10.10-pending-final-withdrawal.test.mjs",
+    "reuse": "Source/native-function fixtures, strict type contracts, syntax, zero-fuzz apply/reverse and independent source review remain accepted; only publication/provenance metadata changes."
+  }
+}

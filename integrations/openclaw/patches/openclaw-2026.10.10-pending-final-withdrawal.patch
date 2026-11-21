@@ -1,0 +1,229 @@
+--- a/dist/session-actor-memory-owner-C3pnd6d2.mjs
++++ b/dist/session-actor-memory-owner-C3pnd6d2.mjs
+@@ -7565,6 +7565,59 @@
+ }
+ //#endregion
+ //#region src/config/sessions/session-pending-final-settlement.ts
++
++/** Explicit host withdrawal is not a delivery receipt or proof of past non-delivery. */
++function projectPendingFinalWithdrawal(entry, input, sessionKey, agentId) {
++	const fail = () => { throw new Error("Pending final withdrawal refused: authority or custody changed"); };
++	const authorization = input.authorization;
++	const expected = authorization?.expected;
++	const digest = (value) => sha256Hex(JSON.stringify(value));
++	const hex = (value) => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
++	if (authorization?.version !== 1 || authorization.action !== "withdraw-permanently" || !hex(authorization.decisionSha256) || !expected) fail();
++	for (const key of ["entrySha256", "sessionIdSha256", "intentIdSha256", "sourceRunIdSha256", "textSha256", "toSha256", "accountIdSha256"]) if (!hex(expected[key])) fail();
++	if (typeof expected.channel !== "string" || !expected.channel.trim()) fail();
++	const scope = authorization.scope;
++	if (!scope || typeof scope.agentId !== "string" || scope.agentId !== agentId || !hex(scope.sessionKeySha256) || sha256Hex(sessionKey) !== scope.sessionKeySha256 || !hex(scope.databasePathSha256) || !hex(scope.stateDirSha256)) fail();
++	const ids = expected.deliveryIdSha256s;
++	if (!Array.isArray(ids) || ids.length < 1 || ids.length > 16 || ids.some((id) => !hex(id)) || new Set(ids).size !== ids.length) fail();
++	const pending = entry.pendingFinalDelivery;
++	if (!pending || digest(entry) !== expected.entrySha256 || sha256Hex(entry.sessionId) !== expected.sessionIdSha256 || sha256Hex(pending.intentId ?? "") !== expected.intentIdSha256 || sha256Hex(pending.sourceRunId ?? "") !== expected.sourceRunIdSha256) fail();
++	if (entry.status !== "done" || entry.abortedLastRun !== false || entry.initializationPending || entry.mainRestartRecovery || entry.restartRecoveryDeliveryRunId || entry.restartRecoveryDeliverySourceRunId || entry.pendingDeliveryNotice || entry.restartRecoveryRuns?.length) fail();
++	if (pending.kind !== "replayable" || typeof pending.text !== "string" || sha256Hex(pending.text) !== expected.textSha256 || pending.context?.channel !== expected.channel || sha256Hex(pending.context?.to ?? "") !== expected.toSha256 || sha256Hex(pending.context?.accountId ?? "") !== expected.accountIdSha256) fail();
++	const deliveries = pending.deliveries;
++	if (!Array.isArray(deliveries) || deliveries.length !== ids.length || deliveries.some((member) => typeof member.id !== "string" || member.state !== "prepared" || member.receipt !== void 0) || new Set(deliveries.map((member) => member.id)).size !== deliveries.length || !isDeepStrictEqual(deliveries.map((member) => sha256Hex(member.id)).sort(), [...ids].sort())) fail();
++	if (!Number.isSafeInteger(input.now) || input.now < pending.createdAt) fail();
++	let settled = entry;
++	for (const member of deliveries) {
++		const result = projectPendingFinalDeliveryState(settled, {
++			sessionId: entry.sessionId, intentId: pending.intentId, deliveryId: member.id,
++			state: "suppressed", expectedStates: ["prepared"]
++		});
++		if (result.state !== "suppressed" || !result.patch || result.wakeRecovery) fail();
++		settled = { ...settled, ...result.patch };
++	}
++	const patch = projectSessionEntryPatch({
++		existing: settled, writeBase: settled, sessionKey, preserveActivity: true,
++		operation: { kind: "pending-final-clear", sessionId: entry.sessionId, intentId: pending.intentId, now: input.now }
++	});
++	if (!patch || patch.pendingFinalDelivery !== void 0) fail();
++	const auditId = sha256Hex(JSON.stringify(["pending-final-withdrawal-v1", authorization.decisionSha256, expected.sessionIdSha256, expected.intentIdSha256]));
++	return {
++		patch,
++		event: {
++			type: "custom", customType: "openclaw.pending-final-withdrawal", id: auditId,
++			timestamp: new Date(input.now).toISOString(),
++			data: {
++				version: 1, disposition: "suppressed", reason: "operator-permanent-withdrawal",
++				historicalDeliveryOutcome: "unknown", authorization: structuredClone(authorization),
++				sessionId: entry.sessionId, intentId: pending.intentId, sourceRunId: pending.sourceRunId,
++				pendingSha256: digest(pending), createdAt: pending.createdAt, withdrawnAt: input.now,
++				deliveries: deliveries.map(({ id, state }) => ({ id, previousState: state, state: "suppressed" }))
++			}
++		}
++	};
++}
++
+ /** Harness claims are host-validated; ordinary sources belong to the persisted final intent. */
+ function projectPendingFinalDeliverySettlement(entry, input, evidence) {
+ 	const settlement = projectPendingFinalDeliveryState(entry, input, evidence);
+@@ -7861,6 +7914,19 @@
+ 				};
+ 				break;
+ 			}
++			if (input.withdrawal) {
++				if (input.restart || input.settlement || input.evidence || input.reducers?.length) throw new Error("Withdrawal cannot compose another delivery mutation");
++				const withdrawal = projectPendingFinalWithdrawal(entry, input.withdrawal, sessionKey, backend.agentId);
++				backend.admit("transaction", { kind: "pending-final-withdrawal", authorization: input.withdrawal.authorization });
++				const audit = backend.appendEvent({
++					sessionId: entry.sessionId, lifecycleRevision: entry.lifecycleRevision ?? null,
++					writerRunId: entry.activeWriterRunId, eventJson: JSON.stringify(withdrawal.event)
++				});
++				if (audit.appended === false) throw new Error("Withdrawal audit was not durably appended; reconcile without replay");
++				entryUpdate = { ...requireEntry(), ...withdrawal.patch };
++				result = { state: "suppressed", wakeRecovery: false, withdrawalAuditId: withdrawal.event.id };
++				break;
++			}
+ 			if (input.restart) {
+ 				const { claim, outcome, updatedAt } = input.restart;
+ 				const patch = projectRestartRecoveryDeliverySettlement(entry, claim, outcome, updatedAt);
+--- a/dist/delivery-completion-Cd30DITK.mjs
++++ b/dist/delivery-completion-Cd30DITK.mjs
+@@ -16,7 +16,8 @@
+ import { a as markConversationDeliveryRejected, c as markConversationDeliverySuppressed, i as markConversationDeliveryQueued, l as markConversationDeliveryUnknown, s as markConversationDeliverySent } from "./conversation-delivery-store-m1a4JrRv.mjs";
+ import { n as resolveDeliveryQueueStateEnv } from "./delivery-queue-state-context-DcPETq5c.mjs";
+ import "./delivery-queue-sqlite-COad9KuU.mjs";
+-import { randomUUID } from "node:crypto";
++import { randomUUID, createHash } from "node:crypto";
++import { l as findDeliveryIntentOwners } from "./delivery-queue-storage-Aqg_oq1Q.mjs";
+ //#region src/infra/outbound/delivery-placement-evidence.ts
+ /** One logical payload retains every observation before adapter/user callbacks can mutate it. */
+ function createDeliveryPlacementEvidenceRecorder() {
+@@ -72,6 +73,45 @@
+ }
+ //#endregion
+ //#region src/infra/outbound/delivery-completion.ts
++
++/** Host-only stopped-state operation. No model, sender, recovery or notice path is entered. */
++async function withdrawPendingFinalDelivery(params) {
++	const { authority } = params;
++	if (authority?.kind !== "host" || typeof authority.assertCurrent !== "function" || typeof authority.authorizeWithdrawal !== "function" || typeof authority.beginWithdrawal !== "function") throw new Error("Withdrawal requires explicit live host authority");
++	const authorization = structuredClone(params.authorization);
++	if (authorization?.version !== 1 || authorization.action !== "withdraw-permanently" || !Array.isArray(authorization.expected?.deliveryIdSha256s)) throw new Error("Unsupported withdrawal authorization");
++	const check = () => {
++		if (authority.assertCurrent() !== void 0 || authority.authorizeWithdrawal(structuredClone(authorization)) !== void 0) throw new Error("Withdrawal authority must synchronously accept or throw");
++	};
++	check();
++	const hash = value => createHash("sha256").update(value).digest("hex");
++	if (typeof params.stateDir !== "string" || authorization.scope?.agentId !== params.agentId || hash(params.sessionKey) !== authorization.scope?.sessionKeySha256 || hash(params.stateDir) !== authorization.scope?.stateDirSha256) throw new Error("Withdrawal scope differs from its authorization");
++	if (authority.beginWithdrawal(structuredClone(authorization)) !== void 0) throw new Error("Withdrawal attempt must be explicitly claimed synchronously");
++	const scope = { agentId: params.agentId, storePath: params.storePath, sessionKey: params.sessionKey, env: params.env };
++	let result;
++	await withSessionActor(scope, { assertCurrent: check, assertReadable: check }, async (actor) => {
++		if (actor.target?.database?.kind !== "file" || hash(actor.target.database.nativeLocation) !== authorization.scope.databasePathSha256 || hash(actor.target.sessionKey) !== authorization.scope.sessionKeySha256) throw new Error("Withdrawal requires the exact physical native owner");
++		const live = { assertCurrent: check, authorize: check };
++		const snapshot = await actor.read(live);
++		check();
++		if (!snapshot?.entry?.pendingFinalDelivery) throw new Error("No current pending final; inspect terminal audit without replay");
++		const ids = snapshot.entry.pendingFinalDelivery.deliveries?.map(({ id }) => id);
++		if (!ids?.length || ids.length > 16) throw new Error("Withdrawal delivery custody unavailable");
++		const owners = await findDeliveryIntentOwners(ids, params.stateDir);
++		check();
++		if (!Array.isArray(owners) || owners.length !== ids.length || owners.some((owner) => owner !== null)) throw new Error("Withdrawal refuses existing or unknown delivery ownership");
++		const outcome = await actor.deliverySettled({
++			commandId: randomUUID(), phaseId: randomUUID(), expected: snapshot.version,
++			withdrawal: { authorization, now: Date.now() }
++		}, live);
++		if (outcome.kind !== "committed") throw new SqliteWorkerError("Withdrawal not confirmed; reconcile native custody and audit without retry", outcome.kind === "unknown" ? "outcome-unknown" : "unavailable");
++		if (outcome.failure || outcome.value?.state !== "suppressed" || typeof outcome.value.withdrawalAuditId !== "string" || outcome.value.wakeRecovery !== false) throw new Error("Withdrawal terminal proof unavailable; reconcile without retry");
++		result = { state: "suppressed", auditId: outcome.value.withdrawalAuditId, historicalDeliveryOutcome: "unknown" };
++	});
++	if (!result) throw new Error("Withdrawal owner unavailable");
++	return result;
++}
++
+ function captureConversationDeliveryTarget(scope) {
+ 	return {
+ 		workerContext: captureOpenClawStateWorkerContext({ env: scope.env }),
+@@ -250,3 +290,5 @@
+ }
+ //#endregion
+ export { settleDurableDelivery as a, resolveConversationDeliveryScope as i, completeDurableDelivery as n, settlePendingFinalDelivery as o, markDurableDeliveryQueued as r, createDeliveryPlacementEvidenceRecorder as s, captureConversationDeliveryTarget as t };
++
++export { withdrawPendingFinalDelivery };
+--- a/dist/plugin-sdk/session-store-runtime.js
++++ b/dist/plugin-sdk/session-store-runtime.js
+@@ -17,3 +17,6 @@
+ import { n as updateAmbientTranscriptWatermark, t as resolveAmbientTranscriptWatermarkKey } from "../ambient-transcript-watermark-CO1tHq3w.mjs";
+ import { C as updateSessionStoreEntry, S as updateLastRouteWithAuthority, _ as readSessionUpdatedAtAsync, a as getConversationSessionAsync, b as resolveTranscriptSessionKeyBySessionId, c as listSessionEntriesAsync, d as patchSessionEntry, f as prepareSessionEntryPatch, g as readSessionUpdatedAt, h as readSessionStoreTranscriptStatsSync, i as getConversationSession, l as loadTranscriptEvents, m as readAmbientTranscriptWatermarkAsync, n as cleanupSessionLifecycleArtifacts, o as getSessionEntry, p as readAmbientTranscriptWatermark, r as deleteSessionEntry, s as listSessionEntries, t as applySessionEntryPatch, u as loadTranscriptEventsSyncLegacy, v as readTranscriptStatsAsync, w as upsertSessionEntry, x as updateLastRoute, y as resolveSessionStoreBackupPaths } from "../session-store-runtime-DrlYbn_f.mjs";
+ export { SessionStoreAgentIdRequiredError, applySessionEntryPatch, canonicalizeMainSessionAlias, cleanupSessionLifecycleArtifacts, clearSessionStoreCacheForTest, deleteSessionEntry, deliveryContextFromSession, evaluateSessionFreshness, formatSqliteSessionFileMarker, getConversationSession, getConversationSessionAsync, getSessionEntry, getSessionEntryAsync, getSessionEntryByIdAsync, isValidAgentHarnessSessionStoreEntry, listSessionEntries, listSessionEntriesAsync, loadTranscriptEvents, loadTranscriptEventsSyncLegacy as loadTranscriptEventsSync, normalizeSessionDeliveryState, parseSqliteSessionFileMarker, patchSessionEntry, prepareSessionEntryPatch, projectSessionDeliveryFields, readAmbientTranscriptWatermark, readAmbientTranscriptWatermarkAsync, readRecentUserAssistantTextForSession, readSessionUpdatedAt, readSessionUpdatedAtAsync, readTranscriptStatsAsync, readSessionStoreTranscriptStatsSync as readTranscriptStatsSync, recordInboundSessionMeta as recordSessionMetaFromInbound, resolveAmbientTranscriptWatermarkKey, resolveChannelResetConfig, resolveGroupSessionKey, resolveSendPolicy, resolveSessionKey, resolveSessionResetPolicy, resolveSessionResetType, resolveSessionStoreBackupPaths, resolveSessionStorePathCore as resolveStorePath, resolveThreadFlag, resolveTranscriptSessionKeyBySessionId, resolveSessionKeyBySessionIdAsync as resolveTranscriptSessionKeyBySessionIdAsync, rethrowIncognitoSessionError, sessionDeliveryChannel, sessionDeliveryOrigin, sessionDeliveryRoute, sqliteSessionFileMarkerMatchesSession, updateAmbientTranscriptWatermark, updateLastRoute, updateLastRouteWithAuthority, updateSessionStoreEntry, upsertSessionEntry };
++
++// Version-coupled native host maintenance; never registered as an agent tool.
++export { withdrawPendingFinalDelivery } from "../delivery-completion-Cd30DITK.mjs";
+--- a/dist/plugin-sdk/session-store-runtime.d.ts
++++ b/dist/plugin-sdk/session-store-runtime.d.ts
+@@ -1,3 +1,37 @@
+ import { C as SessionScope } from "../types.base-6bKsSmWG.js";
+ import { $v as readRecentUserAssistantTextForSession, Av as readSessionUpdatedAt, Bv as isValidAgentHarnessSessionStoreEntry, By as resolveChannelResetConfig, Cv as loadTranscriptEvents, DA as SessionStoreAgentIdRequiredError, Dv as readAmbientTranscriptWatermark, Ek as PreparedSessionSourceAssertion, Ev as prepareSessionEntryPatch, Fv as updateLastRoute, Fy as getSessionEntryByIdAsync, Gv as formatSqliteSessionFileMarker, Gy as resolveSessionResetPolicy, Hy as resolveThreadFlag, Iv as updateLastRouteWithAuthority, Iy as SessionEntryPatchAuthority, Jv as deliveryContextFromSession, Kv as parseSqliteSessionFileMarker, Ky as canonicalizeMainSessionAlias, Lv as updateSessionStoreEntry, Ly as AmbientTranscriptWatermarkScope, Mv as readTranscriptStatsAsync, Nv as resolveSessionStoreBackupPaths, OA as resolveSessionStorePathCore, Ov as readAmbientTranscriptWatermarkAsync, Pb as SessionRecentConversationText, Pv as resolveTranscriptSessionKeyBySessionId, Py as getSessionEntryAsync, Qv as rethrowIncognitoSessionError, Rv as upsertSessionEntry, Ry as resolveAmbientTranscriptWatermarkKey, Sv as listSessionEntriesAsync, Tv as patchSessionEntry, Uv as resolveSessionKey, Vv as clearSessionStoreCacheForTest, Vy as resolveSessionResetType, Wv as SqliteSessionFileMarker, Wy as evaluateSessionFreshness, Xv as sessionDeliveryOrigin, Yv as sessionDeliveryChannel, Zv as sessionDeliveryRoute, _v as deleteSessionEntry, _w as projectSessionDeliveryFields, bv as getSessionEntry, dv as recordInboundSessionMeta, fv as ApplySessionEntryPatchParams, gv as cleanupSessionLifecycleArtifacts, gw as normalizeSessionDeliveryState, hv as applySessionEntryPatch, jv as readSessionUpdatedAtAsync, kv as readSessionStoreTranscriptStatsSync, mE as resolveSessionKeyBySessionIdAsync, mv as SessionStoreTranscriptEvent, n as SessionEntry, pv as PrepareSessionEntryPatchParams, qv as sqliteSessionFileMarkerMatchesSession, qy as resolveGroupSessionKey, vv as getConversationSession, wv as loadTranscriptEventsSyncLegacy, xv as listSessionEntries, yv as getConversationSessionAsync, zv as resolveSendPolicy, zy as updateAmbientTranscriptWatermark } from "../config-contracts-CaROPwlH.js";
+-export { type AmbientTranscriptWatermarkScope, ApplySessionEntryPatchParams, PrepareSessionEntryPatchParams, type SessionEntry, type SessionEntryPatchAuthority, type PreparedSessionSourceAssertion as SessionEntrySourceAuthority, type SessionRecentConversationText, type SessionScope, SessionStoreAgentIdRequiredError, SessionStoreTranscriptEvent, type SqliteSessionFileMarker, applySessionEntryPatch, canonicalizeMainSessionAlias, cleanupSessionLifecycleArtifacts, clearSessionStoreCacheForTest, deleteSessionEntry, deliveryContextFromSession, evaluateSessionFreshness, formatSqliteSessionFileMarker, getConversationSession, getConversationSessionAsync, getSessionEntry, getSessionEntryAsync, getSessionEntryByIdAsync, isValidAgentHarnessSessionStoreEntry, listSessionEntries, listSessionEntriesAsync, loadTranscriptEvents, loadTranscriptEventsSyncLegacy as loadTranscriptEventsSync, normalizeSessionDeliveryState, parseSqliteSessionFileMarker, patchSessionEntry, prepareSessionEntryPatch, projectSessionDeliveryFields, readAmbientTranscriptWatermark, readAmbientTranscriptWatermarkAsync, readRecentUserAssistantTextForSession, readSessionUpdatedAt, readSessionUpdatedAtAsync, readTranscriptStatsAsync, readSessionStoreTranscriptStatsSync as readTranscriptStatsSync, recordInboundSessionMeta as recordSessionMetaFromInbound, resolveAmbientTranscriptWatermarkKey, resolveChannelResetConfig, resolveGroupSessionKey, resolveSendPolicy, resolveSessionKey, resolveSessionResetPolicy, resolveSessionResetType, resolveSessionStoreBackupPaths, resolveSessionStorePathCore as resolveStorePath, resolveThreadFlag, resolveTranscriptSessionKeyBySessionId, resolveSessionKeyBySessionIdAsync as resolveTranscriptSessionKeyBySessionIdAsync, rethrowIncognitoSessionError, sessionDeliveryChannel, sessionDeliveryOrigin, sessionDeliveryRoute, sqliteSessionFileMarkerMatchesSession, updateAmbientTranscriptWatermark, updateLastRoute, updateLastRouteWithAuthority, updateSessionStoreEntry, upsertSessionEntry };
+\ No newline at end of file
++export { type AmbientTranscriptWatermarkScope, ApplySessionEntryPatchParams, PrepareSessionEntryPatchParams, type SessionEntry, type SessionEntryPatchAuthority, type PreparedSessionSourceAssertion as SessionEntrySourceAuthority, type SessionRecentConversationText, type SessionScope, SessionStoreAgentIdRequiredError, SessionStoreTranscriptEvent, type SqliteSessionFileMarker, applySessionEntryPatch, canonicalizeMainSessionAlias, cleanupSessionLifecycleArtifacts, clearSessionStoreCacheForTest, deleteSessionEntry, deliveryContextFromSession, evaluateSessionFreshness, formatSqliteSessionFileMarker, getConversationSession, getConversationSessionAsync, getSessionEntry, getSessionEntryAsync, getSessionEntryByIdAsync, isValidAgentHarnessSessionStoreEntry, listSessionEntries, listSessionEntriesAsync, loadTranscriptEvents, loadTranscriptEventsSyncLegacy as loadTranscriptEventsSync, normalizeSessionDeliveryState, parseSqliteSessionFileMarker, patchSessionEntry, prepareSessionEntryPatch, projectSessionDeliveryFields, readAmbientTranscriptWatermark, readAmbientTranscriptWatermarkAsync, readRecentUserAssistantTextForSession, readSessionUpdatedAt, readSessionUpdatedAtAsync, readTranscriptStatsAsync, readSessionStoreTranscriptStatsSync as readTranscriptStatsSync, recordInboundSessionMeta as recordSessionMetaFromInbound, resolveAmbientTranscriptWatermarkKey, resolveChannelResetConfig, resolveGroupSessionKey, resolveSendPolicy, resolveSessionKey, resolveSessionResetPolicy, resolveSessionResetType, resolveSessionStoreBackupPaths, resolveSessionStorePathCore as resolveStorePath, resolveThreadFlag, resolveTranscriptSessionKeyBySessionId, resolveSessionKeyBySessionIdAsync as resolveTranscriptSessionKeyBySessionIdAsync, rethrowIncognitoSessionError, sessionDeliveryChannel, sessionDeliveryOrigin, sessionDeliveryRoute, sqliteSessionFileMarkerMatchesSession, updateAmbientTranscriptWatermark, updateLastRoute, updateLastRouteWithAuthority, updateSessionStoreEntry, upsertSessionEntry };
++/** Version-coupled operator withdrawal; no receipt or past non-delivery claim. */
++export type PendingFinalWithdrawalAuthorization = {
++  version: 1;
++  action: "withdraw-permanently";
++  decisionSha256: string;
++  scope: { agentId: string; sessionKeySha256: string; databasePathSha256: string; stateDirSha256: string };
++  expected: {
++    entrySha256: string;
++    sessionIdSha256: string;
++    intentIdSha256: string;
++    sourceRunIdSha256: string;
++    textSha256: string;
++    channel: string;
++    toSha256: string;
++    accountIdSha256: string;
++    deliveryIdSha256s: string[];
++  };
++};
++/** Requires an exclusively stopped writer/channel fence throughout the call. */
++export declare function withdrawPendingFinalDelivery(params: {
++  agentId: string;
++  sessionKey: string;
++  storePath: string;
++  stateDir: string;
++  env?: NodeJS.ProcessEnv;
++  authorization: PendingFinalWithdrawalAuthorization;
++  authority: {
++    kind: "host";
++    assertCurrent(): void;
++    authorizeWithdrawal(authorization: PendingFinalWithdrawalAuthorization): void;
++    /** One-use claim before native acquisition; repeated/unknown attempts must reject. */
++    beginWithdrawal(authorization: PendingFinalWithdrawalAuthorization): void;
++  };
++}): Promise<{ state: "suppressed"; auditId: string; historicalDeliveryOutcome: "unknown" }>;
+--- a/dist/config-contracts-CaROPwlH.d.ts
++++ b/dist/config-contracts-CaROPwlH.d.ts
+@@ -22942,11 +22942,21 @@
+     updatedAt: number;
+   };
+   deliverySettled: {
++    withdrawal: {
++      authorization: import("./plugin-sdk/session-store-runtime.js").PendingFinalWithdrawalAuthorization;
++      now: number;
++    };
++    settlement?: never;
++    evidence?: never;
++    restart?: never;
++  } | {
++    withdrawal?: never;
+     settlement: PendingFinalDeliverySettlementInput;
+     evidence?: SessionActorDeliveryEvidence;
+     restart?: never;
+   } | {
+     settlement?: never;
++    withdrawal?: never;
+     restart: {
+       claim: RestartRecoveryTerminalDeliveryClaim;
+       outcome: "confirmed" | "not-sent";
+@@ -22981,6 +22991,7 @@
+   deliverySettled: {
+     state: PendingFinalDeliverySettlementInput["state"] | "stale";
+     wakeRecovery: boolean;
++    withdrawalAuditId?: string;
+   } | {
+     disposition: "recorded" | "cleared" | "stale";
+   };
