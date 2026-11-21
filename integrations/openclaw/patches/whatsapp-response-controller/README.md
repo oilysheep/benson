@@ -4,7 +4,10 @@ This is an upstream WhatsApp Plugin patch, not an OpenClaw core/SDK patch or an
 unchanged supported extension. The pinned2026.10.10 adaptation is approved for
 the bounded TS05 deployment. Jessica status and Reminder list passed real WhatsApp E2E on2026-11-09; the Gateway is stopped and any new activation needs approval (Plan §11.64).
 
-## Complete patch inventory
+## Scoped plugin patch inventory
+
+The canonical cross-version Core/Plugin registry and current installation status
+are in [Plan §8](../../../../BENSON_DECISION_ROUTING_IMPLEMENTATION_PLAN.md#8-core-modification-inventory-and-legacy-disposition). This README owns only the plugin contracts below.
 
 | Surface | Exact inventory / responsibility |
 | --- | --- |
