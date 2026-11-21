@@ -1,0 +1,84 @@
+--- a/dist/server-channels-BQ5HaSAC.mjs
++++ b/dist/server-channels-BQ5HaSAC.mjs
+@@ -11,7 +11,7 @@
+ import { d as runPluginCleanup, n as getPluginInstance, o as getPluginValueInstance } from "./plugin-instance-scope-BoTOTPL4.mjs";
+ import { t as settlesWithin } from "./settle-within-DLEx44ea.mjs";
+ import { o as listLoadedChannelPluginsForRegistry, r as getLoadedChannelPluginEntryById } from "./registry-loaded-BqhugwOe.mjs";
+-import { S as runOutsideGatewayRootWorkAdmission } from "./gateway-work-admission-kHo3f3-G.mjs";
++import { S as runOutsideGatewayRootWorkAdmission, p as isGatewayRestartDraining, l as getGatewayRestartDrainSignal, t as GatewayDrainingError } from "./gateway-work-admission-kHo3f3-G.mjs";
+ import { _ as setActiveCredentialDegradedOwner, o as clearActiveCredentialDegradedOwner, r as assertSecretOwnerAvailable } from "./runtime-degraded-state-SptB0g_t.mjs";
+ import "./backoff-N5Hi0doU.mjs";
+ import { t as runOutsidePluginRuntimeGenerationScope } from "./generation-scope-DWIL7tGf.mjs";
+@@ -329,6 +329,7 @@
+ const CHANNEL_STARTUP_CONCURRENCY = 4;
+ const CHANNEL_APPROVAL_GATEWAY_RUNTIME_CONTEXT_CAPABILITY = "approval.gateway";
+ function createChannelManager(opts) {
++	const isClosing = () => opts.isClosing?.() === true || isGatewayRestartDraining();
+ 	const { getRuntimeConfig, channelLogs, channelRuntimeEnvs, channelRuntime, resolveChannelRuntime, getPluginRegistry, startupTrace } = opts;
+ 	const withRegistry = (run) => {
+ 		const registry = getPluginRegistry();
+@@ -464,6 +465,7 @@
+ 		const store = getStore(channelId);
+ 		const registration = getLoadedChannelPluginEntryById(channelId, registry);
+ 		const assertStartCurrent = () => {
++			if (isClosing()) throw new GatewayDrainingError();
+ 			if (store.startFence?.state === "paused" || getLoadedChannelPluginEntryById(channelId, getPluginRegistry())?.plugin !== registration?.plugin) throw new Error("Channel plugins are reloading; retry the start after reload completes.");
+ 		};
+ 		assertStartCurrent();
+@@ -569,7 +571,7 @@
+ 				const routeHandoff = store.routeHandoffs.get(id);
+ 				const lifetime = createChannelAccountLifetime(plugin, registry, opts.scheduler);
+ 				const { abort, capabilityLease, scheduler } = lifetime;
+-				const startCancelled = () => abort.signal.aborted || manuallyStopped.has(rKey) || opts.isClosing?.();
++				const startCancelled = () => abort.signal.aborted || manuallyStopped.has(rKey) || isClosing();
+ 				store.lifetimes.set(id, lifetime);
+ 				let handedOffTask = false;
+ 				const log = ensureChannelLog(channelId);
+@@ -724,7 +726,8 @@
+ 						reconnectAttempts: preserveRestartAttempts ? restarts.get(rKey)?.attempts ?? 0 : 0
+ 					});
+ 					const task = Promise.resolve().then(async () => {
+-						if (optsValue.deferAccountStartUntil) await waitForDeferredAccountStart(optsValue.deferAccountStartUntil, abort.signal);
++						const deferAccountStartUntil = opts.deferStartupAccountStartsUntil ?? optsValue.deferAccountStartUntil;
++						if (deferAccountStartUntil) await waitForDeferredAccountStart(deferAccountStartUntil, AbortSignal.any([abort.signal, getGatewayRestartDrainSignal()]));
+ 						else if (startupTrace) await waitForChannelStartupHandoff();
+ 						if (startCancelled()) return;
+ 						const gatewayApprovalRuntime = opts.getNativeApprovalRuntime?.();
+@@ -783,16 +786,16 @@
+ 						setRuntime(channelId, id, { lastError: message });
+ 						log.error?.(`[${id}] ${message}`);
+ 					}).catch((err) => {
+-						if (!isCurrentTask() || store.stops.has(id) || opts.isClosing?.()) return;
++						if (!isCurrentTask() || store.stops.has(id) || isClosing()) return;
+ 						const failure = channelStartFailurePatch(err);
+ 						setRuntime(channelId, id, failure);
+ 						log.error?.(`[${id}] channel exited: ${failure.lastError}`);
+ 					}).then(async () => {
+ 						await cleanupTaskScopedApprovalRuntime("channel cleanup failed");
+-						if (!isCurrentTask() || store.stops.has(id) || opts.isClosing?.()) return;
++						if (!isCurrentTask() || store.stops.has(id) || isClosing()) return;
+ 						setStoppedRuntime(channelId, id, { lastStopAt: Date.now() });
+ 					}).then(async () => {
+-						if (!isCurrentTask() || store.stops.has(id) || opts.isClosing?.()) return;
++						if (!isCurrentTask() || store.stops.has(id) || isClosing()) return;
+ 						if (manuallyStopped.has(rKey)) {
+ 							clearRecoveryState(rKey);
+ 							return;
+@@ -837,7 +840,7 @@
+ 						pendingAutoRestarts.add(rKey);
+ 						try {
+ 							await sleepWithAbort(retry.delayMs, retry.signal);
+-							if (manuallyStopped.has(rKey) || opts.isClosing?.()) return;
++							if (manuallyStopped.has(rKey) || isClosing()) return;
+ 							releaseTask();
+ 							await startChannelInternal(channelId, id, {
+ 								reason: "auto-restart",
+@@ -1097,7 +1100,7 @@
+ 		},
+ 		tryRecover: opts.tryRecoverAutostartSuppression,
+ 		signal: opts.scheduler.signal,
+-		isClosing: opts.isClosing,
++		isClosing,
+ 		startChannels: () => startChannelsWithOptions({
+ 			reason: "autostart-recovery",
+ 			preserveManualStop: true
