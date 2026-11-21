@@ -239,3 +239,16 @@ test('credential save diagnostics preserve native queue and publication semantic
   assert(plain(result.artifact)); assert.equal(result.artifact.targets, 4); assert.equal(result.artifact.exactRollback, true);
   console.log(JSON.stringify(result));
 });
+
+
+test('one-use WhatsApp profile stops before retry and prevents native supervisor restart', { timeout: 190_000 }, () => {
+  const result = runIsolatedFixture('whatsapp-response-delivery', false, false, false, false, 'connection-no-retry');
+  assert(plain(result)); assert.equal(result.probe, 'PASS'); assert.equal(result.noRetryOnly, true);
+  assert(Array.isArray(result.cases)); assert.equal(result.cases.length, 4);
+  for (const item of result.cases) {
+    assert(plain(item)); assert.equal(item.probe, 'PASS'); assert.equal(item.constructors, 1);
+    assert.equal(item.retryWaits, 0); assert.equal(item.supervisorRestartSkipped, true);
+    assert.equal(item.terminalDisconnect, true);
+  }
+  console.log(JSON.stringify(result));
+});
