@@ -92,7 +92,7 @@
  //#region src/infra/outbound/delivery-placement-evidence.ts
  /** One logical payload retains every observation before adapter/user callbacks can mutate it. */
  function createDeliveryPlacementEvidenceRecorder() {
-@@ -72,6 +73,45 @@
+@@ -72,6 +73,63 @@
  }
  //#endregion
  //#region src/infra/outbound/delivery-completion.ts
@@ -127,7 +127,25 @@
 +			commandId: randomUUID(), phaseId: randomUUID(), expected: snapshot.version,
 +			withdrawal: { authorization, now: Date.now() }
 +		}, live);
-+		if (outcome.kind !== "committed") throw new SqliteWorkerError("Withdrawal not confirmed; reconcile native custody and audit without retry", outcome.kind === "unknown" ? "outcome-unknown" : "unavailable");
++		if (outcome.kind !== "committed") {
++			// Retained host evidence is a closed vocabulary, never raw native error facts.
++			const kind = ["rolled-back", "stale-version", "unknown"].includes(outcome.kind) ? outcome.kind : "unrecognized";
++			const errorName = outcome.error === void 0 ? "absent" : ["Error", "TypeError", "RangeError", "AssertionError", "SqliteWorkerError", "SessionActorStaleStateError", "SessionActorReadInvalidatedError"].includes(outcome.error?.name) ? outcome.error.name : "unrecognized";
++			const reason = outcome.error === void 0 ? "absent" : new Map([
++				["Pending final withdrawal refused: authority or custody changed", "withdrawal-authority-or-custody-changed"],
++				["Withdrawal audit was not durably appended; reconcile without replay", "withdrawal-audit-not-appended"],
++				["Session actor admission belongs to another target", "actor-admission-target-mismatch"],
++				["Session actor command omitted its admission evidence", "actor-admission-evidence-missing"],
++				["Session actor authority expired", "actor-authority-expired"],
++				["Session actor requires reconciliation before another command", "actor-reconciliation-required"],
++				["Session actor transferred more than one outcome", "actor-multiple-outcomes"],
++				["Unconfirmed actor settlement", "actor-settlement-unconfirmed"],
++				["Actor command omitted native settlement", "actor-settlement-missing"],
++				["Session actor operation failed", "actor-operation-failed"],
++				["Withdrawal grant expired", "withdrawal-grant-expired"]
++			]).get(outcome.error?.message) ?? "unrecognized";
++			throw new SqliteWorkerError(`Withdrawal not confirmed; reconcile native custody and audit without retry; evidence=${JSON.stringify({ kind, errorName, reason })}`, outcome.kind === "unknown" ? "outcome-unknown" : "unavailable");
++		}
 +		if (outcome.failure || outcome.value?.state !== "suppressed" || typeof outcome.value.withdrawalAuditId !== "string" || outcome.value.wakeRecovery !== false) throw new Error("Withdrawal terminal proof unavailable; reconcile without retry");
 +		result = { state: "suppressed", auditId: outcome.value.withdrawalAuditId, historicalDeliveryOutcome: "unknown" };
 +	});
@@ -138,7 +156,7 @@
  function captureConversationDeliveryTarget(scope) {
  	return {
  		workerContext: captureOpenClawStateWorkerContext({ env: scope.env }),
-@@ -250,3 +290,5 @@
+@@ -250,3 +308,5 @@
  }
  //#endregion
  export { settleDurableDelivery as a, resolveConversationDeliveryScope as i, completeDurableDelivery as n, settlePendingFinalDelivery as o, markDurableDeliveryQueued as r, createDeliveryPlacementEvidenceRecorder as s, captureConversationDeliveryTarget as t };

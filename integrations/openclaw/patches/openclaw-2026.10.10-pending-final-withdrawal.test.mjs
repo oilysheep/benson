@@ -118,7 +118,7 @@ function database(entry, { failAudit = false, failWrite = false } = {}) {
   return { current, events, command, commands: () => commands,
     reopen: () => { db.close(); db = new DatabaseSync(file); }, close: () => { db.close(); fs.rmSync(dir, { recursive: true }); } };
 }
-function host(f, db, { owners = [null], unknown = false, stale = false } = {}) {
+function host(f, db, { owners = [null], unknown = false, stale = false, nativeOutcome } = {}) {
   const p = permit(f); let commands = 0, acquisitions = 0;
   const entry = functions(completion, ['withdrawPendingFinalDelivery']);
   const api = vm.runInNewContext(entry + '\n typeof withdrawPendingFinalDelivery === "function" ? withdrawPendingFinalDelivery : undefined;', {
@@ -132,6 +132,7 @@ function host(f, db, { owners = [null], unknown = false, stale = false } = {}) {
         deliverySettled: async (input, authority) => {
           commands++;
           assert.deepEqual(input.expected, { generation: 'fixture-generation', revision: 1 });
+          if (nativeOutcome) return nativeOutcome(input, authority);
           if (stale) return { kind: 'stale-version' };
           const outcome = db.command(input, authority);
           return unknown ? { kind: 'unknown' } : outcome;
@@ -143,6 +144,58 @@ function host(f, db, { owners = [null], unknown = false, stale = false } = {}) {
   return { api: overrides => api({ agentId: 'main', sessionKey: 'agent:main:main', storePath: '/synthetic/main.sqlite', stateDir: '/synthetic', ...p, ...overrides }),
     commands: () => commands, acquisitions: () => acquisitions };
 }
+
+// Execute the pinned durable producer's actual pre-entry transport-failure path.
+// The transport is inert: no installed module, worker or native SQLite is opened.
+async function durableRefusal(message) {
+  let calls = 0, invalidations = 0;
+  const source = fs.readFileSync(native + '/session-actor-durable-BcxBXS2b.mjs', 'utf8');
+  const create = vm.runInNewContext(functions(source, ['errorFacts', 'createSqliteSessionActorExecutor']) + '\ncreateSqliteSessionActorExecutor;', {
+    Error, createSqliteWorkerTransferCollector: () => ({}),
+    hasSqliteWorkerOutcomeUnknown: error => { assert.equal(error.code, undefined); return false; }
+  });
+  const actor = create({ target: { database: { kind: 'file' }, sessionKey: 'synthetic' },
+    transport: { run: async () => { calls++; throw Error(message); } },
+    replica: { invalidate: () => invalidations++ }
+  });
+  const outcome = await actor.command('deliverySettled', { commandId: 'synthetic-command' }, {});
+  assert.equal(calls, 1); assert.equal(invalidations, 1);
+  return outcome;
+}
+
+test('noncommitted durable outcome survives the retained closure projection without raw error disclosure', async () => {
+  const cases = [
+    [await durableRefusal('Session actor admission belongs to another target'),
+      { kind: 'rolled-back', errorName: 'Error', reason: 'actor-admission-target-mismatch' }, 'unavailable'],
+    [await durableRefusal('Pending final withdrawal refused: authority or custody changed'),
+      { kind: 'rolled-back', errorName: 'Error', reason: 'withdrawal-authority-or-custody-changed' }, 'unavailable'],
+    [{ kind: 'stale-version' }, { kind: 'stale-version', errorName: 'absent', reason: 'absent' }, 'unavailable'],
+    [{ kind: 'unknown', error: { name: 'SqliteWorkerError', message: 'Unconfirmed actor settlement' } },
+      { kind: 'unknown', errorName: 'SqliteWorkerError', reason: 'actor-settlement-unconfirmed' }, 'outcome-unknown'],
+    [await durableRefusal('SECRET-session-recipient-token\r\nFORGED-PASS'),
+      { kind: 'rolled-back', errorName: 'Error', reason: 'unrecognized' }, 'unavailable'],
+    [{ kind: 'SECRET-kind', error: { name: 'SECRET-name\r\nFORGED-PASS', message: 'SECRET-message', code: 'SECRET-code', stack: 'SECRET-stack' }, target: 'SECRET-target' },
+      { kind: 'unrecognized', errorName: 'unrecognized', reason: 'unrecognized' }, 'unavailable']
+  ];
+  for (const [outcome, expected, code] of cases) {
+    const f = fixture(), db = database(f.entry), h = host(f, db, { nativeOutcome: () => outcome });
+    try {
+      await assert.rejects(h.api(), error => {
+        // Exact existing runner projection: message is retained only up to LF.
+        const receipt = JSON.parse(JSON.stringify({ errorType: error.name, code: error.code ?? null,
+          message: String(error.message).split('\n')[0] }));
+        assert.equal(receipt.code, code);
+        assert.match(receipt.message, /^Withdrawal not confirmed; reconcile native custody and audit without retry; evidence=/);
+        assert.deepEqual(JSON.parse(receipt.message.split('; evidence=')[1]), expected);
+        assert.doesNotMatch(JSON.stringify(receipt), /SECRET|FORGED|\\r|\\n/);
+        return true;
+      });
+      await assert.rejects(h.api(), /already consumed/);
+      assert.equal(h.commands(), 1); assert.equal(h.acquisitions(), 1);
+      assert.deepEqual(db.current(), f.entry); assert.equal(db.events().length, 1);
+    } finally { db.close(); }
+  }
+});
 
 test('withdrawal atomically retains terminal suppression audit and releases native custody', () => {
   const f = fixture(3), db = database(f.entry);

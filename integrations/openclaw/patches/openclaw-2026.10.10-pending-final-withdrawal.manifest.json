@@ -5,7 +5,7 @@
   "version": "2026.10.10",
   "bensonBaseCommit": "6f8567f1b7125e08b356530e7f5dde88dd50bce5",
   "artifact": "openclaw-2026.10.10-pending-final-withdrawal.patch",
-  "artifactSha256": "9f0c026a8646a02bac83659ddeffb40a18069726429e442ce784fd68a26f769c",
+  "artifactSha256": "cee85347e575a8abacaf1e759783dda59309365bb4f03fa152d06ca789d34705",
   "files": [
     {
       "path": "dist/session-actor-memory-owner-C3pnd6d2.mjs",
@@ -16,7 +16,7 @@
     {
       "path": "dist/delivery-completion-Cd30DITK.mjs",
       "beforeSha256": "9d646d3ebbeeea9b0f0a40e89e51e26cb97a443322660a3368da55488200d023",
-      "afterSha256": "a9ea1c9218d82bdba0fc869bde3c3e0f2788f50a87ab7f0c931e077ed453d67c",
+      "afterSha256": "81c276aa5ac8c09e1c94f46e994c3a3b4b0c5d6562824dbc51c1cb76e1be09f1",
       "mode": "664"
     },
     {
@@ -66,11 +66,19 @@
     {
       "url": "https://docs.openclaw.ai/concepts/messages",
       "finding": "Message lifecycle and delivery are separate; an operator withdrawal must not fabricate delivery confirmation."
+    },
+    {
+      "url": "https://nodejs.org/api/errors.html",
+      "finding": "Preserve native stable worker error codes. Exact reason classification is version/hash coupled; unknown values remain unrecognized."
+    },
+    {
+      "url": "https://cheatsheetseries.owasp.org/cheatsheets/Logging_Cheat_Sheet.html",
+      "finding": "Closed diagnostic labels exclude raw error/session/secret data and CR/LF injection; use existing retained capture."
     }
   ],
   "evidenceOwner": ".checkpoints/domain-run-g1b-g2-20261109/pending-final-withdrawal-20261121-VJNh1z",
   "evidenceLevel": "Source/native-function and synthetic SQLite fixture only. Not installed/native-store, channel or live acceptance.",
-  "acceptance": "Normal Cancellation idleness gate is byte-identical. Prior CLOSED / NOT_EXERCISED and Recovery PASS remain. Withdrawal, current custody, native audit persistence and resumed idleness require separately approved stopped operation.",
+  "acceptance": "Normal Cancellation idleness gate is unchanged. Prior CLOSED / NOT_EXERCISED and Recovery PASS remain; the 2026-11-22 stopped operation was CLOSED / INCOMPLETE with one native call, no suppression audit, pending Main custody and verified code restoration. No retry or native settlement acceptance. Fresh publication/provenance and separately approved stopped operation are required.",
   "validation": {
     "sourceReview": {
       "path": ".checkpoints/domain-run-g1b-g2-20261109/pending-final-withdrawal-20261121-VJNh1z/independent-review.json",
@@ -98,6 +106,21 @@
     },
     "fixtureRequirements": "Run the published test only with the retained hash-pinned preparation owner at its referenced path, the exact2026.10.10 native source/dependency preimages, and BENSON_WITHDRAWAL_CANDIDATE pointing to a verified isolated patch afterimage directory. The test reads pinned native function source with inert dependencies; it must not import installed SDK modules or open native state. This is a retained-host acceptance fixture, not a self-contained fresh-clone CI test.",
     "command": "BENSON_WITHDRAWAL_CANDIDATE=<verified-isolated-candidate> node --test --test-isolation=none --test-reporter=tap integrations/openclaw/patches/openclaw-2026.10.10-pending-final-withdrawal.test.mjs",
-    "reuse": "Source/native-function fixtures, strict type contracts, syntax, zero-fuzz apply/reverse and independent source review remain accepted; only publication/provenance metadata changes."
+    "reuse": "Original six unaffected native reducer/atomicity/authority cases, strict SDK types and prior base review remain accepted. The correction adds one six-variant regression and reruns only four affected facade tests. Exact five-file artifact apply/reverse and protected/installed preimages requalified. The prior review does not cover this correction.",
+    "outcomeEvidenceCorrection": {
+      "owner": ".checkpoints/domain-run-g1b-g2-20261109/withdrawal-outcome-evidence-20261122-4wD3uo",
+      "scope": "Existing withdrawal facade non-committed error classification only; worker codes unchanged. Closed JSON kind/errorName/reason in existing first-line error capture; absent and unrecognized facts are explicit. No raw error facts or new public schema.",
+      "validation": {
+        "path": ".checkpoints/domain-run-g1b-g2-20261109/withdrawal-outcome-evidence-20261122-4wD3uo/validation.json",
+        "sha256": "d1956c689b9e9cde80136ca5f1a0ce8f0e7040cf446c36ca8a6bdf1aef2953ef"
+      },
+      "decision": {
+        "path": ".checkpoints/domain-run-g1b-g2-20261109/withdrawal-outcome-evidence-20261122-4wD3uo/decision.md",
+        "sha256": "53b7b915f238d794992517cd93929af1831fd273021432bac6670f7ef47816e3"
+      },
+      "independentReview": ".checkpoints/domain-run-g1b-g2-20261109/withdrawal-outcome-evidence-20261122-4wD3uo/independent-review.json",
+      "sourceAcceptance": ".checkpoints/domain-run-g1b-g2-20261109/withdrawal-outcome-evidence-20261122-4wD3uo/source-acceptance.json",
+      "publication": "Source-only; independent acceptance required before publication preparation; no installation or operational authority."
+    }
   }
 }
