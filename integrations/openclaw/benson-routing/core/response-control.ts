@@ -301,11 +301,20 @@ function controlV3(response: DomainResponse, options: ResponseOptions | DomainRe
   return fail('response_mode_unavailable');
 }
 export function controlReadResponse<A extends Admission>(raw: unknown, options: ReadResponseOptions<A>): ReadResponse {
+  if (options?.admission?.schemaVersion === 5) fail('read_response_action_forbidden');
+  return controlNoRunResponse(raw, options);
+}
+/** Preparation only. This creates neither a delivery grant nor a child Run. */
+export function controlActionResponse<A extends Admission>(raw: unknown, options: ReadResponseOptions<A>): ReadResponse {
+  if (options?.admission?.schemaVersion !== 5) fail('action_response_admission_required');
+  return controlNoRunResponse(raw, options);
+}
+function controlNoRunResponse<A extends Admission>(raw: unknown, options: ReadResponseOptions<A>): ReadResponse {
   if (typeof options?.controller?.validateOutcome !== 'function' || typeof options.controller.assertCurrent !== 'function' ||
     typeof options.renderOutcome !== 'function') fail('read_response_dependencies_unavailable');
   const { controller, admission, renderOutcome } = options;
   const outcome = synchronous(controller.validateOutcome(admission, raw), 'read_response_validator_must_be_synchronous');
-  assertNoRunObservation(outcome, admission);
+  if (admission.schemaVersion !== 5) assertNoRunObservation(outcome, admission);
   if (outcome.disposition === 'suppressed' || outcome.disposition === 'reasoning-required') {
     assertion(controller.assertCurrent(admission), 'source_authority_must_be_synchronous');
     return freeze({ mode: 'suppressed', outcome, rendered: null });

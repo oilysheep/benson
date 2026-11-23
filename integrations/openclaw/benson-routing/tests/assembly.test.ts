@@ -9,12 +9,16 @@ import { loadCanonicalIdentityContract } from '../../plugins/benson-reminder-too
 import { REMINDER_SERVICE_PATH } from '../../plugins/benson-reminder-tool/src/runner.js';
 import { existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import { resolve } from 'node:path';
-import { createCurrentRequestContext } from '../core/conversation-context.js';
+import { createCurrentRequestContext, ingressInputId, ingressTextHash } from '../core/conversation-context.js';
 import { normalizeToolParameterSchema } from '@openclaw/ai/internal/tool-schema';
 import Value from 'typebox/value';
 import { JESSICA_TASK_ENTRY_SCHEMA } from '../../../../agents/jessica-vacuum/lib/task.js';
 import { REMINDER_TASK_ENTRY_SCHEMA } from '../../../../agents/reminder-service/lib/task.js';
 import { createTaskEnvelope, createPendingTaskEnvelope } from '../core/task-envelope.js';
+import { createJessicaTaskToolFactory } from '../../plugins/benson-jessica-tool/src/tool.js';
+import { createJessicaExecutor } from '../../../../agents/jessica-vacuum/lib/executor.js';
+import { loadPolicy } from '../../../../agents/jessica-vacuum/lib/policy.js';
+import { fixture as deviceFixture } from '../../plugins/benson-jessica-tool/tests/fixtures/domain-state.js';
 
 test('native parameter normalization preserves both Task versions and the deterministic read branches', () => {
   for (const [schema, operation, domain] of [
@@ -67,7 +71,7 @@ test('emitted Reminder runner reaches the canonical executable and preserves its
 
 // This host double proves adapter custody only. It does not establish native
 // hook propagation, effective tool policy or assembled loader acceptance.
-function host() {
+function host(requesterId = 'operator') {
   let binding: unknown;
   const abort = new AbortController(), disposals: (() => unknown)[] = [];
   const hooks = new Map<string, unknown>();
@@ -86,8 +90,8 @@ function host() {
     } } },
     on(name, handler) { hooks.set(name, handler); },
   };
-  const identities = loadIdentityContract({ accountId: 'test', trustedRequesterIds: ['operator'],
-    recipients: [{ id: 'operator', type: 'person', channel: 'whatsapp', to: '+15550000001' }] });
+  const identities = loadIdentityContract({ accountId: 'test', trustedRequesterIds: [requesterId],
+    recipients: [{ id: requesterId, type: 'person', channel: 'whatsapp', to: '+15550000001' }] });
   registerResponseController(api, identities);
   return { api, abort, replace(value: unknown) { binding = value; },
     hookNames() { return [...hooks.keys()].sort(); },
@@ -148,7 +152,9 @@ for (const delta of [{ Provider: 'foreign' }, { Surface: 'foreign' }, { AccountI
 }
 for (const failure of ['oversized', 'source-changed', 'foreign-final', 'pre-aborted', 'disposed', 'replaced'] as const) {
   test(`Request admission fails closed before the native Main resolver: ${failure}`, async () => {
-    const h = host(), turn = h.turn('request', '+15550000001', { RawBody: failure === 'oversized' ? 'א'.repeat(4097) : 'בדיקה' });
+    const h = host();
+    if (failure === 'oversized') { assert.throws(() => h.turn('request', '+15550000001', { RawBody: 'א'.repeat(4097) })); h.dispose(); return; }
+    const turn = h.turn('request', '+15550000001', { RawBody: 'בדיקה' });
     const abort = new AbortController(), final = { ...turn.ctx };
     if (failure === 'source-changed') turn.ctx.RawBody = 'changed';
     if (failure === 'foreign-final') final.SessionKey = 'agent:foreign:main';
@@ -388,6 +394,80 @@ for (const failure of ['missing-terminal', 'foreign-handoff', 'pre-aborted', 'ex
     await assert.rejects(turn.controller.resolve(async () => payload(), Object.freeze({ ctx, abortSignal: abort.signal,
       ...failure === 'extra-handoff-field' ? { injected: true } : {} })));
     assert.equal(turn.controller.beforeNativeDeliver(payload(), { kind: 'final' }), null);
+    h.dispose();
+  });
+}
+
+// Source/isolated proof only: native adapter owners plus an inert domain device.
+for (const fault of ['none', 'cancel-before-effect', 'domain-before-effect', 'permission-before-effect', 'cancel-before-prepare', 'cancel-before-deliver', 'domain-retired',
+  'permission-revoked', 'route-changed', 'altered-result'] as const) {
+  test(`ingress room E2E: ${fault}`, async () => {
+    const h = host('tal'), f = deviceFixture(), abort = new AbortController(), toolContext = context();
+    let toolLive = true, domainLive = true, permitted = true, effects = 0, reads = 0;
+    toolContext.assertInvocationCurrent = () => assert(toolLive, 'Tool retired');
+    const native = h.turn('real-source-shaped-id', '+15550000001', { RawBody: 'Clean the living room' });
+    const roster = { accountId: 'test', approvedIds: loadPolicy(f.policy).rules.map(rule => rule.subject),
+      subjectForRoute: (route: string) => route === '+15550000001' ? 'tal' : null };
+    const executor = createJessicaExecutor({ registryConfig: f.registry, policyConfig: f.policy, store: f.store,
+      clock: f.clock, wait: async () => {}, pollCounts: { clean: 1 }, driver: {
+        async read() { reads++; await Promise.resolve(); if (fault === 'cancel-before-effect') abort.abort();
+          if (fault === 'domain-before-effect') domainLive = false;
+          if (fault === 'permission-before-effect') permitted = false;
+          return structuredClone(f.evidence); },
+        async dispatch(step, guard) {
+          assert.equal(step.kind, 'command'); await guard.assertMutationCurrent(); guard.assertCurrent(); effects++; f.tick();
+          const at = f.clock().toISOString();
+          f.evidence.status = { observedAt: at, sourceUpdatedAt: at, state: 'cleaning', activeSegments: [f.room.segmentId], currentSegment: null };
+          f.evidence.taskStatus = { observedAt: at, sourceUpdatedAt: at, state: 'room_cleaning' };
+          return { accepted: true };
+        } } });
+    let captured: ReturnType<typeof currentNativeTurn> | undefined;
+    const resolved = native.controller.resolve(async () => {
+      const turn = currentNativeTurn(h.api, toolContext); captured = turn;
+      const source = turn.currentInput(toolContext);
+      assert.equal(source.origin.inputId, ingressInputId(source.binding, native.ctx.MessageSid));
+      assert.equal(source.origin.textHash, ingressTextHash(native.ctx.RawBody));
+      assert.equal('cutoff' in source, false);
+      h.hook('before_tool_call', { toolName: 'jessica_task', toolCallId: 'ingress-call', runId: runContext.runId }, { ...runContext, toolCallId: 'ingress-call' });
+      const factory = createJessicaTaskToolFactory({ roster, policy: loadPolicy(f.policy), clock: f.clock,
+        async read() { throw Error('No read fallback'); }, roomAction: { registryConfig: f.registry, executor,
+          async source() { return source; }, assertResultCurrent() { assert(domainLive, 'Jessica retired'); assert(permitted, 'Permission revoked'); } },
+        jsonResult(value, callId, retained) {
+          assert(retained); retained();
+          const recorded = structuredClone(value);
+          if (fault === 'altered-result') recorded.domain = 'reminder';
+          turn.record(toolContext, callId, recorded, retained);
+          return { content: [{ type: 'text', text: JSON.stringify(value) }], details: value };
+        } });
+      const tool = factory(toolContext); assert(tool && !Array.isArray(tool));
+      const result = await tool.execute('ingress-call', createTaskEnvelope(native.ctx.RawBody), abort.signal, undefined);
+      assert(plain(result.details)); assert.equal(result.details.executionMode, 'deterministic');
+      assert.equal(result.details.operation, 'clean');
+      const before = await executor.state.resource(); assert(before.owner);
+      const operation = await executor.state.correlation(before.owner.operationId); assert(operation);
+      assert.equal(operation.version, '2'); assert.deepEqual(operation.origin, source.origin);
+      // No surviving Tool authority may be needed to authorize this exact result.
+      toolLive = false;
+      assert.throws(() => source.assertCurrent(), /Tool retired/);
+      source.assertRetainedCurrent();
+      if (fault === 'cancel-before-prepare') abort.abort();
+      if (fault === 'domain-retired') domainLive = false;
+      if (fault === 'permission-revoked') permitted = false;
+      h.hook('agent_end', { success: true }, runContext);
+      return { text: 'Untrusted model wording' };
+    }, Object.freeze({ ctx: { ...native.ctx }, abortSignal: abort.signal }));
+    if (['cancel-before-effect', 'domain-before-effect', 'permission-before-effect', 'cancel-before-prepare', 'domain-retired', 'permission-revoked', 'altered-result'].includes(fault)) {
+      await assert.rejects(resolved); assert.equal(effects, ['cancel-before-effect', 'domain-before-effect', 'permission-before-effect'].includes(fault) ? 0 : 1);
+      assert.equal(native.controller.beforeNativeDeliver(payload(), { kind: 'final' }), null);
+    } else {
+      const approved = await resolved; assert(plain(approved));
+      assert.equal(approved.text, 'הניקוי בחדר שביקשת התחיל.'); assert.equal(effects, 1); assert(reads > 0);
+      assert(captured); const retainedTurn = captured; assert.throws(() => retainedTurn.source(toolContext));
+      if (fault === 'cancel-before-deliver') abort.abort();
+      if (fault === 'route-changed') native.ctx.From = '+15550000003';
+      assert.equal(native.controller.beforeNativeDeliver(approved, { kind: 'final' }), fault === 'none' ? approved : null);
+      assert.equal(native.controller.beforeNativeDeliver(approved, { kind: 'final' }), null);
+    }
     h.dispose();
   });
 }

@@ -141,17 +141,18 @@ export function createNoRunDomainResult<A extends Admission>(response: unknown, 
   exact(response, ['mode', 'outcome', 'rendered'], 'domain_result_response_shape');
   const { controller, admission, normalizeFacts, language } = options;
   const outcome = synchronous(controller.validateOutcome(admission, response.outcome), 'domain_result_validator_must_be_synchronous');
-  assertNoRunObservation(outcome, admission);
+  if (admission.schemaVersion !== 5) assertNoRunObservation(outcome, admission);
   const suppressed = outcome.disposition === 'suppressed' || outcome.disposition === 'reasoning-required';
   if (response.mode !== (suppressed ? 'suppressed' : 'deterministic') || (response.rendered === null) !== suppressed) fail('domain_result_response_mode');
   const normalized = synchronous(normalizeFacts(outcome.evidence.facts), 'domain_result_normalizer_must_be_synchronous');
   exact(normalized, FACT_KEYS, 'domain_result_normalized_facts_shape');
   const facts = read(NormalizedFactsSchema, normalized, 'domain_result_read_facts_mismatch');
-  if (facts.domain !== admission.domain || facts.effects.length) fail('domain_result_read_facts_mismatch');
+  const details = outcome.schemaVersion === 5 ? outcome.effects.details : [];
+  if (facts.domain !== admission.domain || !same(facts.effects, details)) fail('domain_result_read_facts_mismatch');
   const rendered = suppressed ? null : validateRenderedOutput(response.rendered);
   const result = fromFacts(facts, 'deterministic', outcome.disposition, { observations: [{ ref: outcome.evidence.ref,
     observedAt: outcome.evidence.observedAt, freshness: outcome.evidence.freshness }], gaps: [] }, outcome.error,
-    { ...outcome.effects, details: [], reconciliation: outcome.reconciliation },
+    { ...outcome.effects, details, reconciliation: outcome.reconciliation },
     rendered === null ? null : { state: 'usable', text: rendered.message, language });
   assertion(controller.assertCurrent(admission), 'source_authority_must_be_synchronous');
   return result as DomainResult;

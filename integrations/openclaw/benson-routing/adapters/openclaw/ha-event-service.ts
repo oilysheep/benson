@@ -42,9 +42,9 @@ interface EventEntry {
   entityIds: readonly string[];
   /** Domain-owned, versioned request projection. No raw-frame fallback. */
   prepareRequest(frame: unknown): string;
-  execute(input: SourceInput, assertCurrent: () => void): DomainResult;
+  execute(input: SourceInput, assertCurrent: () => void): DomainResult | Promise<DomainResult>;
 }
-interface ServiceState { abort: AbortController; connection?: HaEventConnection; unsubscribe?: () => void; accepting: boolean; closed: boolean }
+interface ServiceState { abort: AbortController; connection?: HaEventConnection; unsubscribe?: () => void; accepting: boolean; closed: boolean; pending: boolean }
 /** Unregistered native service boundary. Synchronous intake has no queue or
  * coalescing. A gap/error latches admission closed; no reconnect/replay occurs. */
 export function createHaEventService(deps: {
@@ -67,7 +67,7 @@ export function createHaEventService(deps: {
     id: 'benson-ha-event-ingress',
     async start(context) {
       if (active) fail('ha_service_already_started');
-      const state: ServiceState = { abort: new AbortController(), accepting: false, closed: false };
+      const state: ServiceState = { abort: new AbortController(), accepting: false, closed: false, pending: false };
       active = state;
       const current = () => {
         state.abort.signal.throwIfAborted();
@@ -102,6 +102,8 @@ export function createHaEventService(deps: {
                 raw.event.event_type !== 'state_changed' || !plain(raw.event.data) || typeof raw.event.data.entity_id !== 'string') fail('ha_event_frame_invalid');
             const entry = routes.get(raw.event.data.entity_id);
             if (!entry) return; // Unsubscribed domain/entity: never guess a route.
+            // No queue/coalescing: overlapping async intake retires this source.
+            if (state.pending) fail('ha_event_overlap_reconciliation_required');
             failure = 'service_domain_failed';
             const request = synchronous(entry.prepareRequest(freeze(raw)), 'ha_event_projection_must_be_synchronous');
             failure = 'service_current_failed'; current();
@@ -109,8 +111,14 @@ export function createHaEventService(deps: {
               source: { type: 'ha', ref: deps.sourceRef, inputId: `ha-${createHash('sha256').update(frame).digest('hex')}` }, request };
             failure = 'service_domain_failed';
             const result = entry.execute(input, current);
-            failure = 'service_current_failed'; current();
-            failure = 'service_observer_failed'; deps.observe(result);
+            const observe = (value: DomainResult) => {
+              failure = 'service_current_failed'; current();
+              failure = 'service_observer_failed'; deps.observe(value);
+            };
+            if (result instanceof Promise) {
+              state.pending = true;
+              void result.then(value => { observe(value); state.pending = false; }).catch(() => gap(failure));
+            } else observe(result);
           } catch { gap(failure); }
         }, () => gap());
         if (active !== state || state.abort.signal.aborted) unsubscribe();

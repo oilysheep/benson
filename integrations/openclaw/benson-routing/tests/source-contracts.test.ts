@@ -5,15 +5,54 @@ import test from 'node:test';
 import { type Static } from 'typebox';
 import { createSourceAdmissionController, createNativeDispatchRunAdmissionController, createMainRequestAdmissionController, projectRequestAdmission } from '../core/request-control.js';
 import { createCompletionAuthority, acceptAgentCompletion, validateCompletion, reconstructCompletion } from '../core/completion.js';
-import { controlReadResponse, controlResponse } from '../core/response-control.js';
+import { controlReadResponse, controlActionResponse, controlResponse } from '../core/response-control.js';
 import { createNoRunDomainResult, createCompletionDomainResult } from '../core/domain-result.js';
 import { createTaskEnvelope, createPendingTaskEnvelope, validateTaskEnvelope, parseTaskEnvelope } from '../core/task-envelope.js';
 import { validateRenderedOutput, validateTaskResultEnvelope, createResponseEnvelope } from '../core/legacy-response.js';
-import { type Facts, type NativeReadOutcome, type NativeDispatchReadOutcome, TaskEnvelopeSchema } from '../core/contracts.js';
+import { type Facts, type NativeReadOutcome, type NativeDispatchReadOutcome, type NativeActionOutcome, TaskEnvelopeSchema } from '../core/contracts.js';
 import { boundedCopy, decode, JsonSchema, jsonCopy, type JsonValue } from '../core/value.js';
 import { formatUserDatetime, UserDatetimeError } from '../../../../shared/benson-datetime.js';
 
 const currentTime = Date.parse('2026-10-17T10:00:00Z');
+test('version 5 action binds private authority, original request, target, effects and Response preparation without widening reads', () => {
+  let live = true;
+  const action = { operation: 'clean', target: 'living_room' };
+  const input = { schemaVersion: 5, kind: 'benson.source-input', domain: 'jessica-vacuum', scope: 'action', request: 'Clean the living room', action };
+  const facts = { status: 'success', domain: 'jessica-vacuum', domainSchemaVersion: '1', operation: 'clean', verified: true,
+    verificationScope: ['room_cleaning_start'], data: { outcome: 'started' }, warnings: [], error: null,
+    effects: [{ operationId: 'verified-operation', scope: 'cleaning_start_only' }], uncertainty: [], pendingContext: null };
+  let expected: NativeActionOutcome | undefined;
+  const controller = createSourceAdmissionController({ nativeAction: { requestId: 'input', domain: 'jessica-vacuum', subject: 'tal', request: input.request, action },
+    now: () => currentTime, assertCurrent() { assert(live, 'retired'); },
+    assertDomainOutcome(outcome) { assert.deepEqual(outcome, boundedCopy(expected), 'retained domain witness'); } });
+  for (const delta of [{ schemaVersion: 3 }, { scope: 'read' }, { request: 'Clean the hallway' }, { action: { ...action, target: 'hallway' } },
+    { authority: { subject: 'tal' } }, { schemaVersion: 6 }]) assert.throws(() => controller.admit({ ...input, ...delta }));
+  const admission = controller.admit(input);
+  assert.throws(() => controller.assertCurrent(structuredClone(admission)), /unowned/);
+  expected = { schemaVersion: 5, kind: 'benson.no-run', admission: { authorityKind: 'native-action', requestId: 'input', domain: 'jessica-vacuum', subject: 'tal', action },
+    disposition: 'handled', evidence: { ref: 'verified-operation', observedAt: new Date(currentTime).toISOString(), freshness: 'fresh', facts },
+    effects: { status: 'known', refs: ['verified-operation'], details: facts.effects }, reconciliation: { required: false, reason: null }, notification: null, error: null };
+  const options = { controller, admission, renderOutcome: () => ({ schemaVersion: 2, message: 'Cleaning started.' }) };
+  assert.throws(() => controlReadResponse(expected, options), /action_forbidden/);
+  assert.throws(() => controlResponse(expected, options), /action_forbidden/);
+  const response = controlActionResponse(expected, options);
+  const result = createNoRunDomainResult(response, { controller, admission, normalizeFacts: () => facts, language: 'en' });
+  assert.equal(result.executionMode, 'deterministic'); assert.deepEqual(result.effects.details, boundedCopy(facts.effects));
+  assert.equal(result.content?.state, 'usable');
+  assert.throws(() => createNoRunDomainResult(response, { controller, admission, normalizeFacts: () => ({ ...facts, effects: [] }), language: 'en' }), /facts_mismatch/);
+  for (const delta of [{ schemaVersion: 3 }, { admission: { ...expected.admission, subject: 'foreign' } },
+    { admission: { ...expected.admission, action: { ...action, target: 'hallway' } } },
+    { effects: { status: 'none', refs: [], details: [] } }, { effects: { ...expected.effects, details: [] } },
+    { notification: { identity: 'push' } }, { effects: { ...expected.effects, status: 'possible' } }]) {
+    assert.throws(() => controller.validateOutcome(admission, { ...expected, ...delta }));
+  }
+  const readController = createSourceAdmissionController({ nativeDispatch: { requestId: 'input', domain: 'jessica-vacuum', subject: 'tal' },
+    now: () => currentTime, assertCurrent() {}, assertDomainOutcome() {} });
+  assert.throws(() => readController.admit(input));
+  const readAdmission = readController.admit({ schemaVersion: 3, kind: input.kind, domain: input.domain, scope: 'read', request: input.request });
+  assert.throws(() => controlActionResponse(expected, { ...options, controller: readController, admission: readAdmission }), /action_response_admission_required/);
+  assert.throws(() => controlActionResponse(expected, { ...options, renderOutcome() { live = false; return { schemaVersion: 2, message: 'Cleaning started.' }; } }), /retired/);
+});
 test('pre-Main admission enforces the bounded route, private ownership and retirement without a classifier', () => {
   const events: string[] = [];
   let live = true, requesterId = 'reader', targetAgentId = 'main';

@@ -1,8 +1,8 @@
-import { freeze, plain, boundedCopy } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { freeze, plain, boundedCopy, decode } from '../../../integrations/openclaw/benson-routing/core/value.js';
 import type { Presentation } from '../../../integrations/openclaw/benson-routing/core/response-control.js';
 import type { AnyDomainResult } from '../../../integrations/openclaw/benson-routing/core/contracts.js';
 import { validateDomainResultEnvelope, readDomainFactsData } from '../../../integrations/openclaw/benson-routing/core/domain-result.js';
-import { validateResult } from './results.js';
+import { validateResult, ResultSchema } from './results.js';
 import { formatUserDatetime } from '../../../shared/benson-datetime.js';
 /** Shared status wording derives only from validated domain facts, never model prose. */
 export function renderJessicaStatusText(raw: unknown, now: Date): string {
@@ -16,6 +16,30 @@ export function renderJessicaStatusText(raw: unknown, now: Date): string {
 /** Live custody establishes provenance; domain facts establish response claims. */
 export function renderJessicaDomainResult(raw: AnyDomainResult, options: { language: 'en' | 'he'; now?: string }): Presentation {
   const value = validateDomainResultEnvelope(raw);
+  // Native Response preparation re-renders the action entry's start facts;
+  // neither Main wording nor docked/completed observations prove completion.
+  if (value.domain === 'jessica-vacuum' && value.executionMode === 'deterministic' && value.operation === 'clean' &&
+    options.language === 'he' && value.pendingContext === null && !value.warnings.length && !value.evidence.gaps.length) {
+    try {
+      // The retained action witness owns Plan-dependent semantic validation.
+      // Presentation decodes its validated facts without inventing a second Plan.
+      const facts = decode(ResultSchema, { schemaVersion: value.domainSchemaVersion, domain: value.domain, operation: value.operation,
+        status: value.outcome.status, verified: value.facts.verified, data: readDomainFactsData(value.facts.data).value,
+        warnings: value.warnings, error: value.failures.domain, pendingContext: null }, 'start_presentation_invalid');
+      if (facts.status === 'success') {
+        const data = facts.data;
+        if (!data || !('appliedSettings' in data) || data.outcome !== 'started' || data.rooms.length !== 1 ||
+          Object.keys(data.appliedSettings).length || value.facts.verificationScope.length !== 1 ||
+          value.facts.verificationScope[0] !== 'room_cleaning_start' || value.effects.status !== 'known' ||
+          value.effects.refs.length !== 1 || value.effects.refs[0] !== data.operationId ||
+          value.effects.reconciliation.required || value.uncertainty.length || value.failures.handling !== null) return unsupported('unsupported_start_facts');
+      } else if (facts.status !== 'failure' || facts.verified !== false || !facts.error || value.facts.verificationScope.length ||
+        value.effects.status !== (facts.error.sideEffects === 'possible' ? 'possible' : facts.error.sideEffects === 'observed' ? 'known' : 'none') ||
+        !value.failures.handling || value.failures.handling.code !== facts.error.code ||
+        value.failures.handling.message !== facts.error.message || value.failures.handling.retryable !== false) return unsupported('unsupported_start_failure');
+      return rendered(renderJessicaStartText(facts));
+    } catch { return unsupported('unsupported_start_facts'); }
+  }
   if (value.domain === 'jessica-vacuum' && value.executionMode === 'agentic' && value.outcome.status === 'unknown' &&
     value.outcome.disposition === 'unresolved' && (value.uncertainty.length > 0 || value.evidence.gaps.length > 0) && !value.warnings.length && value.pendingContext === null) {
     return rendered(options.language === 'he'
@@ -46,6 +70,17 @@ export function renderJessicaDomainResult(raw: AnyDomainResult, options: { langu
 const unsupported = (reason = 'semantic_rendering_required'): Presentation => freeze({ kind: 'unsupported', reason });
 const rendered = (text: string, pending: unknown = null): Presentation => freeze({ kind: 'rendered', text, pendingContext: structuredClone(boundedCopy(pending)) });
 const text = (value: unknown): value is string => typeof value === 'string' && !!value.trim();
+/** The deterministic action entry supplies domain-validated start facts only. */
+export function renderJessicaStartText(value: import('./results.js').Result): string {
+  if (value.status === 'success') {
+    const presentation = renderJessicaPresentation(value, 'he');
+    if (presentation.kind !== 'rendered') throw new Error('jessica_start_presentation_unsupported');
+    return presentation.text;
+  }
+  return value.error?.sideEffects === 'none'
+    ? 'לא אומתה תחילת ניקוי. לא אבצע ניסיון נוסף אוטומטית.'
+    : 'לא הצלחתי לאמת את תחילת הניקוי. ייתכן שהפעולה בוצעה; לא אבצע אותה שוב אוטומטית.';
+}
 export function renderJessicaPresentation(raw: unknown, language: 'en' | 'he'): Presentation {
   if (!plain(raw) || Object.keys(raw).sort().join(',') !== 'data,domain,error,operation,pendingContext,schemaVersion,status,verified,warnings') return unsupported('unsupported_result_shape');
   if (raw.schemaVersion !== '1') return unsupported('unsupported_schema');
