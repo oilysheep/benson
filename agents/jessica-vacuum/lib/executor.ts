@@ -7,14 +7,19 @@ import { authorize, loadPolicy } from './policy.js';
 import { assertFreshMap, loadRegistry } from './registry.js';
 import { validateResult, type Result, type Observation } from './results.js';
 import { parseExecuteRequest, EXECUTE_OPERATIONS, type ExecuteRequest } from './schemas.js';
-import { createOperationState, type Active, type StateRecords, type OperationState } from './operation-state.js';
+import { createOperationState, OperationOriginSchema, operationInputId, type OperationOrigin, type Active, type StateRecords, type OperationState } from './operation-state.js';
 import type { AtomicKeyedState, JessicaDevice, InvocationAuthority, DeviceStep } from './ports.js';
 import { observation, preconditions, requireHomeBefore, stepsFor, baselineMatches, verifyStep, type Verdict } from './verification.js';
-import { plain } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { plain, decode } from '../../../integrations/openclaw/benson-routing/core/value.js';
 
 type Operation = ExecuteRequest['operation'];
 type ErrorInfo = NonNullable<Result['error']>;
-export interface ExecutionContext { readonly identity: unknown; readonly requestEpoch: string; readonly authority: InvocationAuthority }
+export interface ExecutionContext {
+  readonly identity: unknown; readonly requestEpoch: string; readonly authority: InvocationAuthority;
+  /** Trusted host's current original input and return route, outside model arguments.
+   * Historical retention is not authority to send a later notification. */
+  readonly origin?: OperationOrigin;
+}
 interface Dependencies {
   registryConfig: unknown; policyConfig: unknown; store: AtomicKeyedState<StateRecords>; driver: JessicaDevice;
   clock?: () => Date; wait?: (ms: number) => Promise<void>;
@@ -56,7 +61,13 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
     assertInvocationCurrent(context.authority); context.authority.signal.throwIfAborted();
     const request = parseExecuteRequest(raw), auth = authorize(policy, context.identity, 'control'), epoch = context.requestEpoch;
     if (!epoch || epoch.length > 160) throw new DomainError('EPOCH_UNTRUSTED', 'identity', 'Trusted external request epoch is unavailable');
-    return { request, key: digest(['jessica-vacuum', auth.subject, epoch]), requestHash: digest(ordered(request)), requesterId: auth.subject, requestEpoch: epoch };
+    const origin = context.origin === undefined ? undefined : structuredClone(decode(OperationOriginSchema, context.origin, 'jessica_origin_invalid'));
+    if (origin !== undefined && (operationInputId(origin) !== epoch || origin.binding.channel !== 'whatsapp' || origin.binding.kind !== 'direct')) {
+      throw new DomainError('ORIGIN_UNTRUSTED', 'identity', 'Original input and return route are unavailable or mismatched');
+    }
+    return { request, key: digest(['jessica-vacuum', auth.subject, epoch]),
+      requestHash: digest(ordered(origin === undefined ? request : { request, origin })),
+      requesterId: auth.subject, requestEpoch: epoch, origin };
   }
   function belongsToRequest(active: Active, request: ReturnType<typeof identity>): boolean {
     return active.requestKey === request.key && active.requestHash === request.requestHash &&
@@ -238,7 +249,7 @@ export function createJessicaExecutor({ registryConfig, policyConfig, store, dri
         const reservation = await state.reserve({ version: '1', requestKey: key, requestHash: hash, planHash,
           requesterId: derived.requesterId, requestEpoch: derived.requestEpoch, operationId: `j4-${digest([key, hash]).slice(0, 32)}`, plan,
           phase: 'prepared', stepIndex: 0, before, suctionAlreadySet: plan.settings?.suction !== undefined && before.settings.suction === plan.settings.suction,
-          appliedSettings: {}, lastObservation: null, createdAt: clock().toISOString() });
+          appliedSettings: {}, lastObservation: null, createdAt: clock().toISOString() }, derived.origin);
         switch (reservation.kind) {
           case 'completed': return reservation.completed.requestHash === hash ? reservation.completed.result :
             failure(op, 'EPOCH_CONFLICT', 'precondition', 'Request epoch belongs to a different operation', clock());

@@ -11,6 +11,11 @@ import { authorize, loadPolicy } from '../../../../../agents/jessica-vacuum/lib/
 import { resolveTrustedIdentity } from '../../../../../agents/jessica-vacuum/lib/identity.js';
 import { parseReadRequest } from '../../../../../agents/jessica-vacuum/lib/schemas.js';
 import { validateResult } from '../../../../../agents/jessica-vacuum/lib/results.js';
+import { createJessicaExecutor } from '../../../../../agents/jessica-vacuum/lib/executor.js';
+import { createHaDevice } from '../../../../../agents/jessica-vacuum/lib/adapters/ha-device.js';
+import { loadRegistry } from '../../../../../agents/jessica-vacuum/lib/registry.js';
+import { resolveJessicaRoomAction } from '../../../../../agents/jessica-vacuum/lib/task.js';
+import { createNativeJessicaState } from './state.js';
 import { currentNativeTurn } from '../../../benson-routing/adapters/openclaw/response.js';
 import { createOpenClawDomainRunCollector, observeOpenClawToolExecution } from '../../../benson-routing/adapters/openclaw/tool-execution-evidence.js';
 import { receiptDomainValue } from '../../../benson-routing/core/tool-execution-evidence.js';
@@ -138,6 +143,30 @@ export default definePluginEntry({
           },
         } : undefined;
       const tool = createJessicaTaskToolFactory({ roster, policy: loadPolicy(policyConfig), read, resultVersion: 3,
+        roomAction: {
+          registryConfig,
+          async source(context) { return currentNativeTurn(api, context).currentInput(context); },
+          assertResultCurrent() {
+            // Domain registration/policy custody survives Tool retirement, never plugin retirement.
+            if (!api.lifecycle.signal) throw new Error('jessica_plugin_lifecycle_unavailable');
+            api.lifecycle.signal.throwIfAborted();
+            if (!isDeepStrictEqual(loadPolicy(JSON.parse(readFileSync(policyPath, 'utf8'))), loadPolicy(policyConfig)))
+              throw new Error('jessica_policy_changed');
+          },
+          executor(context, source) {
+            const room = resolveJessicaRoomAction(loadRegistry(registryConfig), source.request);
+            if (!api.lifecycle.signal) throw new Error('jessica_plugin_lifecycle_unavailable');
+            const pluginSignal = api.lifecycle.signal;
+            const authority = { signal: pluginSignal, assertCurrent() {
+              pluginSignal.throwIfAborted(); context.assertInvocationCurrent(); source.assertCurrent();
+              if (!isDeepStrictEqual(loadPolicy(JSON.parse(readFileSync(policyPath, 'utf8'))), loadPolicy(policyConfig)))
+                throw new Error('jessica_policy_changed');
+            } };
+            return createJessicaExecutor({ registryConfig, policyConfig,
+              store: createNativeJessicaState(api.runtime.state, authority),
+              driver: createHaDevice(createHaTransport(), { segments: [room.segmentId] }) });
+          },
+        },
         ...task ? { task } : {},
         jsonResult(value, callId, assertCompletion) {
           const turn = currentNativeTurn(api, context);

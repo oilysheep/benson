@@ -1,5 +1,7 @@
 import Type, { type Static } from 'typebox';
+import { isDeepStrictEqual } from 'node:util';
 import { object, nullable, decode } from '../../../integrations/openclaw/benson-routing/core/value.js';
+import { ConversationBindingSchema, ConversationCutoffSchema, IngressOriginSchema, ingressInputId } from '../../../integrations/openclaw/benson-routing/core/conversation-context.js';
 import { PlanSchema, Nonempty, SettingsSchema } from './schemas.js';
 import { ObservationSchema, ResultSchema, type Result } from './results.js';
 import { TaskSignalSchema, ChargingSignalSchema, NumericSignalSchema, SettingSourcesSchema,
@@ -24,11 +26,40 @@ export const ActiveSchema = object({ ...IntentSchema.properties, resourceGenerat
 export type Active = Static<typeof ActiveSchema>;
 const InFlightSchema = object({ requestKey: Nonempty, operationId: Nonempty, generation: Counter, stepIndex: Counter });
 const ResourceSchema = object({ generation: Counter, owner: nullable(OwnerSchema), inFlight: nullable(InFlightSchema), uncertain: Type.Boolean() });
-const DeviceSchema = object({ version: Type.Literal('2'), active: nullable(ActiveSchema), resource: ResourceSchema });
+// Host-proven original input/return route, never a model-supplied execution or
+// delivery grant. Response Controller must independently authorize any response.
+const CutoffOriginSchema = object({ binding: ConversationBindingSchema, cutoff: ConversationCutoffSchema });
+export const OperationOriginSchema = Type.Union([CutoffOriginSchema, IngressOriginSchema]);
+export type OperationOrigin = Static<typeof OperationOriginSchema>;
+export function operationInputId(origin: OperationOrigin): string {
+  if (!('cutoff' in origin) && ingressInputId(origin.binding, origin.messageId) !== origin.inputId)
+    throw new Error('Jessica ingress identity invalid');
+  return 'cutoff' in origin ? origin.cutoff.entryId : origin.inputId;
+}
+const CorrelationV1Schema = object({ version: Type.Literal('1'), origin: CutoffOriginSchema, owner: OwnerSchema,
+  requestHash: Nonempty, planHash: Nonempty, plan: PlanSchema, createdAt: Nonempty });
+const CorrelationV2Schema = object({ ...CorrelationV1Schema.properties, version: Type.Literal('2'), origin: IngressOriginSchema });
+const CorrelationSchema = Type.Union([CorrelationV1Schema, CorrelationV2Schema]);
+export type OperationCorrelation = Static<typeof CorrelationSchema>;
+const DeviceV2Schema = object({ version: Type.Literal('2'), active: nullable(ActiveSchema), resource: ResourceSchema });
+const DeviceV3Schema = object({ version: Type.Literal('3'), active: nullable(ActiveSchema), resource: ResourceSchema,
+  correlation: nullable(CorrelationV1Schema) });
+const CompletionClaimSchema = object({ evidenceRef: Nonempty, observedAt: Nonempty, sourceRef: Nonempty });
+export type CompletionClaim = Static<typeof CompletionClaimSchema>;
+// v4 only records preparation custody. It never releases physical ownership.
+const DeviceV4Schema = object({ ...DeviceV3Schema.properties, version: Type.Literal('4'),
+  completion: nullable(CompletionClaimSchema) });
+// Old readers reject v5 rather than silently interpreting ingress as a cutoff.
+const DeviceV5Schema = object({ ...DeviceV4Schema.properties, version: Type.Literal('5'), correlation: nullable(CorrelationSchema) });
+const DeviceSchema = Type.Union([DeviceV2Schema, DeviceV3Schema, DeviceV4Schema, DeviceV5Schema]);
 type Device = Static<typeof DeviceSchema>;
 export const HistorySchema = object({ version: Type.Literal('1'), requestHash: Nonempty, planHash: Nonempty, result: ResultSchema });
 type History = Static<typeof HistorySchema>;
-const IndexSchema = object({ version: Type.Literal('1'), operationId: Nonempty, result: ResultSchema });
+const IndexSchema = Type.Union([
+  object({ version: Type.Literal('1'), operationId: Nonempty, result: ResultSchema }),
+  object({ version: Type.Literal('2'), operationId: Nonempty, result: ResultSchema, correlation: CorrelationV1Schema }),
+  object({ version: Type.Literal('3'), operationId: Nonempty, result: ResultSchema, correlation: CorrelationV2Schema }),
+]);
 const CanaryClaimSchema = object({ version: Type.Literal('1'), requestKey: Nonempty, operationId: Nonempty, claimedAt: Nonempty });
 export interface StateRecords {
   'device:jessica-vacuum': Device;
@@ -57,11 +88,33 @@ function device(raw: unknown): Device {
   if (raw === undefined) return { version: '2', active: null, resource: { generation: 0, owner: null, inFlight: null, uncertain: false } };
   const value = decode(DeviceSchema, raw, 'jessica_state_invalid');
   const { resource, active } = value;
+  if ((value.version === '4' || value.version === '5') && value.completion !== null && resource.owner === null) throw new Error('Jessica completion custody invalid');
+  if (value.version !== '2' && (resource.owner === null) !== (value.correlation === null)) throw new Error('Jessica correlation custody invalid');
   if (resource.owner === null ? active !== null || resource.inFlight !== null || resource.uncertain :
     resource.owner.generation !== resource.generation || resource.generation < 1 ||
     active !== null && (!owns(resource, active) || active.phase === 'terminal' && !active.result) ||
     resource.inFlight !== null && (active === null || !sameMutation(resource.inFlight, active))) throw new Error('Jessica resource state is invalid');
+  if (value.version !== '2' && value.correlation !== null) {
+    const correlation = value.correlation;
+    validateCorrelation(correlation);
+    if (!isDeepStrictEqual(correlation.owner, resource.owner) || active !== null &&
+      (active.requestHash !== correlation.requestHash || active.planHash !== correlation.planHash ||
+        active.createdAt !== correlation.createdAt || !isDeepStrictEqual(active.plan, correlation.plan))) {
+      throw new Error('Jessica operation correlation changed');
+    }
+  }
   return structuredClone(value);
+}
+function validateCorrelation(value: OperationCorrelation): void {
+  validateOrigin(value.origin, value.owner.requestEpoch, value.owner.requesterId, value.plan);
+}
+function validateOrigin(origin: OperationOrigin, requestEpoch: string, requesterId: string, plan: OperationCorrelation['plan']): void {
+  if (operationInputId(origin) !== requestEpoch || origin.binding.channel !== 'whatsapp' || origin.binding.kind !== 'direct' ||
+    origin.binding.requesterId.length === 0 ||
+    plan.requesterSubject !== requesterId || plan.operation !== 'clean' || plan.targetKind !== 'rooms' ||
+    plan.rooms.length !== 1 || plan.settings !== null || plan.mapFingerprint === null || plan.mapGeneration === null) {
+    throw new Error('Jessica operation correlation scope invalid');
+  }
 }
 export interface Transition { readonly changed: boolean; readonly active: Active | null }
 export type Reservation =
@@ -85,7 +138,57 @@ export function createOperationState(store: AtomicKeyedState<StateRecords>, { ve
     if (raw === undefined) return null;
     const value = decode(IndexSchema, raw, 'jessica_index_invalid');
     if (value.operationId !== id || !value.result.data || !('operationId' in value.result.data) || value.result.data.operationId !== id) throw new Error('Jessica operation index is invalid');
+    if (value.version !== '1') {
+      validateCorrelation(value.correlation);
+      if (value.correlation.owner.operationId !== id) throw new Error('Jessica operation index correlation invalid');
+    }
     return { kind: 'terminal', value: value.result };
+  }
+  async function correlation(id: string): Promise<OperationCorrelation | null> {
+    const current = await read();
+    if (current.version !== '2' && current.correlation?.owner.operationId === id) return structuredClone(current.correlation);
+    const raw = await store.lookup(`operation:${id}`);
+    if (raw === undefined) return null;
+    const index = decode(IndexSchema, raw, 'jessica_index_invalid');
+    if (index.operationId !== id || !index.result.data || !('operationId' in index.result.data) || index.result.data.operationId !== id) throw new Error('Jessica operation index is invalid');
+    if (index.version === '1') return null; // Never invent origin for legacy history.
+    validateCorrelation(index.correlation);
+    if (index.correlation.owner.operationId !== id) throw new Error('Jessica operation index correlation invalid');
+    return structuredClone(index.correlation);
+  }
+  /** One canonical owned operation, never the most recent requester/history row.
+   * A verified start is necessary but does not itself prove physical completion. */
+  async function completionCandidate() {
+    const current = await read();
+    if (current.version === '2' || !current.correlation || current.active || current.resource.inFlight || current.resource.uncertain) return null;
+    const binding = current.correlation;
+    const raw = await store.lookup(`operation:${binding.owner.operationId}`);
+    if (raw === undefined) return null;
+    const index = decode(IndexSchema, raw, 'jessica_index_invalid');
+    if (index.version === '1' || !isDeepStrictEqual(index.correlation, binding) || index.operationId !== binding.owner.operationId ||
+      index.result.status !== 'success' || !index.result.verified || index.result.operation !== 'clean' ||
+      !index.result.data || !('appliedSettings' in index.result.data) || index.result.data.outcome !== 'started' ||
+      index.result.data.operationId !== binding.owner.operationId ||
+      !isDeepStrictEqual(index.result.data.rooms, binding.plan.rooms.map(room => room.slug)) ||
+      Object.keys(index.result.data.appliedSettings).length !== 0) return null;
+    const latest = await read();
+    if (latest.version === '2' || !isDeepStrictEqual(latest.correlation, binding) || latest.active ||
+      latest.resource.inFlight || latest.resource.uncertain) return null;
+    return { correlation: structuredClone(binding), start: index.result,
+      claimed: (latest.version === '4' || latest.version === '5') && latest.completion !== null };
+  }
+  async function claimCompletion(binding: OperationCorrelation, raw: CompletionClaim): Promise<'claimed' | 'duplicate' | 'changed'> {
+    const claim = decode(CompletionClaimSchema, raw, 'jessica_completion_claim_invalid');
+    const observed = await store.observe(DEVICE_KEY), current = device(observed.value);
+    if (current.version === '2' || !isDeepStrictEqual(current.correlation, binding) || current.active ||
+      current.resource.inFlight || current.resource.uncertain) return 'changed';
+    if ((current.version === '4' || current.version === '5') && current.completion !== null) return 'duplicate';
+    return await store.compareAndSet(DEVICE_KEY, observed, device({ ...current, version: binding.version === '2' || current.version === '5' ? '5' : '4', completion: claim })) === 'applied' ? 'claimed' : 'changed';
+  }
+  async function completionCurrent(binding: OperationCorrelation, claim: CompletionClaim): Promise<boolean> {
+    const current = await read();
+    return (current.version === '4' || current.version === '5') && isDeepStrictEqual(current.correlation, binding) &&
+      isDeepStrictEqual(current.completion, claim) && !current.active && !current.resource.inFlight && !current.resource.uncertain;
   }
   async function claimUnderTest(id: string, key: string, operationId: string, now: Date): Promise<boolean> {
     const entry: Static<typeof CanaryClaimSchema> = { version: '1', requestKey: key, operationId, claimedAt: now.toISOString() };
@@ -93,8 +196,10 @@ export function createOperationState(store: AtomicKeyedState<StateRecords>, { ve
     const existing = decode(CanaryClaimSchema, await store.lookup(`under-test:${id}`), 'jessica_canary_claim_invalid');
     return existing.requestKey === key && existing.operationId === operationId;
   }
-  async function reserve(raw: Intent): Promise<Reservation> {
+  async function reserve(raw: Intent, rawOrigin?: OperationOrigin): Promise<Reservation> {
     const intent = decode(IntentSchema, raw, 'jessica_intent_invalid');
+    const origin = rawOrigin === undefined ? undefined : structuredClone(decode(OperationOriginSchema, rawOrigin, 'jessica_origin_invalid'));
+    if (origin) validateOrigin(origin, intent.requestEpoch, intent.requesterId, intent.plan);
     // Observe before history: finalization that creates history must invalidate this CAS.
     const observed = await store.observe(DEVICE_KEY);
     const current = device(observed.value);
@@ -102,11 +207,19 @@ export function createOperationState(store: AtomicKeyedState<StateRecords>, { ve
     if (completed) return { kind: 'completed', active: null, completed };
     if (current.active) return { kind: current.active.requestKey === intent.requestKey ? 'duplicate' : 'conflict', active: current.active, completed: null };
     if (current.resource.owner) return { kind: 'busy', active: null, completed: null };
+    if (current.version !== '2' && origin === undefined) throw new Error('Jessica operation origin required after correlated-state activation');
     if (current.resource.generation === Number.MAX_SAFE_INTEGER) throw new Error('Jessica resource generation exhausted');
     const generation = current.resource.generation + 1;
     const next = { ...intent, resourceGeneration: generation, revision: 0 };
-    const write = await store.compareAndSet(DEVICE_KEY, observed, { ...current, active: next, resource: {
-      generation, owner: { requestKey: intent.requestKey, operationId: intent.operationId, requestEpoch: intent.requestEpoch, requesterId: intent.requesterId, generation }, inFlight: null, uncertain: false } });
+    const owner = { requestKey: intent.requestKey, operationId: intent.operationId, requestEpoch: intent.requestEpoch, requesterId: intent.requesterId, generation };
+    const binding: OperationCorrelation | null = origin === undefined ? null : decode(CorrelationSchema, { version: 'cutoff' in origin ? '1' : '2', origin, owner: structuredClone(owner),
+      requestHash: intent.requestHash, planHash: intent.planHash, plan: structuredClone(intent.plan), createdAt: intent.createdAt }, 'jessica_correlation_invalid');
+    if (binding) validateCorrelation(binding);
+    const updated = { ...current, active: next, resource: { generation, owner, inFlight: null, uncertain: false } };
+    const candidate: Device = current.version === '5' || binding?.version === '2' ? { ...updated, version: '5', correlation: binding, completion: null } : current.version === '4' ? { ...updated, version: '4', correlation: binding, completion: null } :
+      binding || current.version !== '2' ? { ...updated, version: '3', correlation: binding } : updated;
+    device(candidate);
+    const write = await store.compareAndSet(DEVICE_KEY, observed, candidate);
     return write === 'applied' ? { kind: 'reserved', active: next, completed: null } : { kind: 'conflict', active: null, completed: null };
   }
   async function change(expected: Active, transform: (current: Device, found: Active) => Device | null): Promise<Transition> {
@@ -152,7 +265,17 @@ export function createOperationState(store: AtomicKeyedState<StateRecords>, { ve
     if (!retained || current.active || current.resource.inFlight || retained.requestKey !== owner.requestKey ||
       retained.operationId !== owner.operationId || retained.requestEpoch !== owner.requestEpoch || retained.requesterId !== owner.requesterId || retained.generation !== owner.generation ||
       verifyRelease(structuredClone(owner), structuredClone(evidence)) !== true) return false;
-    return await store.compareAndSet(DEVICE_KEY, observed, { ...current, resource: { ...current.resource, owner: null, uncertain: false } }) === 'applied';
+    // This source slice does not define physical release or completion delivery.
+    if ((current.version === '4' || current.version === '5') && current.completion !== null) return false;
+    // Archive must precede custody release. A release predicate cannot discard
+    // the original operation/notification correlation.
+    if (current.version !== '2' && current.correlation !== null) {
+      const index = decode(IndexSchema, await store.lookup(`operation:${owner.operationId}`), 'jessica_index_invalid');
+      if (index.version === '1' || index.operationId !== owner.operationId || !isDeepStrictEqual(index.correlation, current.correlation)) return false;
+    }
+    const released = { ...current, resource: { ...current.resource, owner: null, uncertain: false } };
+    return await store.compareAndSet(DEVICE_KEY, observed, current.version === '5' ? { ...released, version: '5', correlation: null, completion: null } : current.version === '4' ? { ...released, version: '4', correlation: null, completion: null } :
+      current.version !== '2' ? { ...released, version: '3', correlation: null } : released) === 'applied';
   }
   async function finish(expected: Active, result: Result): Promise<Result> {
     const retained = await history(expected.requestKey);
@@ -169,7 +292,11 @@ export function createOperationState(store: AtomicKeyedState<StateRecords>, { ve
       current = moved.active;
     }
     if (!current || current.phase !== 'terminal' || !current.result || !matchesOperation(expected, current)) throw new Error('Jessica terminal state is invalid');
-    const index: Static<typeof IndexSchema> = { version: '1', operationId: current.operationId, result: current.result };
+    const retainedDevice = await read();
+    if (!matchesSnapshot(current, retainedDevice.active)) throw new Error('Jessica ownership changed before correlation archival');
+    const binding = retainedDevice.version !== '2' ? retainedDevice.correlation : null;
+    const index: Static<typeof IndexSchema> = binding === null ? { version: '1', operationId: current.operationId, result: current.result } :
+      decode(IndexSchema, { version: binding.version === '2' ? '3' : '2', operationId: current.operationId, result: current.result, correlation: binding }, 'jessica_index_invalid');
     if (!await store.registerIfAbsent(`operation:${current.operationId}`, index) &&
       JSON.stringify(await store.lookup(`operation:${current.operationId}`)) !== JSON.stringify(index)) throw new Error('Jessica operation index conflict');
     const record: History = { version: '1', requestHash: expected.requestHash, planHash: expected.planHash, result: current.result };
@@ -180,7 +307,7 @@ export function createOperationState(store: AtomicKeyedState<StateRecords>, { ve
     await transition(current, ['terminal'], () => null);
     return record.result;
   }
-  return Object.freeze({ active, resource, history, operation, reserve, transition, finish, claimUnderTest,
-    matchesSnapshot, matchesOperation, claimMutation, mutationCurrent, settleMutation, releaseResource });
+  return Object.freeze({ active, resource, history, operation, correlation, reserve, transition, finish, claimUnderTest,
+    completionCandidate, claimCompletion, completionCurrent, matchesSnapshot, matchesOperation, claimMutation, mutationCurrent, settleMutation, releaseResource });
 }
 export type OperationState = ReturnType<typeof createOperationState>;

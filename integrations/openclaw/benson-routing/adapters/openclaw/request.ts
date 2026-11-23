@@ -1,7 +1,8 @@
 import { parseAgentSessionKey } from 'openclaw/plugin-sdk/routing';
 import { resolveRoute, type IdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
-import { createMainRequestAdmissionController } from '../../core/request-control.js';
-import { fail, plain } from '../../core/value.js';
+import { createMainRequestAdmissionController, MAX_CLASSIFIER_REQUEST_BYTES } from '../../core/request-control.js';
+import { fail, plain, identifier } from '../../core/value.js';
+import { ingressInputId, ingressTextHash, type ConversationBinding, type IngressOrigin } from '../../core/conversation-context.js';
 
 /** The existing WhatsApp bridge supplies native contexts, never model arguments.
  * Entry admission retires with execution; delivery independently rechecks the
@@ -9,6 +10,12 @@ import { fail, plain } from '../../core/value.js';
 export function createNativeMainRequestAdmission(identities: IdentityContract, original: unknown, nativeCurrent: () => void) {
   if (!plain(original)) fail('native_request_context_invalid');
   const fields = ['Provider', 'Surface', 'AccountId', 'SenderId', 'From', 'To', 'MessageSid', 'SessionKey', 'RawBody'];
+  for (const name of fields) {
+    const descriptor = Object.getOwnPropertyDescriptor(original, name);
+    if (!descriptor || !Object.hasOwn(descriptor, 'value')) fail('native_request_context_invalid');
+    const value: unknown = descriptor.value;
+    if (name === 'RawBody' ? typeof value !== 'string' || Buffer.byteLength(value, 'utf8') > MAX_CLASSIFIER_REQUEST_BYTES || !value.trim() : !identifier(value)) fail('native_request_context_invalid');
+  }
   const captured = Object.freeze(Object.fromEntries(fields.map(name => [name, original[name]])));
   const text = (name: string) => {
     const value = captured[name];
@@ -27,6 +34,11 @@ export function createNativeMainRequestAdmission(identities: IdentityContract, o
     return route;
   };
   const route = Object.freeze(authorize()), requestId = text('MessageSid'), sessionKey = text('SessionKey');
+  const sourceBinding: ConversationBinding = Object.freeze({ conversationRef: sessionKey, channel: 'whatsapp',
+    accountId: identities.accountId, kind: route.sourceType === 'group' ? 'group' : 'direct',
+    peerId: route.sourceId, threadId: null, requesterId: route.senderId });
+  const origin: IngressOrigin = Object.freeze({ version: '2', kind: 'native-ingress', binding: sourceBinding,
+    messageId: requestId, inputId: ingressInputId(sourceBinding, requestId), textHash: ingressTextHash(text('RawBody')) });
   let finalContext: Record<string, unknown> | undefined;
   const assertSourceCurrent = () => {
     nativeCurrent();
@@ -41,7 +53,7 @@ export function createNativeMainRequestAdmission(identities: IdentityContract, o
     authorize: () => ({ requesterId: authorize().requesterId, targetAgentId: 'main' }) });
   let admission: ReturnType<typeof controller.admit> | undefined;
   return Object.freeze({
-    requestId, sessionKey, route, request: text('RawBody'),
+    requestId, sessionKey, route, origin, request: text('RawBody'),
     admit(context: unknown) {
       if (finalContext || !plain(context)) fail('native_request_handoff_invalid');
       finalContext = context;

@@ -10,7 +10,7 @@ import { createResponseEnvelope, createResponseV4Envelope } from '../../core/leg
 import { validateDomainResultEnvelope } from '../../core/domain-result.js';
 import { MAX_RESPONSE_RESULTS, plain, synchronous, fail } from '../../core/value.js';
 import type { AnyDomainResult } from '../../core/contracts.js';
-import type { CurrentRequestEvidence } from '../../core/conversation-context.js';
+import type { CurrentRequestEvidence, NativeCurrentInputEvidence } from '../../core/conversation-context.js';
 import type { Binding6 } from '../../core/completion-contracts.js';
 import type { IdentityContract } from '../../../../../agents/reminder-service/lib/identity.js';
 import { createNativeMainRequestAdmission } from './request.js';
@@ -35,6 +35,7 @@ export type ResponseHost = {
  */
 export interface NativeTurn {
   source(context: ToolContext): CurrentRequestEvidence;
+  currentInput(context: ToolContext): NativeCurrentInputEvidence;
   originalUserTurns(context: ToolContext): Promise<NativeOriginalUserTurns>;
   caller(context: ToolContext, callId: string): Caller;
   record(context: ToolContext, callId: string, result: unknown, assertCurrent: () => void): void;
@@ -42,7 +43,7 @@ export interface NativeTurn {
 }
 function nativeTurn(value: unknown): value is NativeTurn {
   return plain(value) && typeof value.source === 'function' && typeof value.caller === 'function' &&
-    typeof value.record === 'function' && typeof value.assertCurrent === 'function' && typeof value.originalUserTurns === 'function';
+    typeof value.currentInput === 'function' && typeof value.record === 'function' && typeof value.assertCurrent === 'function' && typeof value.originalUserTurns === 'function';
 }
 /** Read-only projection, never authority. At before_main this is the selected
  * channel dispatch registry; at source_refusal native Tool scope may replace it.
@@ -166,6 +167,13 @@ export function registerResponseController(api: ResponseHost, identities: Identi
       };
       const turn: NativeTurn = Object.freeze({
         assertCurrent: current,
+        currentInput(context: ToolContext): NativeCurrentInputEvidence {
+          const source = turn.source(context);
+          return Object.freeze({ ...source, binding: request.origin.binding, origin: request.origin,
+            currentTurn() { const value = source.currentTurn(); if (!plain(value)) fail('native_original_source_invalid');
+              return { ...value, entryId: request.origin.inputId }; },
+            assertRetainedCurrent: current });
+        },
         source(context: ToolContext): CurrentRequestEvidence {
           invocation(context);
           return { request: request.request,

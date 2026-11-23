@@ -1,7 +1,8 @@
 import { type Static } from 'typebox';
-import { GrantSchema, InvocationSchema, NativeReadInputSchema, NativeDispatchReadInputSchema, NativeDispatchRunInputSchema, NativeDispatchSchema, SourceInputSchema,
+import { GrantSchema, InvocationSchema, NativeReadInputSchema, NativeDispatchReadInputSchema, NativeDispatchRunInputSchema, NativeDispatchSchema, NativeActionSchema, NativeActionInputSchema, SourceInputSchema,
   NativeRequestAdmissionSchema, type Admission, type SourceAdmission, type SourceInput,
-  type NativeReadAdmission, type NativeDispatchReadAdmission, type NativeDispatchRunAdmission, type NoRunOutcome, type TaskEnvelope } from './contracts.js';
+  type NativeReadAdmission, type NativeDispatchReadAdmission, type NativeDispatchRunAdmission, type NativeActionAdmission, type NoRunOutcome, type TaskEnvelope } from './contracts.js';
+import { isDeepStrictEqual } from 'node:util';
 import { assertion, decode, exact, fail, freeze, identifier, read, synchronous } from './value.js';
 import { createTaskEnvelope } from './task-envelope.js';
 import { validateNoRunOutcome } from './no-run.js';
@@ -117,39 +118,55 @@ interface CommonDependencies<A extends Admission> {
   now(): unknown;
 }
 export interface GrantedSourceDependencies extends CommonDependencies<SourceAdmission> {
+  nativeAction?: never;
   readAuthority(input: SourceInput | SourceAdmission): unknown;
   invocation?: never;
   nativeDispatch?: never;
 }
 export interface NativeReadDependencies extends CommonDependencies<NativeReadAdmission> {
+  nativeAction?: never;
   invocation: Static<typeof InvocationSchema>;
   readAuthority?: never;
   nativeDispatch?: never;
 }
 export interface NativeDispatchReadDependencies extends CommonDependencies<NativeDispatchReadAdmission> {
+  nativeAction?: never;
   nativeDispatch: Static<typeof NativeDispatchSchema>;
   invocation?: never;
   readAuthority?: never;
 }
-type SourceDependencies = GrantedSourceDependencies | NativeReadDependencies | NativeDispatchReadDependencies;
+export interface NativeActionDependencies extends CommonDependencies<NativeActionAdmission> {
+  nativeAction: Static<typeof NativeActionSchema>;
+  invocation?: never;
+  readAuthority?: never;
+  nativeDispatch?: never;
+}
+type SourceDependencies = GrantedSourceDependencies | NativeReadDependencies | NativeDispatchReadDependencies | NativeActionDependencies;
+export function createSourceAdmissionController(deps: NativeActionDependencies): SourceAdmissionController<NativeActionAdmission>;
 export function createSourceAdmissionController(deps: NativeDispatchReadDependencies): SourceAdmissionController<NativeDispatchReadAdmission>;
 export function createSourceAdmissionController(deps: NativeReadDependencies): SourceAdmissionController<NativeReadAdmission>;
 export function createSourceAdmissionController(deps: GrantedSourceDependencies): SourceAdmissionController<SourceAdmission>;
 export function createSourceAdmissionController(deps: SourceDependencies): SourceAdmissionController;
 export function createSourceAdmissionController(deps: SourceDependencies): SourceAdmissionController {
   if (![deps.assertCurrent, deps.assertDomainOutcome, deps.now].every(part => typeof part === 'function') ||
-      (deps.nativeDispatch !== undefined ? deps.invocation !== undefined || deps.readAuthority !== undefined :
+      (deps.nativeAction !== undefined ? deps.nativeDispatch !== undefined || deps.invocation !== undefined || deps.readAuthority !== undefined :
+      deps.nativeDispatch !== undefined ? deps.invocation !== undefined || deps.readAuthority !== undefined :
         deps.invocation === undefined ? typeof deps.readAuthority !== 'function' : deps.readAuthority !== undefined)) {
     fail('source_authority_dependencies_unavailable');
   }
   const invocation = deps.invocation === undefined ? undefined : freeze(read(InvocationSchema, deps.invocation, 'native_read_context_invalid'));
   const dispatch = deps.nativeDispatch === undefined ? undefined : freeze(read(NativeDispatchSchema, deps.nativeDispatch, 'native_dispatch_context_invalid'));
+  const action = deps.nativeAction === undefined ? undefined : freeze(read(NativeActionSchema, deps.nativeAction, 'native_action_context_invalid'));
+  if (action && (![action.requestId, action.domain, action.subject, action.action.operation, action.action.target].every(identifier) ||
+    !validRequest(action.request))) fail('native_action_context_invalid');
   if (invocation && !Object.values(invocation).every(identifier)) fail('native_read_context_invalid');
   if (dispatch && !Object.values(dispatch).every(identifier)) fail('native_dispatch_context_invalid');
   const admissions = new WeakSet<object>();
   const current = (input?: SourceInput | Admission): void => {
     // The discriminant narrows the callback together with the owned input.
-    if (deps.nativeDispatch !== undefined) {
+    if (deps.nativeAction !== undefined) {
+      assertion(deps.assertCurrent(input?.schemaVersion === 5 ? input : undefined), 'source_authority_must_be_synchronous');
+    } else if (deps.nativeDispatch !== undefined) {
       assertion(deps.assertCurrent(input?.schemaVersion === 3 ? input : undefined), 'source_authority_must_be_synchronous');
     } else if (deps.invocation !== undefined) {
       assertion(deps.assertCurrent(input?.schemaVersion === 2 ? input : undefined), 'source_authority_must_be_synchronous');
@@ -164,7 +181,7 @@ export function createSourceAdmissionController(deps: SourceDependencies): Sourc
   }
   function authority(input: SourceInput | SourceAdmission, expected?: SourceAdmission['authority']) {
     current(input);
-    if (deps.invocation !== undefined || deps.nativeDispatch !== undefined) fail('source_authority_dependencies_unavailable');
+    if (deps.invocation !== undefined || deps.nativeDispatch !== undefined || deps.nativeAction !== undefined) fail('source_authority_dependencies_unavailable');
     const raw = synchronous(deps.readAuthority(input), 'source_authority_must_be_synchronous');
     exact(raw, Object.keys(GrantSchema.properties), 'source_contract_shape');
     const grant = read(GrantSchema, raw, 'source_grant_rejected');
@@ -177,17 +194,29 @@ export function createSourceAdmissionController(deps: SourceDependencies): Sourc
   }
   function check(admission: Admission) {
     if (!admissions.has(admission)) fail('source_admission_unowned');
+    if (admission.schemaVersion === 5 && action !== undefined) {
+      current(admission); return { scopes: ['action'] };
+    }
     if (admission.schemaVersion === 3 && dispatch !== undefined) {
       current(admission); return { scopes: ['read'] };
     }
     if (admission.schemaVersion === 2 && invocation !== undefined) {
       current(admission); return { scopes: ['read'] };
     }
-    if (admission.schemaVersion !== 1 || invocation !== undefined || dispatch !== undefined) fail('source_admission_unowned');
+    if (admission.schemaVersion !== 1 || invocation !== undefined || dispatch !== undefined || action !== undefined) fail('source_admission_unowned');
     return authority(admission, admission.authority);
   }
   return freeze({
     admit(raw: unknown): Admission {
+      if (action !== undefined) {
+        exact(raw, Object.keys(NativeActionInputSchema.properties), 'source_contract_shape');
+        const input = read(NativeActionInputSchema, raw, 'native_action_input_invalid');
+        if (input.domain !== action.domain || input.request !== action.request || !isDeepStrictEqual(input.action, action.action)) fail('native_action_input_mismatch');
+        current();
+        const admission: NativeActionAdmission = freeze({ ...input, kind: 'benson.source-admission', requestId: action.requestId,
+          authority: { kind: 'native-action', subject: action.subject }, admittedAt: clock() });
+        current(admission); admissions.add(admission); return admission;
+      }
       if (dispatch !== undefined) {
         exact(raw, Object.keys(NativeDispatchReadInputSchema.properties), 'source_contract_shape');
         const input = read(NativeDispatchReadInputSchema, raw, 'native_dispatch_read_input_invalid');
@@ -219,11 +248,13 @@ export function createSourceAdmissionController(deps: SourceDependencies): Sourc
     validateOutcome(admission: Admission, raw: unknown): NoRunOutcome {
       check(admission);
       const outcome = validateNoRunOutcome(raw, admission);
-      if (admission.schemaVersion === 3 && deps.nativeDispatch !== undefined) {
+      if (admission.schemaVersion === 5 && deps.nativeAction !== undefined) {
+        assertion(deps.assertDomainOutcome(outcome, admission), 'source_authority_must_be_synchronous');
+      } else if (admission.schemaVersion === 3 && deps.nativeDispatch !== undefined) {
         assertion(deps.assertDomainOutcome(outcome, admission), 'source_authority_must_be_synchronous');
       } else if (admission.schemaVersion === 2 && deps.invocation !== undefined) {
         assertion(deps.assertDomainOutcome(outcome, admission), 'source_authority_must_be_synchronous');
-      } else if (admission.schemaVersion === 1 && deps.invocation === undefined && deps.nativeDispatch === undefined) {
+      } else if (admission.schemaVersion === 1 && deps.invocation === undefined && deps.nativeDispatch === undefined && deps.nativeAction === undefined) {
         assertion(deps.assertDomainOutcome(outcome, admission), 'source_authority_must_be_synchronous');
       } else fail('source_admission_unowned');
       const latest = check(admission);

@@ -29,6 +29,35 @@ test('fresh correlated room start preserves identity hashes, result facts and on
   const next = await f.executor.execute(f.request, { ...f.context, requestEpoch: 'deliberate-next' });
   assert.equal(next.error?.code, 'RESOURCE_BUSY'); assert.equal(f.trace.length, 1);
 });
+test('trusted original input is retained before dispatch; verified start is never physical completion or release', async () => {
+  const f = executorFixture();
+  const origin = { binding: { conversationRef: 'fixture-conversation', channel: 'whatsapp', accountId: 'fixture-account',
+    kind: 'direct' as const, peerId: 'fixture-peer', threadId: null, requesterId: 'fixture-sender' },
+    cutoff: { sessionId: 'fixture-session', generation: 'fixture-native-generation', entryId: f.context.requestEpoch, effectiveParentId: null } };
+  const context = { ...f.context, origin }, dispatch = f.driver.dispatch;
+  let beforeDispatch: unknown;
+  f.driver.dispatch = async (step, guard) => {
+    const active = await f.executor.state.active(); assert.ok(active);
+    beforeDispatch = await f.executor.state.correlation(active.operationId); assert.ok(beforeDispatch);
+    return dispatch(step, guard);
+  };
+  const result = await f.executor.execute(f.request, context);
+  assert.equal(result.status, 'success'); assert.ok(result.data && 'outcome' in result.data); assert.equal(result.data.outcome, 'started');
+  assert.ok('operationId' in result.data && 'rooms' in result.data);
+  const retained = await f.restart().state.correlation(result.data.operationId); assert.ok(retained);
+  assert.deepEqual(retained, beforeDispatch); assert.deepEqual(retained.origin, origin);
+  assert.deepEqual(retained.plan.rooms.map(room => room.slug), result.data.rooms);
+  assert.equal(retained.owner.requestEpoch, f.context.requestEpoch); assert.equal(retained.owner.requesterId, f.identity.senderId);
+  assert.deepEqual((await f.executor.state.resource()).owner, retained.owner); assert.equal(f.trace.length, 1);
+  assert.equal(await f.executor.state.releaseResource(retained.owner, { state: 'completed' }), false);
+  assert.deepEqual(await f.restart().execute(f.request, context), result); assert.equal(f.trace.length, 1);
+  const conflict = await f.restart().execute(f.request, { ...context, origin: { ...origin, binding: { ...origin.binding, peerId: 'foreign' } } });
+  assert.equal(conflict.error?.code, 'EPOCH_CONFLICT'); assert.equal(f.trace.length, 1);
+  const mismatched = executorFixture();
+  const invalid = await mismatched.executor.execute(mismatched.request, { ...mismatched.context,
+    origin: { ...origin, cutoff: { ...origin.cutoff, entryId: 'foreign' } } });
+  assert.equal(invalid.error?.code, 'ORIGIN_UNTRUSTED'); assert.equal(mismatched.trace.length, 0); assert.equal(mismatched.store.writes, 0);
+});
 test('same epoch with different deliberate input rejects without new effect', async () => {
   const f = executorFixture(); await f.executor.execute(f.request, f.context);
   const result = await f.executor.execute({ operation: 'pause' }, f.context);

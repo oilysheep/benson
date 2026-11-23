@@ -24,7 +24,8 @@ function frame(active: unknown = true, entity = VACUUM_ENTITY, updated = epoch -
       old_state: { entity_id: entity, state: 'cleaning', attributes: { has_error: false } },
       new_state: { entity_id: entity, state: 'cleaning', attributes: { has_error: active }, last_updated: new Date(updated).toISOString() } } } };
 }
-function fixture(prepareRequest = prepareJessicaWarningEvent) {
+function fixture(prepareRequest = prepareJessicaWarningEvent,
+  execute?: (input: SourceInput, current: () => void, run: () => DomainResult) => DomainResult | Promise<DomainResult>) {
   const state = { now: epoch, trusted: true, granted: true, sourceRef, subscriptionId: 18, connects: 0, closes: 0,
     unsubscribes: 0, grants: 0, failures: 0, domainFailures: [] as string[], results: [] as DomainResult[],
     receive: (_: string) => {}, gap: () => {}, signal: undefined as AbortSignal | undefined };
@@ -46,7 +47,7 @@ function fixture(prepareRequest = prepareJessicaWarningEvent) {
   };
   const service = createHaEventService({ sourceRef, entries: [{ domain: 'jessica-vacuum', entityIds: entry.entityIds, prepareRequest,
     execute(input, current) {
-      try { return entry.execute(input, current); }
+      try { return execute ? execute(input, current, () => entry.execute(input, current)) : entry.execute(input, current); }
       catch (error) { state.domainFailures.push(error instanceof Error ? error.message : 'unknown'); throw error; }
     } }],
     async connect(signal) { state.connects++; state.signal = signal; return connection; },
@@ -190,3 +191,23 @@ test('v1 Response and DomainResult reject effects, notification, other sources a
       { ...f, language: 'en' }), /observation_required/);
   }
 });
+
+for (const outcome of ['success', 'gap', 'stop', 'overlap', 'rejected'] as const) {
+  test(`HA async entry retains source custody without queue/retry: ${outcome}`, async () => {
+    let complete: (() => void) | undefined, invoked = 0;
+    const f = fixture(prepareJessicaWarningEvent, (_input, current, run) => {
+      invoked++; return new Promise<DomainResult>((resolve, reject) => { complete = () => {
+        if (outcome === 'rejected') reject(new Error('fixture domain failure'));
+        else { try { current(); resolve(run()); } catch (error) { reject(error); } }
+      }; });
+    });
+    await f.service.start(f.context); f.send(); assert.equal(invoked, 1); assert.equal(f.state.results.length, 0);
+    if (outcome === 'gap') f.state.gap();
+    if (outcome === 'stop') await f.service.stop?.(f.context);
+    if (outcome === 'overlap') { f.send(); assert.equal(invoked, 1); }
+    assert(complete); complete(); await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(f.state.results.length, outcome === 'success' ? 1 : 0);
+    assert.equal(f.state.connects, 1);
+    await f.service.stop?.(f.context); assert.equal(f.state.closes, 1);
+  });
+}

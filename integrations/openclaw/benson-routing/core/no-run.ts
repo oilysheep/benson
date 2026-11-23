@@ -1,5 +1,6 @@
 import { AdmissionSchema, NoRunSchema, type Admission, type NoRunOutcome } from './contracts.js';
 import { assertIds, decode, fail, freeze, identifier, read, timestamp, MAX_RENDERED_TEXT } from './value.js';
+import { isDeepStrictEqual } from 'node:util';
 
 /** Existing v1 observation contract; this is not admission or outbound authority. */
 export function assertNoRunObservation(outcome: NoRunOutcome, admission: Admission): void {
@@ -14,7 +15,12 @@ export function validateNoRunOutcome(raw: unknown, rawAdmission: unknown): NoRun
   const value = read(NoRunSchema, raw, 'no_run_version_or_disposition');
   const admission = decode(AdmissionSchema, rawAdmission, 'no_run_version_or_disposition');
   if (value.schemaVersion !== admission.schemaVersion) fail('no_run_version_or_disposition');
-  if (value.schemaVersion === 3 && admission.schemaVersion === 3) {
+  if (value.schemaVersion === 5 && admission.schemaVersion === 5) {
+    const expected = { authorityKind: admission.authority.kind, requestId: admission.requestId,
+      domain: admission.domain, subject: admission.authority.subject };
+    if (Object.entries(expected).some(([key, part]) => !identifier(part) || Reflect.get(value.admission, key) !== part) ||
+      !isDeepStrictEqual(value.admission.action, admission.action)) fail('no_run_admission_mismatch');
+  } else if (value.schemaVersion === 3 && admission.schemaVersion === 3) {
     const expected = { authorityKind: admission.authority.kind, requestId: admission.requestId,
       domain: admission.domain, subject: admission.authority.subject };
     if (Object.entries(expected).some(([key, part]) => !identifier(part) ||
@@ -47,8 +53,11 @@ export function validateNoRunOutcome(raw: unknown, rawAdmission: unknown): NoRun
         notification.evidenceRef !== evidence.ref || !Object.values(notification.route).every(identifier) ||
         notification.content.length > MAX_RENDERED_TEXT) fail('no_run_notification_invalid');
   }
-  if (value.schemaVersion !== 1 && (effects.status !== 'none' || reconciliation.required || notification !== null)) {
+  if ((value.schemaVersion === 2 || value.schemaVersion === 3) && (effects.status !== 'none' || reconciliation.required || notification !== null)) {
     fail('native_read_effects_or_notification');
   }
+  if (value.schemaVersion === 5 && ((effects.status === 'none' && (value.effects.details.length || reconciliation.required)) ||
+    (disposition === 'handled' && (effects.status !== 'known' || reconciliation.required)) ||
+    (effects.status === 'possible' && disposition !== 'unresolved' && disposition !== 'failed'))) fail('native_action_effects_invalid');
   return freeze(value);
 }

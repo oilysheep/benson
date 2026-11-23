@@ -2,7 +2,7 @@ import Type from 'typebox';
 import { createHash } from 'node:crypto';
 import { isDeepStrictEqual } from 'node:util';
 import type { OpenClawPluginToolFactory, OpenClawPluginToolContext } from 'openclaw/plugin-sdk/plugin-entry';
-import { executeJessicaStatusTask, bindJessicaTaskPending, JESSICA_TASK_SCHEMA, JESSICA_TASK_ENTRY_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/task.js';
+import { executeJessicaRoomTask, isJessicaRoomActionRequest, executeJessicaStatusTask, bindJessicaTaskPending, JESSICA_TASK_SCHEMA, JESSICA_TASK_ENTRY_SCHEMA } from '../../../../../agents/jessica-vacuum/lib/task.js';
 import { resolveTrustedIdentity, assertRosterPolicyAgreement, type FamilyRoutes } from '../../../../../agents/jessica-vacuum/lib/identity.js';
 import { authorize, type loadPolicy } from '../../../../../agents/jessica-vacuum/lib/policy.js';
 import { DOMAIN_RESULT_OUTPUT_SCHEMA, DOMAIN_RESULT_V3_OUTPUT_SCHEMA, createCompletionDomainResult, createCompletionDomainResultV3 } from '../../../benson-routing/core/domain-result.js';
@@ -160,6 +160,15 @@ export function createJessicaTaskToolFactory(options: {
   roster: FamilyRoutes; policy: ReturnType<typeof loadPolicy>; read: TaskDependencies['read'];
   jsonResult(value: AnyDomainResult, callId: string, assertCompletion?: () => void): ToolResult;
   clock?: () => Date; resultVersion?: 2 | 3;
+  /** Explicit assembly supplied by the existing native registration in source.
+   * Installation and runtime activation require separate approval.
+   * The host supplies qualified ingress origin or persisted cutoff, never a model epoch. */
+  roomAction?: Pick<Parameters<typeof executeJessicaRoomTask>[1], 'registryConfig'> & {
+    executor: Parameters<typeof executeJessicaRoomTask>[1]['executor'] | ((context: OpenClawPluginToolContext<2>, source: Parameters<typeof executeJessicaRoomTask>[1]['source']) => Parameters<typeof executeJessicaRoomTask>[1]['executor']);
+    source(context: OpenClawPluginToolContext<2>): Promise<Parameters<typeof executeJessicaRoomTask>[1]['source']>;
+    /** Required with ingress source: originating plugin lifetime and current policy. */
+    assertResultCurrent?: () => void;
+  };
   task?: {
     source(context: OpenClawPluginToolContext<2>): CurrentRequestEvidence;
     history?(context: OpenClawPluginToolContext<2>, callId: string): Promise<Parameters<typeof bindJessicaTaskPending>[1] & { assertRetainedCurrent(): void }>;
@@ -177,9 +186,10 @@ export function createJessicaTaskToolFactory(options: {
     let taskStarted = false;
     return {
       name: 'jessica_task', label: 'Jessica task', catalogMode: 'direct-only',
-      description: options.task ? 'Delegate self-contained Jessica intent to its domain; structured status executes deterministically.'
+      description: options.roomAction ? 'Delegate an exact single-room cleaning request without settings. Verified start only; physical completion is unavailable.'
+        : options.task ? 'Delegate self-contained Jessica intent to its domain; structured status executes deterministically.'
         : 'Delegate a Jessica status task to its deterministic domain entry. No device action or child Run.',
-      parameters: options.task ? JESSICA_TASK_ENTRY_SCHEMA : JESSICA_TASK_SCHEMA,
+      parameters: options.task || options.roomAction ? JESSICA_TASK_ENTRY_SCHEMA : JESSICA_TASK_SCHEMA,
       outputSchema: options.resultVersion === 3 ? Type.Union([DOMAIN_RESULT_OUTPUT_SCHEMA, DOMAIN_RESULT_V3_OUTPUT_SCHEMA]) : DOMAIN_RESULT_OUTPUT_SCHEMA, executionMode: 'sequential',
       async execute(callId, request, signal) {
         const authority = { signal: signal ?? AbortSignal.any([]), assertCurrent: () => context.assertInvocationCurrent() };
@@ -197,6 +207,43 @@ export function createJessicaTaskToolFactory(options: {
         if (request !== null && typeof request === 'object' && 'operation' in request) {
           result = await executeJessicaStatusTask(callId, request, { identity, authority, read: options.read,
             ...options.clock ? { clock: options.clock } : {} });
+        } else if (options.roomAction && (!options.task || isJessicaRoomActionRequest(validateTaskEnvelope(request).request))) {
+          const action = options.roomAction, task = validateTaskEnvelope(request);
+          const callerSessionKey = context.sessionKey, callerSessionId = context.sessionId;
+          const callerRoute = { channel: route.channel, accountId: route.accountId, to: route.to, senderId: context.requesterSenderId };
+          if (!callerSessionKey || !callerSessionId) fail('jessica_task_caller_unavailable');
+          const assertCaller = () => {
+            assertInvocationCurrent(authority); authority.signal.throwIfAborted();
+            if (context.sessionKey !== callerSessionKey || context.sessionId !== callerSessionId ||
+              context.requesterSenderId !== callerRoute.senderId || context.deliveryContext?.channel !== callerRoute.channel ||
+              context.deliveryContext.accountId !== callerRoute.accountId || context.deliveryContext.to !== callerRoute.to) fail('jessica_task_caller_changed');
+            const fresh = resolveTrustedIdentity({ ...callerRoute, senderId: callerRoute.senderId ?? '' }, options.roster);
+            if (!isDeepStrictEqual(fresh, identity)) fail('jessica_task_identity_changed');
+            authorize(options.policy, fresh, 'control');
+          };
+          assertCaller();
+          if (taskStarted) fail('jessica_task_already_started');
+          taskStarted = true;
+          const source = await action.source(context); assertCaller();
+          const assertSource = () => {
+            assertCaller();
+            if (('cutoff' in source && source.cutoff.sessionId !== callerSessionId) || source.binding.channel !== 'whatsapp' || source.binding.kind !== 'direct' ||
+              source.binding.accountId !== callerRoute.accountId || source.binding.peerId !== callerRoute.to ||
+              source.binding.requesterId !== (callerRoute.senderId || callerRoute.to) || source.binding.conversationRef !== callerSessionKey) fail('jessica_task_source_mismatch');
+          };
+          assertSource();
+          let retained: (() => void) | undefined;
+          result = await executeJessicaRoomTask(task, { source, roster: options.roster, policyConfig: options.policy,
+            registryConfig: action.registryConfig, executor: typeof action.executor === 'function' ? action.executor(context, source) : action.executor,
+            authority: { signal: authority.signal, assertCurrent: assertSource },
+            ...action.assertResultCurrent ? { assertResultCurrent: action.assertResultCurrent } : {},
+            ...options.clock ? { clock: options.clock } : {}, retainResult(assertCurrent) { retained = assertCurrent; } });
+          assertResultCurrent = () => { assertSource(); if (!retained) fail('jessica_action_result_custody_unavailable'); retained(); };
+          assertCompletionCurrent = 'origin' in source ? () => {
+            if (!retained) fail('jessica_action_result_custody_unavailable');
+            retained();
+          } : assertResultCurrent;
+          assertResultCurrent();
         } else {
           if (!options.task) throw new Error('jessica_task_source_unavailable');
           const callerSessionKey = context.sessionKey, callerSessionId = context.sessionId;

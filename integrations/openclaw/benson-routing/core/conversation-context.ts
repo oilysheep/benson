@@ -1,5 +1,6 @@
 import Type, { type Static } from 'typebox';
 import { isDeepStrictEqual } from 'node:util';
+import { createHash } from 'node:crypto';
 import { object, nullable, IdentifierSchema as Id, ContextJsonSchema, decode, exact, freeze,
   identifier, plain, assertion, synchronous, boundedCopy } from './value.js';
 import { pending as validatePending, type Pending } from './value.js';
@@ -40,6 +41,16 @@ const SnapshotSchema = Type.Union([
 export type ConversationBinding = Static<typeof ConversationBindingSchema>;
 export type ConversationCutoff = Static<typeof ConversationCutoffSchema>;
 export type ConversationTurn = Static<typeof ConversationTurnSchema>;
+const Sha256 = Type.String({ pattern: '^[a-f0-9]{64}$' });
+/** Exact ingress facts, not transcript membership or an execution/delivery grant. */
+export const IngressOriginSchema = object({ version: Type.Literal('2'), kind: Type.Literal('native-ingress'),
+  binding: ConversationBindingSchema, messageId: Id, inputId: Sha256, textHash: Sha256 });
+export type IngressOrigin = Static<typeof IngressOriginSchema>;
+export function ingressInputId(binding: ConversationBinding, messageId: string): string {
+  return createHash('sha256').update(JSON.stringify([binding.channel, binding.accountId, binding.kind,
+    binding.peerId, binding.threadId, binding.requesterId, messageId])).digest('hex');
+}
+export function ingressTextHash(text: string): string { return createHash('sha256').update(text, 'utf8').digest('hex'); }
 
 /** Reconstruct semantic context from the existing complete, authorized Task
  * history. This transient projection is neither a store nor execution authority.
@@ -201,6 +212,11 @@ function unavailable(error: unknown): UnavailableContext {
 }
 /** Adapter-private current-input evidence; this Port grants no effect or reply authority. */
 export type CurrentRequestEvidence = Pick<ConversationEvidence, 'request' | 'binding' | 'currentTurn' | 'assertCurrent' | 'assertAuthorized'>;
+export interface NativeCurrentInputEvidence extends CurrentRequestEvidence {
+  readonly origin: IngressOrigin;
+  /** Original native resolver custody only; never permits another effect. */
+  assertRetainedCurrent(): void;
+}
 export interface CurrentRequestProjection {
   readonly status: 'available';
   readonly scope: 'current-request-only';
